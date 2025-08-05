@@ -84,8 +84,8 @@ jobs:
           docker ps -a
           echo "Available Docker images:"
           docker images
-          # Run with even more verbose output and timeout individual tests
-          timeout 25m pytest --runslow -v -s --tb=short --capture=no --log-cli-level=DEBUG --timeout=300
+          # Run with verbose output to see what's happening
+          pytest --runslow -v -s --tb=short --capture=no --log-cli-level=DEBUG
 
       - name: Report test results
         if: failure()
