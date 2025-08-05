@@ -80,7 +80,12 @@ jobs:
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -v -s --tb=short --capture=no --log-cli-level=INFO
+          echo "Docker containers before tests:"
+          docker ps -a
+          echo "Available Docker images:"
+          docker images
+          # Run with even more verbose output and timeout individual tests
+          timeout 25m pytest --runslow -v -s --tb=short --capture=no --log-cli-level=DEBUG --timeout=300
 
       - name: Report test results
         if: failure()
