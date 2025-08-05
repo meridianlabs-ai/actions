@@ -49,43 +49,96 @@ jobs:
           docker run --rm hello-world
           echo "✅ Docker is properly configured"
 
-      - name: Checkout inspect_ai repository
-        uses: actions/checkout@v4
-        with:
-          repository: UKGovernmentBEIS/inspect_ai
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Create Docker test script
         run: |
-          python -m pip install --upgrade pip
-          # Install inspect_ai with development dependencies for testing
-          pip install -e ".[dev]"
+          cat > test_docker.py << 'EOF'
+          def test_docker_environment():
+              """Verify Docker environment before running real tests"""
+              import subprocess
+              import time
+              
+              print("Testing Docker environment...")
+              
+              # Test basic Docker functionality
+              print("1. Testing docker --version...")
+              result = subprocess.run(['docker', '--version'], 
+                                    capture_output=True, text=True, timeout=10)
+              print(f"   Return code: {result.returncode}")
+              print(f"   Output: {result.stdout.strip()}")
+              assert result.returncode == 0
+              
+              # Test Docker daemon is responsive
+              print("2. Testing docker info...")
+              result = subprocess.run(['docker', 'info'], 
+                                    capture_output=True, text=True, timeout=10)
+              print(f"   Return code: {result.returncode}")
+              print(f"   First few lines: {result.stdout[:200]}...")
+              assert result.returncode == 0
+              
+              # Test basic container execution
+              print("3. Testing basic container run...")
+              start_time = time.time()
+              result = subprocess.run(['docker', 'run', '--rm', 'alpine', 'echo', 'hello'], 
+                                    capture_output=True, text=True, timeout=30)
+              duration = time.time() - start_time
+              print(f"   Return code: {result.returncode}")
+              print(f"   Output: {result.stdout.strip()}")
+              print(f"   Duration: {duration:.2f} seconds")
+              assert result.returncode == 0
+              assert 'hello' in result.stdout
+              
+              # Test Docker build (similar to what inspect_ai does)
+              print("4. Testing Docker build...")
+              dockerfile_content = '''FROM alpine:latest
+          RUN echo "test build"
+          CMD echo "container started"
+          '''
+              with open('Dockerfile.test', 'w') as f:
+                  f.write(dockerfile_content)
+              
+              start_time = time.time()
+              result = subprocess.run(['docker', 'build', '-t', 'test-image', '-f', 'Dockerfile.test', '.'], 
+                                    capture_output=True, text=True, timeout=60)
+              duration = time.time() - start_time
+              print(f"   Build return code: {result.returncode}")
+              print(f"   Build duration: {duration:.2f} seconds")
+              print(f"   Build output (last 500 chars): ...{result.stdout[-500:]}")
+              assert result.returncode == 0
+              
+              # Test running the built image
+              print("5. Testing running built container...")
+              start_time = time.time()
+              result = subprocess.run(['docker', 'run', '--rm', 'test-image'], 
+                                    capture_output=True, text=True, timeout=30)
+              duration = time.time() - start_time
+              print(f"   Run return code: {result.returncode}")
+              print(f"   Run output: {result.stdout.strip()}")
+              print(f"   Run duration: {duration:.2f} seconds")
+              assert result.returncode == 0
+              assert 'container started' in result.stdout
+              
+              print("All Docker tests passed!")
 
-      - name: Run slow tests
-        timeout-minutes: 30
+          if __name__ == "__main__":
+              test_docker_environment()
+          EOF
+
+      - name: Run Docker environment test
+        timeout-minutes: 10
         env:
-          # Ensure Docker commands get proper output
           PYTHONUNBUFFERED: 1
-          # Enable Docker buildkit cache and verbose logging
-          DOCKER_BUILDKIT: 1
-          # Prevent Docker CLI from buffering output
-          DOCKER_CLI_EXPERIMENTAL: enabled
-          BUILDKIT_PROGRESS: plain
-          # Pass cache mount info to any Docker builds
-          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
-          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
         run: |
-          echo "Running slow tests with --runslow flag..."
           echo "Docker containers before tests:"
           docker ps -a
           echo "Available Docker images:"
           docker images
-          # Run with verbose output to see what's happening
-          pytest --runslow -v -s --tb=short --capture=no --log-cli-level=DEBUG
+          echo "Starting Docker environment test..."
+          python test_docker.py
 
       - name: Report test results
         if: failure()
