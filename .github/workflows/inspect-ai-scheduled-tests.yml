@@ -29,13 +29,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Debug Docker availability
+      # Critical: Setup modern Docker build system
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: latest
+          driver-opts: |
+            network=host
+          buildkitd-flags: |
+            --allow-insecure-entitlement security.insecure
+            --allow-insecure-entitlement network.host
+
+      # Verify Docker is working before running tests
+      - name: Verify Docker functionality
         run: |
-          which docker
           docker --version
           docker info
-          ls -la /var/run/docker.sock
-          groups $USER
+          docker buildx version
+          docker run --rm hello-world
+          echo "✅ Docker is properly configured"
 
       - name: Checkout inspect_ai repository
         uses: actions/checkout@v4
@@ -53,12 +65,6 @@ jobs:
           # Install inspect_ai with development dependencies for testing
           pip install -e ".[dev]"
 
-      - name: Verify pytest options
-        run: |
-          echo "Checking available pytest options..."
-          pytest --help | grep -E "(runslow|runapi)" || \
-            echo "Custom pytest options not found, proceeding anyway..."
-
       - name: Run slow tests
         timeout-minutes: 30
         env:
@@ -71,13 +77,27 @@ jobs:
         run: |
           echo "Running slow tests with --runslow flag..."
           pytest --runslow -v -s --tb=short --capture=no --log-cli-level=INFO
-
+        env:
+            # Ensure Docker commands get proper output
+            PYTHONUNBUFFERED: 1
+            # Enable Docker BuildKit for better performance
+            DOCKER_BUILDKIT: 1
+            # Prevent Docker CLI from buffering output
+            DOCKER_CLI_EXPERIMENTAL: enabled
+    
       - name: Report test results
         if: failure()
         run: |
           echo "::error::Slow tests failed! Check the logs above for details."
           echo "Consider reporting to appropriate channels (e.g., Slack)."
           # TODO: Add Slack notification or other reporting mechanism
+
+      - name: Cleanup Docker resources
+        if: always()
+        run: |
+          docker system prune -f
+          docker volume prune -f
+
 
   api-tests:
     if: ${{ inputs.run_api_tests }}
