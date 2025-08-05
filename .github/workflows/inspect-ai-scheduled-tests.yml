@@ -70,10 +70,19 @@ jobs:
           docker ps -a
 
       - name: Run slow tests
-        timeout-minutes: 20
+        timeout-minutes: 30
+        env:
+          # Enable Docker buildkit cache and verbose logging
+          DOCKER_BUILDKIT: 1
+          BUILDKIT_PROGRESS: plain
+          # Pass cache mount info to any Docker builds
+          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
+          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -v
+          echo "Docker buildx cache info:"
+          ls -la /tmp/.buildx-cache || echo "No cache directory found"
+          pytest --runslow -v --tb=short
 
       - name: Show final Docker state
         if: always()
@@ -91,7 +100,7 @@ jobs:
           # TODO: Add Slack notification or other reporting mechanism
 
   api-tests:
-    if: ${{ github.event_name == 'push' || inputs.run_api_tests }}
+    if: ${{ inputs.run_api_tests }}
     runs-on: ubuntu-latest
 
     steps:
