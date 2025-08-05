@@ -165,14 +165,13 @@ jobs:
           # Pass cache mount info to any Docker builds
           BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
+          # pytest --runslow tests/tools/test_inspect_tool_support.py::test_text_editor_user -v -s --tb=short --capture=no --log-cli-level=DEBUG
         run: |
           echo "Running slow tests with --runslow flag..."
           echo "Docker containers before tests:"
           docker ps -a
-          echo "Available Docker images:"
-          docker images
-          # Run specific test that was hanging
-          pytest --runslow tests/tools/test_inspect_tool_support.py::test_text_editor_user -v -s --tb=short --capture=no --log-cli-level=DEBUG
+          # Run slow tests but skip test_agent_human.py
+          pytest --runslow --ignore=tests/agent/test_agent_human.py -v -s --tb=short --capture=no --log-cli-level=DEBUG
 
       - name: Report test results
         if: failure()
