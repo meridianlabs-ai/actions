@@ -66,6 +66,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Create Docker test script
+        run: |
           cat > test_docker.py << 'EOF'
           def test_docker_environment():
               """Verify Docker environment before running real tests"""
