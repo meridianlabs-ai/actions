@@ -171,7 +171,7 @@ jobs:
           echo "Docker containers before tests:"
           docker ps -a
           # Run slow tests but skip test_agent_human.py
-          pytest --runslow --ignore=tests/agent/test_agent_human.py -v -s --tb=short --capture=no --log-cli-level=DEBUG
+          pytest --runslow --ignore=tests/agent/test_agent_human.py
 
       - name: Report test results
         if: failure()
