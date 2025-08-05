@@ -68,8 +68,12 @@ jobs:
       - name: Run slow tests
         timeout-minutes: 30
         env:
+          # Ensure Docker commands get proper output
+          PYTHONUNBUFFERED: 1
           # Enable Docker buildkit cache and verbose logging
           DOCKER_BUILDKIT: 1
+          # Prevent Docker CLI from buffering output
+          DOCKER_CLI_EXPERIMENTAL: enabled
           BUILDKIT_PROGRESS: plain
           # Pass cache mount info to any Docker builds
           BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
@@ -77,14 +81,7 @@ jobs:
         run: |
           echo "Running slow tests with --runslow flag..."
           pytest --runslow -v -s --tb=short --capture=no --log-cli-level=INFO
-        env:
-            # Ensure Docker commands get proper output
-            PYTHONUNBUFFERED: 1
-            # Enable Docker BuildKit for better performance
-            DOCKER_BUILDKIT: 1
-            # Prevent Docker CLI from buffering output
-            DOCKER_CLI_EXPERIMENTAL: enabled
-    
+
       - name: Report test results
         if: failure()
         run: |
@@ -97,7 +94,6 @@ jobs:
         run: |
           docker system prune -f
           docker volume prune -f
-
 
   api-tests:
     if: ${{ inputs.run_api_tests }}
