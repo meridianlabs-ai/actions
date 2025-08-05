@@ -1,24 +1,24 @@
 ---
 name: Inspect AI Scheduled Tests
 
-'on':
+"on":
   schedule:
     # Run daily at 2 AM UTC
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
   push:
     branches:
-      - '**'  # Run on all branches for testing
+      - "**" # Run on all branches for testing
     # TODO: Comment out the push trigger before merging to main
     # This is only used during action development cycle
   workflow_dispatch:
     inputs:
       run_slow_tests:
-        description: 'Run slow tests'
+        description: "Run slow tests"
         required: false
         default: true
         type: boolean
       run_api_tests:
-        description: 'Run API tests (requires secrets)'
+        description: "Run API tests (requires secrets)"
         required: false
         default: false
         type: boolean
@@ -29,6 +29,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug Docker availability
+        run: |
+          which docker
+          docker --version
+          docker info
+          ls -la /var/run/docker.sock
+          groups $USER
+
       - name: Checkout inspect_ai repository
         uses: actions/checkout@v4
         with:
@@ -37,18 +45,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Cache Docker layers
-        uses: actions/cache@v3
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -62,13 +59,6 @@ jobs:
           pytest --help | grep -E "(runslow|runapi)" || \
             echo "Custom pytest options not found, proceeding anyway..."
 
-      - name: Show initial Docker state
-        run: |
-          echo "Docker images before tests:"
-          docker images
-          echo "Docker containers before tests:"
-          docker ps -a
-
       - name: Run slow tests
         timeout-minutes: 30
         env:
@@ -80,17 +70,7 @@ jobs:
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
         run: |
           echo "Running slow tests with --runslow flag..."
-          echo "Docker buildx cache info:"
-          ls -la /tmp/.buildx-cache || echo "No cache directory found"
           pytest --runslow -v -s --tb=short --capture=no --log-cli-level=INFO
-
-      - name: Show final Docker state
-        if: always()
-        run: |
-          echo "Docker images after tests:"
-          docker images
-          echo "Docker containers after tests:"
-          docker ps -a
 
       - name: Report test results
         if: failure()
@@ -112,7 +92,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
