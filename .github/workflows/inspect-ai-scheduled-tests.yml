@@ -3,8 +3,8 @@ name: Inspect AI Scheduled Tests
 
 "on":
   schedule:
-    # Run daily at 2 AM UTC
-    - cron: "0 2 * * *"
+    # Run every 12 hours
+    - cron: "0 */12 * * *"
   push:
     branches:
       - "**" # Run on all branches for testing
@@ -16,11 +16,6 @@ name: Inspect AI Scheduled Tests
         description: "Run slow tests"
         required: false
         default: true
-        type: boolean
-      run_api_tests:
-        description: "Run API tests (requires secrets)"
-        required: false
-        default: false
         type: boolean
 
 jobs:
@@ -40,19 +35,11 @@ jobs:
             --allow-insecure-entitlement security.insecure
             --allow-insecure-entitlement network.host
 
-      # Verify Docker is working before running tests
-      - name: Verify Docker functionality
-        run: |
-          docker --version
-          docker info
-          docker buildx version
-          docker run --rm hello-world
-          echo "✅ Docker is properly configured"
-
       - name: Checkout inspect_ai repository
         uses: actions/checkout@v4
         with:
           repository: UKGovernmentBEIS/inspect_ai
+          ref: feature/slowtests
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -69,11 +56,11 @@ jobs:
         timeout-minutes: 30
         env:
           # Ensure Docker commands get proper output
-          PYTHONUNBUFFERED: 1
+          # PYTHONUNBUFFERED: 1
           # Enable Docker buildkit cache and verbose logging
-          DOCKER_BUILDKIT: 1
           # Prevent Docker CLI from buffering output
-          DOCKER_CLI_EXPERIMENTAL: enabled
+          # DOCKER_CLI_EXPERIMENTAL: enabled
+          DOCKER_BUILDKIT: 1
           BUILDKIT_PROGRESS: plain
           # Pass cache mount info to any Docker builds
           BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
@@ -81,8 +68,6 @@ jobs:
           # pytest --runslow tests/tools/test_inspect_tool_support.py::test_text_editor_user -v -s --tb=short --capture=no --log-cli-level=DEBUG
         run: |
           echo "Running slow tests with --runslow flag..."
-          echo "Docker containers before tests:"
-          docker ps -a
           pytest --runslow -m slow --ignore=tests/agent/test_agent_human.py
 
       - name: Report test results
