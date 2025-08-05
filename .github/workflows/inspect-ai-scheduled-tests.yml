@@ -49,13 +49,23 @@ jobs:
           docker run --rm hello-world
           echo "✅ Docker is properly configured"
 
+      - name: Checkout inspect_ai repository
+        uses: actions/checkout@v4
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: Create Docker test script
+      - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
+          # Install inspect_ai with development dependencies for testing
+          pip install -e ".[dev]"
+
+      - name: Create Docker test script
           cat > test_docker.py << 'EOF'
           def test_docker_environment():
               """Verify Docker environment before running real tests"""
