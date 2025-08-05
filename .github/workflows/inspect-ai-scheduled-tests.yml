@@ -1,0 +1,105 @@
+---
+name: Inspect AI Scheduled Tests
+
+'on':
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      run_slow_tests:
+        description: 'Run slow tests'
+        required: false
+        default: true
+        type: boolean
+      run_api_tests:
+        description: 'Run API tests (requires secrets)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  slow-tests:
+    if: ${{ github.event_name == 'schedule' || inputs.run_slow_tests }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout inspect_ai repository
+        uses: actions/checkout@v4
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install inspect_ai with development dependencies for testing
+          pip install -e ".[dev]"
+
+      - name: Verify pytest options
+        run: |
+          echo "Checking available pytest options..."
+          pytest --help | grep -E "(runslow|runapi)" || \
+            echo "Custom pytest options not found, proceeding anyway..."
+
+      - name: Run slow tests
+        timeout-minutes: 60
+        run: |
+          echo "Running slow tests with --runslow flag..."
+          pytest --runslow -v
+
+      - name: Report test results
+        if: failure()
+        run: |
+          echo "::error::Slow tests failed! Check the logs above for details."
+          echo "Consider reporting to appropriate channels (e.g., Slack)."
+          # TODO: Add Slack notification or other reporting mechanism
+
+  api-tests:
+    if: ${{ inputs.run_api_tests }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout inspect_ai repository
+        uses: actions/checkout@v4
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install inspect_ai with development dependencies for testing
+          pip install -e ".[dev]"
+
+      - name: Verify pytest options
+        run: |
+          echo "Checking available pytest options..."
+          pytest --help | grep -E "(runslow|runapi)" || \
+            echo "Custom pytest options not found, proceeding anyway..."
+
+      - name: Run API tests
+        timeout-minutes: 120
+        env:
+          # Add API keys as needed - these should be stored as GitHub secrets
+          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Add other API keys as needed
+        run: |
+          echo "Running API tests with --runapi flag..."
+          pytest --runapi -v
+
+      - name: Report test results
+        if: failure()
+        run: |
+          echo "::error::API tests failed! Check the logs above for details."
+          echo "Consider reporting to appropriate channels (e.g., Slack)."
+          # TODO: Add Slack notification or other reporting mechanism
