@@ -82,7 +82,7 @@ jobs:
           echo "Running slow tests with --runslow flag..."
           echo "Docker buildx cache info:"
           ls -la /tmp/.buildx-cache || echo "No cache directory found"
-          pytest --runslow -v --tb=short
+          pytest --runslow -v -s --tb=short --capture=no --log-cli-level=INFO
 
       - name: Show final Docker state
         if: always()
