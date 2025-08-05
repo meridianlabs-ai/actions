@@ -83,7 +83,7 @@ jobs:
               # Test basic container execution
               print("3. Testing basic container run...")
               start_time = time.time()
-              result = subprocess.run(['docker', 'run', '--rm', 'alpine', 'echo', 'hello'], 
+              result = subprocess.run(['docker', 'run', '--rm', 'python:3.12-bookworm', 'echo', 'hello'], 
                                     capture_output=True, text=True, timeout=30)
               duration = time.time() - start_time
               print(f"   Return code: {result.returncode}")
