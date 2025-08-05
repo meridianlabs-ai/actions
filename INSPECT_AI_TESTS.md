@@ -1,17 +1,19 @@
 # Inspect AI Scheduled Tests
 
-This repository contains a GitHub Actions workflow that runs [inspect_ai](https://github.com/UKGovernmentBEIS/inspect_ai) slow tests on a regular schedule.
+This repository contains a GitHub Actions workflow that runs [inspect_ai](https://github.com/UKGovernmentBEIS/inspect_ai) tests on a regular schedule and on-demand.
 
 ## Workflow: `inspect-ai-scheduled-tests.yml`
 
 ### Purpose
 
-The workflow addresses the need to run inspect_ai tests that are excluded from the regular CI flow because they are slow running tests (`--runslow`).
+The workflow addresses the need to run inspect_ai tests that are excluded from the regular CI flow:
+- **Slow tests** (`--runslow`): Long-running tests that are too slow for regular CI
+- **API tests** (`--runapi`): Tests that require external API credentials or secrets
 
 ### Schedule
 
-- **Automatic**: Runs daily at 2 AM UTC
-- **Manual**: Can be triggered manually via GitHub Actions UI
+- **Automatic**: Slow tests run daily at 2 AM UTC
+- **Manual**: Both test types can be triggered manually via GitHub Actions UI
 
 ### Jobs
 
@@ -21,9 +23,20 @@ The workflow addresses the need to run inspect_ai tests that are excluded from t
 - **Timeout**: 60 minutes
 - **Dependencies**: Installs inspect_ai with development dependencies
 
+#### API Tests Job
+- **Trigger**: Only runs when manually triggered with `run_api_tests: true`
+- **Purpose**: Executes tests that require API access using `pytest --runapi`
+- **Timeout**: 30 minutes
+- **Dependencies**: Installs inspect_ai with development dependencies
+- **Requirements**: May require repository secrets for API credentials
+
 ### Required Setup
 
+#### Slow Tests
 No additional setup is required for slow tests. The workflow will automatically install inspect_ai with development dependencies and run the slow tests.
+
+#### API Tests  
+API tests may require repository secrets to be configured if the tests need external API credentials. Check the inspect_ai repository documentation for specific requirements.
 
 ### Manual Execution
 
@@ -32,8 +45,9 @@ To run the workflow manually:
 1. Go to the Actions tab in your GitHub repository
 2. Select "Inspect AI Scheduled Tests"
 3. Click "Run workflow"
-4. Choose option:
+4. Choose options:
    - **Run slow tests**: Execute slow tests (default: true)
+   - **Run API tests**: Execute API tests (default: false, requires secrets)
 
 ### Error Reporting
 
