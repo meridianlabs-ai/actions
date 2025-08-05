@@ -94,7 +94,7 @@ jobs:
               
               # Test Docker build (similar to what inspect_ai does)
               print("4. Testing Docker build...")
-              dockerfile_content = '''FROM alpine:latest
+              dockerfile_content = '''FROM python:3.12-bookworm
           RUN echo "test build"
           CMD echo "container started"
           '''
