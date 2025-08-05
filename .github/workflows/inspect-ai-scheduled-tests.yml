@@ -70,7 +70,7 @@ jobs:
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -v -s --tb=short --capture=no --log-cli-level=INFO
+          pytest --runslow -v
 
       - name: Report test results
         if: failure()
