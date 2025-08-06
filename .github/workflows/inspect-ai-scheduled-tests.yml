@@ -46,6 +46,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -65,7 +73,8 @@ jobs:
           # Pass cache mount info to any Docker builds
           BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
-          # pytest --runslow tests/tools/test_inspect_tool_support.py::test_text_editor_user -v -s --tb=short --capture=no --log-cli-level=DEBUG
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
         run: |
           echo "Running slow tests with --runslow flag..."
           pytest --runslow -m slow --ignore=tests/agent/test_agent_human.py
