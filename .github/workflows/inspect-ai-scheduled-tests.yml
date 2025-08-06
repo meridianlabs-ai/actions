@@ -65,21 +65,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Install inspect_ai with development dependencies for testing
-          pip install -e ".[dev]"
+          pip install --only-binary=all -e ".[dev]"
 
       - name: Run slow tests
-        timeout-minutes: 30
+        timeout-minutes: 180
         env:
-          # Ensure Docker commands get proper output
-          # PYTHONUNBUFFERED: 1
-          # Enable Docker buildkit cache and verbose logging
-          # Prevent Docker CLI from buffering output
-          # DOCKER_CLI_EXPERIMENTAL: enabled
           DOCKER_BUILDKIT: 1
           BUILDKIT_PROGRESS: plain
-          # Pass cache mount info to any Docker builds
           BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
         run: |
