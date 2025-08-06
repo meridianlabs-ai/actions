@@ -77,7 +77,7 @@ jobs:
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -m slow --ignore=tests/agent/test_agent_human.py
+          pytest --runslow -m slow --runapi --ignore=tests/agent/test_agent_human.py -n auto
 
       - name: Report test results
         if: failure()
