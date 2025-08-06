@@ -39,7 +39,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: bugfix/testtweak
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -85,9 +84,7 @@ jobs:
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          echo "OPENAI_API_KEY is set: $([[ -n "$OPENAI_API_KEY" ]] && echo "YES" || echo "NO")"
-          echo "OPENAI_API_KEY length: ${#OPENAI_API_KEY}"
-          pytest --runslow -m slow --runapi --ignore=tests/agent/test_agent_human.py
+          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py
 
       - name: Report test results
         if: failure()
