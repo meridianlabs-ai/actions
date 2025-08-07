@@ -25,6 +25,12 @@ jobs:
 
     steps:
       - name: Debug API key availability
+        env:
+          # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
         run: |
           if [ -z "$GROK_API_KEY" ]; then
             echo "GROK_API_KEY is not set"
