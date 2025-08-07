@@ -24,22 +24,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Debug API key availability
-        env:
-          # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
-          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
-        run: |
-          if [ -z "$GROK_API_KEY" ]; then
-            echo "GROK_API_KEY is not set"
-          elif [ "$GROK_API_KEY" = "***" ]; then
-            echo "GROK_API_KEY is masked (secret not accessible)"
-          else
-            echo "GROK_API_KEY is available (length: ${#GROK_API_KEY})"
-          fi
-
       # Critical: Setup modern Docker build system
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -55,7 +39,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: bugfix/moreaction
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -95,11 +78,10 @@ jobs:
           # GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow --runapi -m api --ignore=tests/agent/test_agent_human.py
+          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py
 
       - name: Report test results
         if: failure()
