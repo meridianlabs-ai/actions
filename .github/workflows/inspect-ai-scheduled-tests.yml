@@ -65,7 +65,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Install inspect_ai with development dependencies for testing
-          pip install --only-binary=all -e ".[dev]"
+          pip install --only-binary=all ".[dev]"
 
       - name: Run slow tests
         timeout-minutes: 180
