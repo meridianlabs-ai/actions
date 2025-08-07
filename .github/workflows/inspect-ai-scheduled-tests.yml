@@ -55,6 +55,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: UKGovernmentBEIS/inspect_ai
+          ref: bugfix/moreaction
 
       - name: Set up Python
         uses: actions/setup-python@v4
