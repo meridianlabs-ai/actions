@@ -8,8 +8,7 @@ name: Inspect AI Scheduled Tests
   push:
     branches:
       - "**" # Run on all branches for testing
-    # TODO: Comment out the push trigger before merging to main
-    # This is only used during action development cycle
+    # This is valuable during action development cycle
   workflow_dispatch:
     inputs:
       run_slow_tests:
