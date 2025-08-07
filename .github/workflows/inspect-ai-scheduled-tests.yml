@@ -89,15 +89,12 @@ jobs:
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
           # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          # GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
         run: |
-          cd ${{ github.workspace }}
-          pwd
-          ls -la
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow --runapi -m api --ignore=tests/agent/test_agent_human.py
+          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py
 
       - name: Report test results to Slack
         if: always()
