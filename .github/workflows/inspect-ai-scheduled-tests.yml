@@ -24,6 +24,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug API key availability
+        run: |
+          if [ -z "$GROK_API_KEY" ]; then
+            echo "GROK_API_KEY is not set"
+          elif [ "$GROK_API_KEY" = "***" ]; then
+            echo "GROK_API_KEY is masked (secret not accessible)"
+          else
+            echo "GROK_API_KEY is available (length: ${#GROK_API_KEY})"
+          fi
+
       # Critical: Setup modern Docker build system
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
