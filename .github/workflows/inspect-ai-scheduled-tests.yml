@@ -103,7 +103,7 @@ jobs:
           pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn"
 
       - name: Report test results to Slack
-        if: always()
+        if: always() && steps.inspect_commit.outputs.ref == 'main'
         uses: slackapi/slack-github-action@v1.24.0
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
