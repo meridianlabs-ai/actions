@@ -100,7 +100,7 @@ jobs:
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn"
+          pytest -v -s --log-cli-level=INFO --runslow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn"
 
       - name: Report test results to Slack
         if: always() && steps.inspect_commit.outputs.ref == 'main'
