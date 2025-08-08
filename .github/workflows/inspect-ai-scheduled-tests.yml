@@ -61,10 +61,12 @@ jobs:
             ${{ runner.os }}-wheels-
 
       - name: Install dependencies
+        # -e is required so that the tests can find dependent media files
+        # that are not part of the package.
         run: |
           python -m pip install --upgrade pip
           # Install inspect_ai with development dependencies for testing
-          pip install --only-binary=all ".[dev]"
+          pip install --only-binary=all -e ".[dev]"
 
       - name: Run slow tests
         timeout-minutes: 180
