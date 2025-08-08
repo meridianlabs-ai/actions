@@ -21,6 +21,11 @@ name: Inspect AI Scheduled Tests
         required: false
         default: false
         type: boolean
+      inspect_ai_ref:
+        description: "inspect_ai branch/tag/commit to checkout"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   slow-tests:
@@ -43,12 +48,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ inputs.inspect_ai_ref || '' }}
 
       - name: Get inspect_ai commit info
         id: inspect_commit
         run: |
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "ref=${{ inputs.inspect_ai_ref || 'main' }}" >> $GITHUB_OUTPUT
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -129,6 +136,10 @@ jobs:
                     {
                       "type": "mrkdwn",
                       "text": "*Workflow:*\n<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Tested:*\n<https://github.com/UKGovernmentBEIS/inspect_ai/commit/${{ steps.inspect_commit.outputs.sha }}|inspect_ai@${{ steps.inspect_commit.outputs.ref }}#${{ steps.inspect_commit.outputs.short_sha }}>"
                     }
                   ]
                 },
@@ -144,7 +155,7 @@ jobs:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "Actor: ${{ github.actor }} | Tested: <https://github.com/UKGovernmentBEIS/inspect_ai/commit/${{ steps.inspect_commit.outputs.sha }}|inspect_ai@${{ steps.inspect_commit.outputs.short_sha }}>"
+                      "text": "Actor: ${{ github.actor }}"
                     }
                   ]
                 }
