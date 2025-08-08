@@ -38,7 +38,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: bugfix/tests
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -77,9 +76,9 @@ jobs:
           BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
           BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
           # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
         run: |
           echo "Running slow tests with --runslow flag..."
