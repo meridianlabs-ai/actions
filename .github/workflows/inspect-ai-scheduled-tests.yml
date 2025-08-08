@@ -33,6 +33,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug env
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+        run: |
+          echo "ANTHROPIC_API_KEY length: ${#ANTHROPIC_API_KEY}"
+          echo "ANTHROPIC_API_KEY value: $ANTHROPIC_API_KEY"
+          echo "Full environment:"
+          env
+
       # Critical: Setup modern Docker build system
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
