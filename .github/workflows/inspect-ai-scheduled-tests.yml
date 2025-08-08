@@ -44,6 +44,12 @@ jobs:
         with:
           repository: UKGovernmentBEIS/inspect_ai
 
+      - name: Get inspect_ai commit info
+        id: inspect_commit
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -138,7 +144,7 @@ jobs:
                   "elements": [
                     {
                       "type": "mrkdwn",
-                      "text": "Actor: ${{ github.actor }} | Commit: <https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>"
+                      "text": "Actor: ${{ github.actor }} | Tested: <https://github.com/UKGovernmentBEIS/inspect_ai/commit/${{ steps.inspect_commit.outputs.sha }}|inspect_ai@${{ steps.inspect_commit.outputs.short_sha }}>"
                     }
                   ]
                 }
