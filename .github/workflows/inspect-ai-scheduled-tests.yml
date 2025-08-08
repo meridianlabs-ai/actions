@@ -16,6 +16,11 @@ name: Inspect AI Scheduled Tests
         required: false
         default: true
         type: boolean
+      test_slack_access:
+        description: "Test Slack channel access"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   slow-tests:
@@ -96,3 +101,31 @@ jobs:
         run: |
           docker system prune -f
           docker volume prune -f
+
+  test-slack-access:
+    if: ${{ inputs.test_slack_access }}
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Test Slack Channel Access
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          slack-message: |
+            🧪 **Slack Integration Test**
+            
+            This is a test message to verify GitHub Actions can successfully post to this Slack channel.
+            
+            • Repository: ${{ github.repository }}
+            • Branch: ${{ github.ref_name }}  
+            • Actor: ${{ github.actor }}
+            • Run ID: ${{ github.run_id }}
+            
+            If you see this message, the integration is working correctly! ✅
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          
+      - name: Test Result
+        run: |
+          echo "✅ Slack channel access test completed successfully!"
+          echo "Check your Slack channel for the test message."
