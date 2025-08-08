@@ -31,6 +31,9 @@ jobs:
   slow-tests:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.run_slow_tests }}
     runs-on: ubuntu-latest
+    container: 
+      image: ghcr.io/${{ github.repository_owner }}/inspect-ai-runner:latest
+      options: --privileged -v /var/run/docker.sock:/var/run/docker.sock
 
     steps:
       # Critical: Setup modern Docker build system
@@ -44,46 +47,26 @@ jobs:
             --allow-insecure-entitlement security.insecure
             --allow-insecure-entitlement network.host
 
-      - name: Checkout inspect_ai repository
-        uses: actions/checkout@v4
-        with:
-          repository: UKGovernmentBEIS/inspect_ai
-          ref: ${{ inputs.inspect_ai_ref || '' }}
+      - name: Update inspect_ai repository
+        run: |
+          cd /workspace
+          git config --global --add safe.directory /workspace
+          git fetch origin
+          git checkout ${{ inputs.inspect_ai_ref || 'main' }}
+          git pull origin ${{ inputs.inspect_ai_ref || 'main' }}
 
       - name: Get inspect_ai commit info
         id: inspect_commit
         run: |
+          cd /workspace
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "ref=${{ inputs.inspect_ai_ref || 'main' }}" >> $GITHUB_OUTPUT
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Cache built wheels
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip/wheels
-          key: ${{ runner.os }}-wheels-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-wheels-
-
-      - name: Install dependencies
-        # -e is required so that the tests can find dependent media files
-        # that are not part of the package.
+      - name: Install/update dependencies
         run: |
+          cd /workspace
           python -m pip install --upgrade pip
-          # Install inspect_ai with development dependencies for testing
           pip install --only-binary=all -e ".[dev]"
 
       - name: Run slow tests
@@ -99,6 +82,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
         run: |
+          cd /workspace
           echo "Running slow tests with --runslow flag..."
           pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn"
 

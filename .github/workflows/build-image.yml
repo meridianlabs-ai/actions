@@ -1,0 +1,47 @@
+name: Build Custom Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      inspect_ai_ref:
+        description: "inspect_ai branch/tag/commit to build into image"
+        required: false
+        default: "main"
+        type: string
+  schedule:
+    - cron: "0 6 * * 1"  # Weekly on Monday at 6 AM UTC
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/inspect-ai-runner:latest
+            ghcr.io/${{ github.repository_owner }}/inspect-ai-runner:${{ inputs.inspect_ai_ref || 'main' }}
+          build-args: |
+            INSPECT_AI_REF=${{ inputs.inspect_ai_ref || 'main' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
