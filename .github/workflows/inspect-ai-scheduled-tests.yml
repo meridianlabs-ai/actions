@@ -103,7 +103,7 @@ jobs:
           docker volume prune -f
 
   test-slack-access:
-    if: ${{ inputs.test_slack_access }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_slack_access }}
     runs-on: ubuntu-latest
     
     steps:
