@@ -3,8 +3,8 @@ name: Inspect AI Scheduled Tests
 
 "on":
   schedule:
-    # Run every 12 hours
-    - cron: "0 */12 * * *"
+    # Run every 3 hours
+    - cron: "0 */3 * * *"
   push:
     branches:
       - "**" # Run on all branches for testing
