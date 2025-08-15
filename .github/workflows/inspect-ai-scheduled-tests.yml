@@ -57,12 +57,47 @@ jobs:
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "ref=${{ inputs.inspect_ai_ref || 'main' }}" >> $GITHUB_OUTPUT
 
+      - name: Check if commit was already tested
+        id: check_commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          current_sha="${{ steps.inspect_commit.outputs.sha }}"
+          
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+            echo "Not a scheduled run, proceeding with tests"
+            exit 0
+          fi
+          
+          # Get last successful workflow run for this workflow
+          last_run=$(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
+            --jq '.workflow_runs[] | select(.conclusion == "success") | .head_sha' \
+            --paginate | head -1)
+          
+          if [ -n "$last_run" ] && [ "$current_sha" = "$last_run" ]; then
+            echo "skip_tests=true" >> $GITHUB_OUTPUT
+            echo "Commit $current_sha was already tested successfully, skipping"
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+            echo "New commit $current_sha or no previous successful run found, proceeding with tests"
+          fi
+
+      - name: Skip notification
+        if: steps.check_commit.outputs.skip_tests == 'true'
+        run: |
+          echo "🔄 Skipping tests - no changes detected in inspect_ai repository"
+          echo "Last tested commit: ${{ steps.inspect_commit.outputs.sha }}"
+          echo "Current commit: ${{ steps.inspect_commit.outputs.sha }}"
+
       - name: Set up Python
+        if: steps.check_commit.outputs.skip_tests != 'true'
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
       - name: Cache pip dependencies
+        if: steps.check_commit.outputs.skip_tests != 'true'
         uses: actions/cache@v3
         with:
           path: ~/.cache/pip
@@ -71,6 +106,7 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Cache built wheels
+        if: steps.check_commit.outputs.skip_tests != 'true'
         uses: actions/cache@v3
         with:
           path: ~/.cache/pip/wheels
@@ -79,6 +115,7 @@ jobs:
             ${{ runner.os }}-wheels-
 
       - name: Install dependencies
+        if: steps.check_commit.outputs.skip_tests != 'true'
         # -e is required so that the tests can find dependent media files
         # that are not part of the package.
         run: |
@@ -87,6 +124,7 @@ jobs:
           pip install --only-binary=all -e ".[dev]"
 
       - name: Run slow tests
+        if: steps.check_commit.outputs.skip_tests != 'true'
         timeout-minutes: 180
         env:
           DOCKER_BUILDKIT: 1
@@ -101,6 +139,7 @@ jobs:
         run: |
           echo "Running slow tests with --runslow flag..."
           pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn"
+
 
       - name: Report test results to Slack
         if: always() && steps.inspect_commit.outputs.ref == 'main'
