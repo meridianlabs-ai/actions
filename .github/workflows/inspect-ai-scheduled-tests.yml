@@ -179,7 +179,7 @@ jobs:
           path: .last-inspect-ai-sha/last_sha.txt
 
       - name: Report test results to Slack
-        if: always() && steps.inspect_commit.outputs.ref == 'main'
+        if: always() && steps.inspect_commit.outputs.ref == 'main' && steps.check_commit.outputs.skip_tests != 'true' && steps.check_commit_artifact.outputs.skip_tests != 'true'
         uses: slackapi/slack-github-action@v1.24.0
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
