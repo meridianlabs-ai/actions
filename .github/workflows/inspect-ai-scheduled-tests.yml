@@ -3,8 +3,8 @@ name: Inspect AI Scheduled Tests
 
 "on":
   schedule:
-    # Run every 3 hours
-    - cron: "0 */3 * * *"
+    # Run every 2 hours
+    - cron: "0 */2 * * *"
   push:
     branches:
       - "**" # Run on all branches for testing
@@ -44,6 +44,14 @@ jobs:
             --allow-insecure-entitlement security.insecure
             --allow-insecure-entitlement network.host
 
+      - name: Download last tested inspect_ai SHA artifact
+        if: github.event_name == 'schedule'
+        uses: actions/download-artifact@v4
+        with:
+          name: last-inspect-ai-sha
+          path: .last-inspect-ai-sha
+        continue-on-error: true
+
       - name: Checkout inspect_ai repository
         uses: actions/checkout@v4
         with:
@@ -57,24 +65,41 @@ jobs:
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "ref=${{ inputs.inspect_ai_ref || 'main' }}" >> $GITHUB_OUTPUT
 
+      - name: Check if commit was already tested (artifact)
+        id: check_commit_artifact
+        if: github.event_name == 'schedule'
+        run: |
+          current_sha="${{ steps.inspect_commit.outputs.sha }}"
+          last_sha_file=".last-inspect-ai-sha/last_sha.txt"
+          if [ -f "$last_sha_file" ]; then
+            last_sha=$(cat "$last_sha_file")
+            if [ "$current_sha" = "$last_sha" ]; then
+              echo "skip_tests=true" >> $GITHUB_OUTPUT
+              echo "Commit $current_sha was already tested successfully (artifact), skipping"
+              exit 0
+            fi
+          fi
+          echo "skip_tests=false" >> $GITHUB_OUTPUT
+          echo "New commit $current_sha or no previous successful run found (artifact), proceeding with tests"
+
       - name: Check if commit was already tested
         id: check_commit
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           current_sha="${{ steps.inspect_commit.outputs.sha }}"
-          
+
           if [ "${{ github.event_name }}" != "schedule" ]; then
             echo "skip_tests=false" >> $GITHUB_OUTPUT
             echo "Not a scheduled run, proceeding with tests"
             exit 0
           fi
-          
+
           # Get last successful workflow run for this workflow
           last_run=$(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
             --jq '.workflow_runs[] | select(.conclusion == "success") | .head_sha' \
             --paginate | head -1)
-          
+
           if [ -n "$last_run" ] && [ "$current_sha" = "$last_run" ]; then
             echo "skip_tests=true" >> $GITHUB_OUTPUT
             echo "Commit $current_sha was already tested successfully, skipping"
@@ -84,7 +109,7 @@ jobs:
           fi
 
       - name: Skip notification
-        if: steps.check_commit.outputs.skip_tests == 'true'
+        if: github.event_name == 'schedule' && (steps.check_commit.outputs.skip_tests == 'true' || steps.check_commit_artifact.outputs.skip_tests == 'true')
         run: |
           echo "🔄 Skipping tests - no changes detected in inspect_ai repository"
           echo "Last tested commit: ${{ steps.inspect_commit.outputs.sha }}"
@@ -140,9 +165,21 @@ jobs:
           echo "Running slow tests with --runslow flag..."
           pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn"
 
+      - name: Save tested inspect_ai SHA as artifact
+        if: success() && github.event_name == 'schedule'
+        run: |
+          mkdir -p .last-inspect-ai-sha
+          echo "${{ steps.inspect_commit.outputs.sha }}" > .last-inspect-ai-sha/last_sha.txt
+
+      - name: Upload tested SHA artifact
+        if: success() && github.event_name == 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: last-inspect-ai-sha
+          path: .last-inspect-ai-sha/last_sha.txt
 
       - name: Report test results to Slack
-        if: always() && steps.inspect_commit.outputs.ref == 'main'
+        if: always() && steps.inspect_commit.outputs.ref == 'main' && steps.check_commit.outputs.skip_tests != 'true' && steps.check_commit_artifact.outputs.skip_tests != 'true'
         uses: slackapi/slack-github-action@v1.24.0
         with:
           channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
