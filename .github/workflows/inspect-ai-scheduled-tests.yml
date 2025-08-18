@@ -84,6 +84,17 @@ jobs:
         id: check_commit_artifact
         run: |
           current_sha="${{ steps.inspect_commit.outputs.sha }}"
+
+          # Debug: List what's actually in the artifact directory
+          echo "=== Debugging artifact directory structure ==="
+          if [ -d ".last-inspect-ai-sha" ]; then
+            echo "Contents of .last-inspect-ai-sha:"
+            find .last-inspect-ai-sha -type f -ls
+          else
+            echo "Directory .last-inspect-ai-sha does not exist"
+          fi
+          echo "=============================================="
+
           # Check for artifact file in different possible locations
           last_sha_file=""
           if [ -f ".last-inspect-ai-sha/last_sha.txt" ]; then
