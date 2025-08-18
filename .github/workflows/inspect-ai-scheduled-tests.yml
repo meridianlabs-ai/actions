@@ -45,6 +45,7 @@ jobs:
             --allow-insecure-entitlement network.host
 
       - name: Download last tested inspect_ai SHA artifact from previous run
+        id: download_artifact
         run: |
           # Find the most recent successful run that has the artifact from the actions repository
           RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
@@ -62,12 +63,24 @@ jobs:
               echo "Successfully downloaded artifact from run $RUN_ID"
               echo "Directory contents after download:"
               find .last-inspect-ai-sha -ls
+              
+              # Read the SHA immediately and store it as output (before checkout wipes it)
+              if [ -f ".last-inspect-ai-sha/last_sha.txt" ]; then
+                last_sha=$(cat ".last-inspect-ai-sha/last_sha.txt")
+                echo "last_sha=$last_sha" >> $GITHUB_OUTPUT
+                echo "Found previously tested commit: $last_sha (from run $RUN_ID)"
+              else
+                echo "last_sha=" >> $GITHUB_OUTPUT
+                echo "Downloaded artifact but could not find last_sha.txt file"
+              fi
             else
+              echo "last_sha=" >> $GITHUB_OUTPUT
               echo "Artifact download failed for run $RUN_ID"
               echo "Let's check what artifacts are available in that run:"
               gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts --jq '.artifacts[] | {name: .name, expired: .expired}'
             fi
           else
+            echo "last_sha=" >> $GITHUB_OUTPUT
             echo "No previous successful runs found"
           fi
         env:
@@ -91,30 +104,11 @@ jobs:
         id: check_commit_artifact
         run: |
           current_sha="${{ steps.inspect_commit.outputs.sha }}"
+          last_sha="${{ steps.download_artifact.outputs.last_sha }}"
 
-          # Debug: List what's actually in the artifact directory
-          echo "=== Debugging artifact directory structure ==="
-          if [ -d ".last-inspect-ai-sha" ]; then
-            echo "Contents of .last-inspect-ai-sha:"
-            find .last-inspect-ai-sha -type f -ls
-          else
-            echo "Directory .last-inspect-ai-sha does not exist"
-          fi
-          echo "=============================================="
+          echo "Current commit: $current_sha"
 
-          # Check for artifact file in different possible locations
-          last_sha_file=""
-          if [ -f ".last-inspect-ai-sha/last_sha.txt" ]; then
-            last_sha_file=".last-inspect-ai-sha/last_sha.txt"
-          elif [ -f ".last-inspect-ai-sha/last-inspect-ai-sha/last_sha.txt" ]; then
-            last_sha_file=".last-inspect-ai-sha/last-inspect-ai-sha/last_sha.txt"
-          fi
-
-          echo "last_sha_file=$last_sha_file" >> $GITHUB_OUTPUT
-
-
-          if [ -n "$last_sha_file" ] && [ -f "$last_sha_file" ]; then
-            last_sha=$(cat "$last_sha_file")
+          if [ -n "$last_sha" ]; then
             echo "Found previously tested commit: $last_sha"
             if [ "$current_sha" = "$last_sha" ]; then
               echo "skip_tests=true" >> $GITHUB_OUTPUT
