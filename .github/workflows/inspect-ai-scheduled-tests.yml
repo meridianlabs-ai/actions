@@ -47,22 +47,32 @@ jobs:
       - name: Download last tested inspect_ai SHA artifact from previous run
         id: download_artifact
         run: |
-          # Find the most recent successful run that has the artifact from the actions repository
-          RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
-            --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -1)
+          # Find the most recent successful run that actually has the artifact
+          echo "Searching for a successful run with the 'last-inspect-ai-sha' artifact..."
+
+          # Get successful runs and check each one for the artifact
+          RUN_ID=""
+          for run_id in $(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
+            --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -10); do
+            
+            echo "Checking run $run_id for artifacts..."
+            artifact_count=$(gh api repos/${{ github.repository }}/actions/runs/$run_id/artifacts \
+              --jq '.artifacts[] | select(.name == "last-inspect-ai-sha") | .name' | wc -l)
+            
+            if [ "$artifact_count" -gt 0 ]; then
+              RUN_ID=$run_id
+              echo "Found run with artifact: $RUN_ID"
+              break
+            fi
+          done
 
           if [ -n "$RUN_ID" ]; then
-            echo "Found previous run: $RUN_ID"
             # Create directory for artifact
             mkdir -p .last-inspect-ai-sha
-            echo "Created directory .last-inspect-ai-sha"
             
             # Download the artifact from the actions repository (where this workflow runs)
-            echo "Attempting to download artifact 'last-inspect-ai-sha' from run $RUN_ID..."
             if gh run download $RUN_ID --name last-inspect-ai-sha --dir .last-inspect-ai-sha --repo ${{ github.repository }}; then
               echo "Successfully downloaded artifact from run $RUN_ID"
-              echo "Directory contents after download:"
-              find .last-inspect-ai-sha -ls
               
               # Read the SHA immediately and store it as output (before checkout wipes it)
               if [ -f ".last-inspect-ai-sha/last_sha.txt" ]; then
@@ -76,12 +86,10 @@ jobs:
             else
               echo "last_sha=" >> $GITHUB_OUTPUT
               echo "Artifact download failed for run $RUN_ID"
-              echo "Let's check what artifacts are available in that run:"
-              gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts --jq '.artifacts[] | {name: .name, expired: .expired}'
             fi
           else
             echo "last_sha=" >> $GITHUB_OUTPUT
-            echo "No previous successful runs found"
+            echo "No previous successful runs with artifacts found"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
