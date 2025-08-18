@@ -82,7 +82,6 @@ jobs:
 
       - name: Check if commit was already tested
         id: check_commit_artifact
-        if: github.event_name == 'schedule'
         run: |
           current_sha="${{ steps.inspect_commit.outputs.sha }}"
           # Check for artifact file in different possible locations
@@ -95,17 +94,19 @@ jobs:
 
           if [ -n "$last_sha_file" ] && [ -f "$last_sha_file" ]; then
             last_sha=$(cat "$last_sha_file")
-            echo "Found previous SHA: $last_sha"
+            echo "Found previously tested commit: $last_sha"
             if [ "$current_sha" = "$last_sha" ]; then
               echo "skip_tests=true" >> $GITHUB_OUTPUT
-              echo "Commit $current_sha was already tested successfully (artifact), skipping"
+              echo "Commit $current_sha was already tested successfully, skipping"
               exit 0
+            else
+              echo "Current commit $current_sha differs from last tested commit $last_sha"
             fi
           else
-            echo "No previous artifact found"
+            echo "No previous artifact found or could not read commit SHA"
           fi
           echo "skip_tests=false" >> $GITHUB_OUTPUT
-          echo "New commit $current_sha or no previous successful run found (artifact), proceeding with tests"
+          echo "Proceeding with tests for commit $current_sha"
 
       - name: Skip notification
         if: github.event_name == 'schedule' && (steps.check_commit_artifact.outputs.skip_tests == 'true')
