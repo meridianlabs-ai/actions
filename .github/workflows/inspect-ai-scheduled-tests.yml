@@ -45,7 +45,6 @@ jobs:
             --allow-insecure-entitlement network.host
 
       - name: Download last tested inspect_ai SHA artifact from previous run
-        if: github.event_name == 'schedule'
         run: |
           # Find the most recent successful run that has the artifact from the actions repository
           RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
