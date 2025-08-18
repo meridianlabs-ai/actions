@@ -92,6 +92,9 @@ jobs:
             last_sha_file=".last-inspect-ai-sha/last-inspect-ai-sha/last_sha.txt"
           fi
 
+          echo "last_sha_file=$last_sha_file" >> $GITHUB_OUTPUT
+
+
           if [ -n "$last_sha_file" ] && [ -f "$last_sha_file" ]; then
             last_sha=$(cat "$last_sha_file")
             echo "Found previously tested commit: $last_sha"
