@@ -48,7 +48,7 @@ jobs:
         if: github.event_name == 'schedule'
         run: |
           # Find the most recent successful run that has the artifact
-          RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}.yml/runs \
+          RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
             --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -1)
 
           if [ -n "$RUN_ID" ]; then
