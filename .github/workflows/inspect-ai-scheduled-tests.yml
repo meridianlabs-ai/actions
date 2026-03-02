@@ -173,7 +173,7 @@ jobs:
 
       - name: Run slow tests
         if: steps.check_commit_artifact.outputs.skip_tests != 'true'
-        timeout-minutes: 20
+        timeout-minutes: 180
         env:
           DOCKER_BUILDKIT: 1
           BUILDKIT_PROGRESS: plain
@@ -183,12 +183,13 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTHONUNBUFFERED: "1"
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s
+          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s --timeout=300
           echo "Running slow and trio tests with --runslow and --runtrio flags..."
-          pytest --runtrio --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s
+          pytest --runtrio --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s --timeout=300
 
       - name: Upload test results on failure
         if: failure()
