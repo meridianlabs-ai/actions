@@ -170,6 +170,7 @@ jobs:
           python -m pip install --upgrade pip
           # Install inspect_ai with development dependencies for testing
           pip install --only-binary=all -e ".[dev]"
+          pip install pytest-timeout
 
       - name: Run slow tests
         if: steps.check_commit_artifact.outputs.skip_tests != 'true'
