@@ -173,7 +173,7 @@ jobs:
 
       - name: Run slow tests
         if: steps.check_commit_artifact.outputs.skip_tests != 'true'
-        timeout-minutes: 180
+        timeout-minutes: 20
         env:
           DOCKER_BUILDKIT: 1
           BUILDKIT_PROGRESS: plain
