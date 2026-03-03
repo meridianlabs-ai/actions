@@ -26,6 +26,11 @@ name: Inspect AI Scheduled Tests
         required: false
         default: ""
         type: string
+      pytest_args:
+        description: "Additional arguments to pass to pytest (as a single string)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   slow-tests:
@@ -170,8 +175,10 @@ jobs:
           python -m pip install --upgrade pip
           # Install inspect_ai with development dependencies for testing
           pip install --only-binary=all -e ".[dev]"
+          pip install pytest-timeout
 
       - name: Run slow tests
+        id: slow_tests
         if: steps.check_commit_artifact.outputs.skip_tests != 'true'
         timeout-minutes: 180
         env:
@@ -183,22 +190,27 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PYTHONUNBUFFERED: "1"
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s --timeout=300
-          echo "Running slow and trio tests with --runslow and --runtrio flags..."
-          pytest --runtrio --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s --timeout=300
+          pytest --runslow --runapi -m "slow or api" --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=300 ${{ inputs.pytest_args }}
 
-      - name: Upload test results on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: |
-            pytest-report.xml
-            /tmp/pytest-*
+      - name: Run trio tests
+        if: (success() || steps.slow_tests.conclusion == 'failure') && steps.check_commit_artifact.outputs.skip_tests != 'true'
+        timeout-minutes: 180
+        env:
+          DOCKER_BUILDKIT: 1
+          BUILDKIT_PROGRESS: plain
+          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
+          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+        run: |
+          echo "Running trio tests with --runslow and --runtrio flags..."
+          pytest --runtrio --runslow --runapi -m "slow or api or trio" --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=300 ${{ inputs.pytest_args }}
 
       - name: Save tested inspect_ai SHA as artifact
         if: success() && github.event_name == 'schedule'
