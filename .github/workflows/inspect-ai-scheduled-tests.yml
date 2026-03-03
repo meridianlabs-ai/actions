@@ -103,7 +103,7 @@ jobs:
       - name: Checkout inspect_ai repository
         uses: actions/checkout@v4
         with:
-          repository: ransomr/inspect_ai
+          repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ inputs.inspect_ai_ref || '' }}
 
       - name: Get inspect_ai commit info
