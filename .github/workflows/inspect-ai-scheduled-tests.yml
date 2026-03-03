@@ -26,6 +26,11 @@ name: Inspect AI Scheduled Tests
         required: false
         default: ""
         type: string
+      pytest_args:
+        description: "Additional arguments to pass to pytest (as a single string)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   slow-tests:
@@ -184,22 +189,12 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PYTHONUNBUFFERED: "1"
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s --timeout=300
+          pytest --runslow --runapi -m "slow or api" --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=300 ${{ inputs.pytest_args }}
           echo "Running slow and trio tests with --runslow and --runtrio flags..."
-          pytest --runtrio --runslow -m slow --runapi -m api --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -v --tb=long -s --timeout=300
-
-      - name: Upload test results on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: |
-            pytest-report.xml
-            /tmp/pytest-*
+          pytest --runtrio --runslow --runapi -m "slow or api" --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=300 ${{ inputs.pytest_args }}
 
       - name: Save tested inspect_ai SHA as artifact
         if: success() && github.event_name == 'schedule'
