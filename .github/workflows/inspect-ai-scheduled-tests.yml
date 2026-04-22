@@ -40,7 +40,7 @@ jobs:
     steps:
       # Critical: Setup modern Docker build system
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           version: latest
           driver-opts: |
@@ -101,7 +101,7 @@ jobs:
         continue-on-error: true
 
       - name: Checkout inspect_ai repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ inputs.inspect_ai_ref || '' }}
@@ -145,13 +145,13 @@ jobs:
 
       - name: Set up Python
         if: steps.check_commit_artifact.outputs.skip_tests != 'true'
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Cache pip dependencies
         if: steps.check_commit_artifact.outputs.skip_tests != 'true'
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
@@ -160,7 +160,7 @@ jobs:
 
       - name: Cache built wheels
         if: steps.check_commit_artifact.outputs.skip_tests != 'true'
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip/wheels
           key: ${{ runner.os }}-wheels-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
@@ -220,7 +220,7 @@ jobs:
 
       - name: Upload tested SHA artifact
         if: success() && github.event_name == 'schedule'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: last-inspect-ai-sha
           path: .last-inspect-ai-sha/last_sha.txt
@@ -228,11 +228,13 @@ jobs:
       - name: Report test results to Slack
         id: slack_notification
         if: always() && steps.inspect_commit.outputs.ref == 'main' && steps.check_commit_artifact.outputs.skip_tests != 'true' && job.status != 'cancelled'
-        uses: slackapi/slack-github-action@v1.24.0
+        uses: slackapi/slack-github-action@v3.0.1
         with:
-          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
+              "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
               "text": "${{ job.status == 'success' && '✅ Slow Tests Passed' || '🚨 Slow Tests Failed' }}",
               "blocks": [
                 {
@@ -250,7 +252,7 @@ jobs:
                       "text": "*Repository:*\n${{ github.repository }}"
                     },
                     {
-                      "type": "mrkdwn", 
+                      "type": "mrkdwn",
                       "text": "*Branch:*\n${{ github.ref_name }}"
                     },
                     {
@@ -285,8 +287,6 @@ jobs:
                 }
               ]
             }
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
       - name: Upload Slack thread info for triage
         if: failure() && steps.slack_notification.outcome == 'success'
@@ -303,7 +303,7 @@ jobs:
 
       - name: Upload triage artifact
         if: failure() && steps.slack_notification.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: triage-context
           path: .triage/slack_thread.json
@@ -321,22 +321,23 @@ jobs:
 
     steps:
       - name: Test Slack Channel Access
-        uses: slackapi/slack-github-action@v1.24.0
+        uses: slackapi/slack-github-action@v3.0.1
         with:
-          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
-          slack-message: |
-            🧪 **Slack Integration Test**
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            text: |
+              🧪 **Slack Integration Test**
 
-            This is a test message to verify GitHub Actions can successfully post to this Slack channel.
+              This is a test message to verify GitHub Actions can successfully post to this Slack channel.
 
-            • Repository: ${{ github.repository }}
-            • Branch: ${{ github.ref_name }}  
-            • Actor: ${{ github.actor }}
-            • Run ID: ${{ github.run_id }}
+              • Repository: ${{ github.repository }}
+              • Branch: ${{ github.ref_name }}
+              • Actor: ${{ github.actor }}
+              • Run ID: ${{ github.run_id }}
 
-            If you see this message, the integration is working correctly! ✅
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+              If you see this message, the integration is working correctly! ✅
 
       - name: Test Result
         run: |

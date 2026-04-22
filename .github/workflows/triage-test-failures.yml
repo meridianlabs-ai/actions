@@ -90,7 +90,7 @@ jobs:
           echo "Triaging against inspect_ai@$sha (exact tested commit: $exact)"
 
       - name: Checkout inspect_ai at tested commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ steps.sha.outputs.sha }}
