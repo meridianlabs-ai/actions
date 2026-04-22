@@ -25,6 +25,7 @@ jobs:
       contents: read
       actions: read
       issues: write
+      id-token: write
 
     env:
       UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
