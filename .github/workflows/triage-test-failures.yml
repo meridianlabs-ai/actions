@@ -67,6 +67,8 @@ jobs:
       - name: Determine inspect_ai SHA
         id: sha
         run: |
+          # Only the slack_thread.json artifact carries the inspect_ai SHA.
+          # run.json.headSha is the *actions* repo SHA and must not be used here.
           if [ -f triage/slack_thread.json ]; then
             sha=$(jq -r '.inspect_ai_sha // empty' triage/slack_thread.json)
             ref=$(jq -r '.inspect_ai_ref // "main"' triage/slack_thread.json)
@@ -75,11 +77,16 @@ jobs:
             ref="main"
           fi
           if [ -z "$sha" ]; then
-            sha=$(jq -r '.headSha // "main"' triage/run.json)
+            echo "No tested inspect_ai SHA available; falling back to main"
+            sha="main"
+            exact="false"
+          else
+            exact="true"
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "Triaging against inspect_ai@$sha (ref: $ref)"
+          echo "exact=$exact" >> "$GITHUB_OUTPUT"
+          echo "Triaging against inspect_ai@$sha (exact tested commit: $exact)"
 
       - name: Checkout inspect_ai at tested commit
         uses: actions/checkout@v4
@@ -107,8 +114,14 @@ jobs:
               commit that was tested. Investigate here; do NOT push or open PRs.
 
             Upstream run: ${{ env.UPSTREAM_RUN_URL }}
-            Tested commit: ${{ steps.sha.outputs.sha }}
+            inspect_ai checkout: ${{ steps.sha.outputs.sha }}
+            inspect_ai checkout is exact tested commit: ${{ steps.sha.outputs.exact }}
             This (triage) repo: ${{ github.repository }}
+
+            Note: if "inspect_ai checkout is exact tested commit" is `false`, you are
+            investigating against `main` rather than the exact commit that failed (the
+            tested SHA was not recorded for this run). In that case, skip Bucket A
+            (you have no "since tested SHA" range to diff against) and proceed to B/C/D.
 
             # Your job
             Classify the failure into one of four buckets and take the matching action.
