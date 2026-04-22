@@ -1,0 +1,232 @@
+---
+name: Triage Test Failures
+
+"on":
+  workflow_run:
+    workflows: ["Inspect AI Scheduled Tests"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run ID of a failed Inspect AI Scheduled Tests run to triage"
+        required: true
+        type: string
+
+jobs:
+  triage:
+    # Only triage failed scheduled runs (not push/dev runs, not successes).
+    # workflow_dispatch lets humans re-run triage against a specific run_id.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.event == 'schedule')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+
+    env:
+      UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+      UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url || format('https://github.com/{0}/actions/runs/{1}', github.repository, inputs.run_id) }}
+
+    steps:
+      - name: Download failed logs from upstream run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p triage
+          echo "Fetching logs for run $UPSTREAM_RUN_ID"
+          gh run view "$UPSTREAM_RUN_ID" \
+            --repo "${{ github.repository }}" \
+            --log-failed > triage/failed.log 2>&1 || echo "No failed-step logs available"
+          gh run view "$UPSTREAM_RUN_ID" \
+            --repo "${{ github.repository }}" \
+            --json jobs,conclusion,displayTitle,headBranch,headSha,url,createdAt \
+            > triage/run.json
+          # Truncate very long logs so we fit in the context window.
+          # Keep the last 2MB — failures are almost always near the end.
+          if [ -f triage/failed.log ]; then
+            size=$(wc -c < triage/failed.log)
+            if [ "$size" -gt 2000000 ]; then
+              echo "Log is $size bytes; truncating to last 2MB"
+              tail -c 2000000 triage/failed.log > triage/failed.log.trimmed
+              mv triage/failed.log.trimmed triage/failed.log
+            fi
+          fi
+
+      - name: Download Slack thread artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run download "$UPSTREAM_RUN_ID" \
+            --repo "${{ github.repository }}" \
+            --name triage-context \
+            --dir triage 2>/dev/null || echo "No Slack thread artifact (triage will post to channel root)"
+
+      - name: Determine inspect_ai SHA
+        id: sha
+        run: |
+          if [ -f triage/slack_thread.json ]; then
+            sha=$(jq -r '.inspect_ai_sha // empty' triage/slack_thread.json)
+            ref=$(jq -r '.inspect_ai_ref // "main"' triage/slack_thread.json)
+          else
+            sha=""
+            ref="main"
+          fi
+          if [ -z "$sha" ]; then
+            sha=$(jq -r '.headSha // "main"' triage/run.json)
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Triaging against inspect_ai@$sha (ref: $ref)"
+
+      - name: Checkout inspect_ai at tested commit
+        uses: actions/checkout@v4
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ steps.sha.outputs.sha }}
+          path: inspect_ai
+          fetch-depth: 0
+
+      - name: Run Claude triage agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --allowedTools Bash,Read,Edit,Write,Grep,Glob
+          prompt: |
+            You are triaging a failed scheduled test run for UKGovernmentBEIS/inspect_ai.
+
+            # Available context (all paths relative to the workspace root)
+            - `triage/failed.log` — output of failed pytest steps (may be truncated to last 2MB)
+            - `triage/run.json` — metadata for the failed GitHub Actions run
+            - `triage/slack_thread.json` — Slack channel + thread_ts to reply in. May be absent;
+              if absent, post to channel `$SLACK_CHANNEL_ID` with no `thread_ts`.
+            - `inspect_ai/` — read-only clone of UKGovernmentBEIS/inspect_ai at the exact
+              commit that was tested. Investigate here; do NOT push or open PRs.
+
+            Upstream run: ${{ env.UPSTREAM_RUN_URL }}
+            Tested commit: ${{ steps.sha.outputs.sha }}
+            This (triage) repo: ${{ github.repository }}
+
+            # Your job
+            Classify the failure into one of four buckets and take the matching action.
+            Evaluate the buckets **in order** (A → B → C → D) and pick the first that
+            applies. You do NOT have write access to inspect_ai — a human will apply any
+            fix from the tracking issue you create.
+
+            ## Bucket A — Already fixed on main
+            Before anything else, check whether inspect_ai main has moved past the tested
+            commit in a way that likely fixes the failure.
+
+            The `inspect_ai/` clone has all history; `origin/main` refs the current main.
+
+              cd inspect_ai
+              git log --oneline ${{ steps.sha.outputs.sha }}..origin/main | head -50
+
+            If there are commits since the tested SHA:
+              - Identify the files implicated in the failure (from `triage/failed.log`).
+              - Run `git log --oneline ${{ steps.sha.outputs.sha }}..origin/main -- <file>`
+                for each to see whether those files have been modified on main.
+              - Skim commit messages on main for keywords matching the failure (test name,
+                error message substring, module involved).
+
+            Err on the side of NOT claiming A — require specific evidence (file + commit
+            + plausible mechanism). If evidence is weak, fall through to B/C/D and mention
+            the uncertainty in the issue body.
+
+            Action (A): **do not open an issue.** Post a reply in the Slack thread with:
+              - The likely fixing commit (link: https://github.com/UKGovernmentBEIS/inspect_ai/commit/<sha>)
+              - A one-line explanation of why you believe it fixes the failure
+              - Note that the next scheduled run should pass
+            Then stop.
+
+            ## Bucket B — Provider outage / intermittent infrastructure failure
+            Symptoms: HTTP 5xx from Anthropic / Google / OpenAI / Grok APIs, connection resets,
+            DNS failures, provider-side rate limits, socket timeouts talking to external services.
+            Action: **do not open an issue.** Post a reply in the Slack thread naming the
+            provider and the specific symptom, noting that the failure appears intermittent
+            and will likely clear on the next scheduled run. Then stop.
+
+            ## Bucket C — Diagnosable bug with a clear, minimal fix
+            You understand the root cause AND can describe a targeted fix (usually <30 lines).
+            Action:
+              1. Open a tracking issue in this repo (${{ github.repository }}) with:
+                 - Title: `Triage: <short summary>`
+                 - Assignee: `ransomr`
+                 - Labels: none required
+                 - Body structured as:
+                   ## Summary
+                   <one-line description>
+
+                   ## Failing tests
+                   <test names / node ids>
+
+                   ## Root cause
+                   <analysis, referencing specific files and lines in inspect_ai>
+
+                   ## Proposed fix
+                   <concrete description of the change, including a unified diff in a
+                    ```diff fenced block if small enough, or per-file pseudocode if larger.
+                    Reference absolute paths under inspect_ai/ so a human can apply it.>
+
+                   ## Suggested follow-up
+                   A PR can be created from this fix. To do so, run locally:
+                   ```
+                   cd <path-to-inspect_ai-clone>
+                   git checkout -b claude/triage-<UPSTREAM_RUN_ID>
+                   claude "Read issue #<this-issue-number> in <this-repo> and open a PR
+                           against UKGovernmentBEIS/inspect_ai main that implements the
+                           proposed fix."
+                   ```
+
+                   ## Links
+                   - Failed run: ${{ env.UPSTREAM_RUN_URL }}
+                   - Triage run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+              2. Reply in the Slack thread with the tracking-issue link.
+
+            ## Bucket D — Unclear, non-obvious, or risky
+            You cannot confidently diagnose, OR the fix would be speculative, OR it touches
+            more than ~30 lines, OR multiple tests failed for different reasons.
+            Action: same as bucket C, but the body has:
+              ## Root cause
+              <"not yet determined" + what you examined>
+
+              ## Hypotheses considered
+              <list, with evidence for/against each>
+
+              ## Suggested follow-up
+              Needs human investigation before any fix. Once a direction is chosen, the
+              issue can be updated and a PR opened manually.
+
+              ## Links
+              (same as above)
+
+            **When in doubt between C and D, pick D.** An unconfident fix proposal wastes
+            more time than "here's what I found, please advise."
+
+            # How to post to Slack
+            Read `triage/slack_thread.json` if it exists:
+              channel=$(jq -r .channel triage/slack_thread.json)
+              thread_ts=$(jq -r .thread_ts triage/slack_thread.json)
+            Otherwise post to $SLACK_CHANNEL_ID with no thread_ts.
+
+            Post with:
+              curl -sS -X POST https://slack.com/api/chat.postMessage \
+                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+                -H "Content-Type: application/json; charset=utf-8" \
+                --data @- <<'JSON'
+              {"channel":"...","thread_ts":"...","text":"..."}
+              JSON
+            Check the response — Slack returns `{"ok": false, ...}` on errors.
+
+            # Guardrails
+            - At most one tracking issue per run (only buckets C and D open issues).
+            - Never modify files in `inspect_ai/` — treat it as read-only reference.
+            - If you hit any error you cannot resolve, still open a bucket-D issue and
+              include the error in the body so a human can follow up.
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

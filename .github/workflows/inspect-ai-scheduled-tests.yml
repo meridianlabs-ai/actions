@@ -226,6 +226,7 @@ jobs:
           path: .last-inspect-ai-sha/last_sha.txt
 
       - name: Report test results to Slack
+        id: slack_notification
         if: always() && steps.inspect_commit.outputs.ref == 'main' && steps.check_commit_artifact.outputs.skip_tests != 'true' && job.status != 'cancelled'
         uses: slackapi/slack-github-action@v1.24.0
         with:
@@ -286,6 +287,27 @@ jobs:
             }
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+      - name: Upload Slack thread info for triage
+        if: failure() && steps.slack_notification.outcome == 'success'
+        run: |
+          mkdir -p .triage
+          cat > .triage/slack_thread.json <<EOF
+          {
+            "channel": "${{ steps.slack_notification.outputs.channel_id || secrets.SLACK_CHANNEL_ID }}",
+            "thread_ts": "${{ steps.slack_notification.outputs.ts }}",
+            "inspect_ai_sha": "${{ steps.inspect_commit.outputs.sha }}",
+            "inspect_ai_ref": "${{ steps.inspect_commit.outputs.ref }}"
+          }
+          EOF
+
+      - name: Upload triage artifact
+        if: failure() && steps.slack_notification.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-context
+          path: .triage/slack_thread.json
+          retention-days: 7
 
       - name: Cleanup Docker resources
         if: always()
