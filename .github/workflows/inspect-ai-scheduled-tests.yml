@@ -193,7 +193,7 @@ jobs:
 
         run: |
           echo "Running slow tests with --runslow flag..."
-          pytest --runslow --runapi -m "slow or api" --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=1500 ${{ inputs.pytest_args }}
+          pytest --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=900 ${{ inputs.pytest_args }}
 
       - name: Run trio tests
         if: (success() || steps.slow_tests.conclusion == 'failure') && steps.check_commit_artifact.outputs.skip_tests != 'true'
