@@ -130,6 +130,27 @@ jobs:
             You do NOT have write access to inspect_ai — a human will apply any fix from
             the tracking issue you create.
 
+            # Think carefully
+            This triage has real downstream consequences: issues on the tracking repo,
+            notifications to a team Slack channel, and humans deciding where to spend
+            investigation time based on your output. Take the time to reason through
+            the evidence thoroughly before classifying:
+
+            - Before claiming Bucket A, verify the specific commit on main that fixes
+              the issue — don't infer from commit titles alone; check the diff touches
+              the relevant file/symbol.
+            - Before claiming Bucket B, check that the error really is upstream (a 5xx
+              from the provider) and not an inspect_ai bug that happens to surface as
+              a request failure.
+            - Before claiming Bucket C, walk through the failing test once more and
+              confirm your proposed fix would actually make it pass — don't just pattern-
+              match on the error message.
+            - Before claiming Bucket D, consider whether more investigation would
+              promote this to C; it's fine to still pick D, but document what you tried.
+
+            A wrong classification is more costly than a slower one. Err toward more
+            thinking, not less.
+
             # Pre-classification lookups
 
             ## EXISTING_ISSUE — existing tracking issue for this failure
