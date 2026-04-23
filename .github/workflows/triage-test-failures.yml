@@ -119,22 +119,44 @@ jobs:
             inspect_ai checkout is exact tested commit: ${{ steps.sha.outputs.exact }}
             This (triage) repo: ${{ github.repository }}
 
-            Note: if "inspect_ai checkout is exact tested commit" is `false`, you are
-            investigating against `main` rather than the exact commit that failed (the
-            tested SHA was not recorded for this run). In that case, skip Bucket A
-            (you have no "since tested SHA" range to diff against) and proceed to B/C/D.
+            # Procedure overview
+            1. Compute two pre-classification values: `EXISTING_ISSUE` and
+               `ALREADY_FIXED_ON_MAIN`.
+            2. Classify the failure into one bucket — A, B, C, or D — picking the first
+               that applies.
+            3. Take the action for that bucket.
+            4. Stop (take no further actions).
 
-            # Your job
-            Classify the failure into one of four buckets and take the matching action.
-            Evaluate the buckets **in order** (A → B → C → D) and pick the first that
-            applies. You do NOT have write access to inspect_ai — a human will apply any
-            fix from the tracking issue you create.
+            You do NOT have write access to inspect_ai — a human will apply any fix from
+            the tracking issue you create.
 
-            ## Bucket A — Already fixed on main
-            Before anything else, check whether inspect_ai main has moved past the tested
-            commit in a way that likely fixes the failure.
+            # Pre-classification lookups
 
-            The `inspect_ai/` clone has all history; `origin/main` refs the current main.
+            ## EXISTING_ISSUE — existing tracking issue for this failure
+            The same test can fail repeatedly until a fix lands; we never want multiple
+            open issues for the same failure.
+
+            1. Extract the failing test node id(s) from `triage/failed.log` (e.g.
+               `tests/foo/test_bar.py::test_baz`). Use the most specific identifier you can.
+            2. Search for existing tracking issues in THIS repo:
+                 gh issue list --repo ${{ github.repository }} --state all \
+                   --search "Triage <test-name-or-key-fragment> in:title,body" --limit 20
+               Try the full node id, then the test name alone, then the module. Also scan
+               recent `Triage:` issues regardless of state.
+            3. Set `EXISTING_ISSUE`:
+               - **Open issue matches** → record its URL.
+               - **Closed issue matches, closed within the last 30 days** → record its
+                 URL; treat as a regression (you'll reopen when commenting).
+               - **Closed >30 days ago, OR no match** → `EXISTING_ISSUE` is empty.
+
+            ## ALREADY_FIXED_ON_MAIN — has main already moved past this bug?
+            If `inspect_ai checkout is exact tested commit` is `false`, skip this check
+            entirely and set `ALREADY_FIXED_ON_MAIN = false` (you have no "since tested
+            SHA" range to diff against).
+
+            Otherwise, check whether inspect_ai main has moved past the tested commit in
+            a way that likely fixes the failure. The `inspect_ai/` clone has all history;
+            `origin/main` refs the current main.
 
               cd inspect_ai
               git log --oneline ${{ steps.sha.outputs.sha }}..origin/main | head -50
@@ -146,26 +168,51 @@ jobs:
               - Skim commit messages on main for keywords matching the failure (test name,
                 error message substring, module involved).
 
-            Err on the side of NOT claiming A — require specific evidence (file + commit
-            + plausible mechanism). If evidence is weak, fall through to B/C/D and mention
-            the uncertainty in the issue body.
+            Set `ALREADY_FIXED_ON_MAIN = true` only with specific evidence: file + commit
+            + plausible mechanism. If evidence is weak, set it to false and mention the
+            uncertainty in the issue body (if one is created).
 
-            Action (A): **do not open an issue.** Post a reply in the Slack thread with:
-              - The likely fixing commit (link: https://github.com/UKGovernmentBEIS/inspect_ai/commit/<sha>)
-              - A one-line explanation of why you believe it fixes the failure
-              - Note that the next scheduled run should pass
+            # Buckets
+            Pick the first bucket that applies.
+
+            ## Bucket A — Already fixed on main
+            Condition: `ALREADY_FIXED_ON_MAIN == true`.
+            Action:
+              1. Post a reply in the Slack thread with:
+                 - The likely fixing commit (https://github.com/UKGovernmentBEIS/inspect_ai/commit/<sha>)
+                 - A one-line explanation of why you believe it fixes the failure
+                 - Note that the next scheduled run should pass
+              2. If `EXISTING_ISSUE` is set, add a comment to it noting that the failure
+                 appears to be fixed by the identified commit on main, and suggest it can
+                 be closed after the next scheduled run passes. Do not close it yourself.
+              3. Do not open a new issue.
             Then stop.
 
             ## Bucket B — Provider outage / intermittent infrastructure failure
             Symptoms: HTTP 5xx from Anthropic / Google / OpenAI / Grok APIs, connection resets,
             DNS failures, provider-side rate limits, socket timeouts talking to external services.
-            Action: **do not open an issue.** Post a reply in the Slack thread naming the
-            provider and the specific symptom, noting that the failure appears intermittent
-            and will likely clear on the next scheduled run. Then stop.
+            Action:
+              1. Post a reply in the Slack thread naming the provider and the specific symptom,
+                 noting that the failure appears intermittent and will likely clear on the
+                 next scheduled run.
+              2. If `EXISTING_ISSUE` is set, add a brief comment to it noting this new
+                 intermittent occurrence with a link to the failed run.
+              3. Do not open a new issue.
+            Then stop.
 
             ## Bucket C — Diagnosable bug with a clear, minimal fix
             You understand the root cause AND can describe a targeted fix (usually <30 lines).
             Action:
+              **If `EXISTING_ISSUE` is set**: do NOT open a new issue. Instead:
+                - If the existing issue is closed, reopen it (`gh issue reopen`).
+                - Add a comment containing: the new failed run link, a one-line "still
+                  failing on run <id>" note, and — if your analysis has refined or changed
+                  since the original issue was opened — an updated root cause and/or
+                  proposed fix. Otherwise keep the comment brief.
+                - Reply in the Slack thread with the existing-issue URL (not a new one).
+                - Stop.
+
+              **Otherwise** (no existing issue):
               1. Open a tracking issue in this repo (${{ github.repository }}) with:
                  - Title: `Triage: <short summary>`
                  - Assignee: `ransomr`
@@ -203,7 +250,9 @@ jobs:
             ## Bucket D — Unclear, non-obvious, or risky
             You cannot confidently diagnose, OR the fix would be speculative, OR it touches
             more than ~30 lines, OR multiple tests failed for different reasons.
-            Action: same as bucket C, but the body has:
+            Action: same dedup logic as bucket C (if `EXISTING_ISSUE` is set, reopen if
+            needed and comment; otherwise open a new issue). If opening a new issue, body
+            has:
               ## Root cause
               <"not yet determined" + what you examined>
 
@@ -236,10 +285,13 @@ jobs:
             Check the response — Slack returns `{"ok": false, ...}` on errors.
 
             # Guardrails
-            - At most one tracking issue per run (only buckets C and D open issues).
+            - At most one issue-related action per run: either open one new issue OR
+              comment on (and optionally reopen) one existing issue. Never both.
+            - Never open a new issue if `EXISTING_ISSUE` is set.
             - Never modify files in `inspect_ai/` — treat it as read-only reference.
-            - If you hit any error you cannot resolve, still open a bucket-D issue and
-              include the error in the body so a human can follow up.
+            - If you hit any error you cannot resolve, still follow bucket-D behavior
+              (comment on EXISTING_ISSUE if set, otherwise open a new D issue) and
+              include the error in the body/comment so a human can follow up.
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
