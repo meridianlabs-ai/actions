@@ -105,6 +105,7 @@ jobs:
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ inputs.inspect_ai_ref || '' }}
+          fetch-depth: 0
 
       - name: Get inspect_ai commit info
         id: inspect_commit
