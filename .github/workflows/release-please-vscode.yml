@@ -18,6 +18,9 @@ name: Release Please — VS Code extension (reusable)
 #     push: { branches: [main] }
 #   jobs:
 #     release:
+#       permissions:
+#         contents: write
+#         pull-requests: write
 #       uses: meridianlabs-ai/actions/.github/workflows/release-please-vscode.yml@v1
 #       with:
 #         extension-id: ukaisi.inspect-ai
