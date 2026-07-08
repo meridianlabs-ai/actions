@@ -1,0 +1,156 @@
+name: Release Please — VS Code extension (reusable)
+
+# Reusable workflow: Release Please for a VS Code extension repo.
+#
+# On push to main, release-please maintains a rolling release PR (release-type
+# node — it owns the package.json version). Merging the PR creates the tag and
+# triggers the gated publish job, which packages the extension and publishes to
+# the VS Code Marketplace + Open VSX, and attaches the .vsix to the GitHub
+# release. Auth is a short-lived token from the Meridian release GitHub App.
+#
+# The consuming repo must provide these pnpm scripts: lint, build,
+# build:production, test, vsce:package. Add required reviewers to the
+# `environment` (default `marketplace`) to gate who can ship.
+#
+# Caller (in a consuming repo, .github/workflows/release.yml):
+#   name: Release
+#   on:
+#     push: { branches: [main] }
+#   jobs:
+#     release:
+#       uses: meridianlabs-ai/actions/.github/workflows/release-please-vscode.yml@v1
+#       with:
+#         extension-id: ukaisi.inspect-ai
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      extension-id:
+        description: "Marketplace extension id, e.g. ukaisi.inspect-ai"
+        type: string
+        required: true
+      node-version:
+        type: string
+        default: "22"
+      publish-openvsx:
+        description: "Also publish to Open VSX"
+        type: boolean
+        default: true
+      environment:
+        description: "Deployment environment for the publish job (add required reviewers to gate releases)"
+        type: string
+        default: "marketplace"
+      config-file:
+        type: string
+        default: ".release-please-config.json"
+      manifest-file:
+        type: string
+        default: ".release-please-manifest.json"
+    secrets:
+      RELEASE_PLEASE_APP_ID:
+        required: true
+      RELEASE_PLEASE_APP_PRIVATE_KEY:
+        required: true
+      VSCE_PAT:
+        required: true
+      OVSX_PAT:
+        required: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          release-type: node
+          config-file: ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
+
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: TypeScript compile
+        run: pnpm build
+
+      - name: Build extension (production)
+        run: pnpm build:production
+
+      - name: Setup virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Run tests
+        run: xvfb-run -a pnpm test
+
+      - name: Package extension
+        run: pnpm vsce:package
+
+      - name: Get version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if npx @vscode/vsce show ${{ inputs.extension-id }} --json 2>/dev/null | grep -q "\"version\": \"${{ steps.version.outputs.version }}\""; then
+            echo "v${{ steps.version.outputs.version }} already on VS Code Marketplace, skipping"
+          else
+            pnpm vsce publish --no-dependencies --pat "$VSCE_PAT"
+          fi
+
+      - name: Publish to Open VSX
+        if: ${{ inputs.publish-openvsx }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          npm install -g ovsx
+          if ovsx get ${{ inputs.extension-id }} --metadata 2>/dev/null | grep -q "\"version\": \"${{ steps.version.outputs.version }}\""; then
+            echo "v${{ steps.version.outputs.version }} already on Open VSX, skipping"
+          else
+            ovsx publish *.vsix --pat "$OVSX_PAT"
+          fi
+
+      - name: Upload VSIX to GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ needs.release-please.outputs.tag_name }} *.vsix --clobber
