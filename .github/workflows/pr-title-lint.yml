@@ -1,0 +1,63 @@
+name: PR Title Lint (reusable)
+
+# Reusable workflow: enforce Conventional Commits format on PR titles.
+#
+# We squash-on-merge, so the resulting main-branch commit IS the PR title —
+# which is what Release Please parses to bump versions and build changelogs.
+# The allowed types are single-sourced from conventional-commit-types.json in
+# this repo (the same list that feeds the release-please changelog sections),
+# so enforcement and changelog can never drift.
+#
+# Caller (in a consuming repo, .github/workflows/pr-title-lint.yml):
+#   name: PR Title Lint
+#   on:
+#     pull_request:
+#       types: [opened, edited, reopened, synchronize]
+#   jobs:
+#     lint:
+#       uses: meridianlabs-ai/actions/.github/workflows/pr-title-lint.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      require-scope:
+        description: "Require a scope, e.g. feat(api): ..."
+        type: boolean
+        default: false
+      types-ref:
+        description: "git ref of meridianlabs-ai/actions to read the shared type list from"
+        type: string
+        default: "v1"
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch shared conventional-commit types
+        uses: actions/checkout@v4
+        with:
+          repository: meridianlabs-ai/actions
+          ref: ${{ inputs.types-ref }}
+          sparse-checkout: conventional-commit-types.json
+          sparse-checkout-cone-mode: false
+          path: _meridian_actions
+
+      - name: Extract allowed types
+        id: types
+        run: |
+          {
+            echo "types<<EOF"
+            jq -r '.[].type' _meridian_actions/conventional-commit-types.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Lint PR title
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: ${{ steps.types.outputs.types }}
+          requireScope: ${{ inputs.require-scope }}
