@@ -6,28 +6,30 @@
 # whenever the shared type list changes.
 #
 # Usage:
-#   gen-release-please-config.sh <release-type> <include-v-in-tag> [versioning]
-#     release-type      python | node
-#     include-v-in-tag  true | false     (false = bare tags like 0.3.2)
-#     versioning        (optional) e.g. always-bump-patch. Omit for the
-#                       Conventional Commits default (feat->minor, fix->patch).
+#   gen-release-please-config.sh <release-type> [versioning]
+#     release-type   python | node
+#     versioning     (optional) e.g. always-bump-patch. Omit for the
+#                    Conventional Commits default (feat->minor, fix->patch).
 #
 #   Output is written to stdout — redirect it, e.g.:
-#     scripts/gen-release-please-config.sh python false always-bump-patch > .release-please-config.json
+#     scripts/gen-release-please-config.sh python always-bump-patch > .release-please-config.json
+#
+# Tags are v-prefixed (release-please default). We do NOT set include-v-in-tag:
+# version state lives in .release-please-manifest.json (not tags), and hatch-vcs
+# strips the leading v, so the tag prefix is cosmetic. (In manifest mode a
+# top-level include-v-in-tag is ignored anyway.)
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 types_file="$repo_root/conventional-commit-types.json"
 
 release_type="${1:?release-type required (python|node)}"
-include_v="${2:?include-v-in-tag required (true|false)}"
-versioning="${3:-}"
+versioning="${2:-}"
 
 jq \
   --arg rt "$release_type" \
-  --argjson vtag "$include_v" \
   --arg ver "$versioning" \
-  '{ "release-type": $rt, "include-v-in-tag": $vtag }
+  '{ "release-type": $rt }
    + (if $ver != "" then { "versioning": $ver } else {} end)
    + { "packages": {
          ".": {
