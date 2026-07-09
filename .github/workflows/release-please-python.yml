@@ -1,47 +1,45 @@
 name: Release Please — Python package (reusable)
 
-# Reusable workflow: Release Please for a Python package published to PyPI.
+# Reusable workflow: Release Please for a Python package (release-type python;
+# repos use hatch-vcs, so RP owns the changelog + creates the tag/GitHub
+# Release, and hatch-vcs derives the version from the tag at build time).
 #
-# On push to main, release-please maintains a rolling release PR (release-type
-# python; the repo uses hatch-vcs, so RP owns the changelog + creates the tag
-# and hatch-vcs derives the version from that tag at build time). Merging the
-# PR triggers the gated publish job, which builds and publishes to PyPI via
-# OIDC trusted publishing in the named environment. Auth for release-please is
-# a short-lived token from the Meridian release GitHub App.
+# IMPORTANT — this workflow does NOT publish. PyPI trusted publishing rejects
+# publishes that run from a cross-repo reusable workflow (it validates the
+# job_workflow_ref against a publisher registered in the package repo). So
+# publishing stays in the package repo's own publish.yaml, which is auto-run by
+# the GitHub Release that this workflow creates:
 #
-# The committed .release-please-config.json controls versioning and the
-# changelog sections (generate it from the shared type list with
-# scripts/gen-release-please-config.sh). The manifest holds the version state.
+#   # publish.yaml (in the package repo) — trusted publisher unchanged
+#   on:
+#     release:
+#       types: [published]      # auto-run when release-please cuts the release
+#     workflow_dispatch:        # keep for manual break-glass
+#       inputs: { confirm: { ... } }
+#   jobs:
+#     publish:
+#       if: ${{ github.event_name == 'release' || inputs.confirm == 'yes' }}
+#       environment: { name: pypi, url: https://pypi.org/p/<project> }
+#       ... build + pypa/gh-action-pypi-publish ...
 #
-# Caller (in a consuming repo, .github/workflows/release.yml):
+# The App token (not GITHUB_TOKEN) creates the Release, so it is allowed to
+# trigger publish.yaml.
+#
+# Caller (in the package repo, .github/workflows/release.yml):
 #   name: Release
 #   on:
 #     push: { branches: [main] }
 #   jobs:
-#     release:
+#     release-please:
 #       permissions:
 #         contents: write
 #         pull-requests: write
-#         id-token: write
 #       uses: meridianlabs-ai/actions/.github/workflows/release-please-python.yml@v1
-#       with:
-#         pypi-url: https://pypi.org/p/inspect-viz
 #       secrets: inherit
 
 on:
   workflow_call:
     inputs:
-      pypi-url:
-        description: "PyPI project URL for the deployment environment, e.g. https://pypi.org/p/inspect-viz"
-        type: string
-        required: true
-      environment:
-        description: "Deployment environment for the publish job (add required reviewers to gate releases)"
-        type: string
-        default: "pypi"
-      python-version:
-        type: string
-        default: "3.x"
       config-file:
         type: string
         default: ".release-please-config.json"
@@ -53,6 +51,13 @@ on:
         required: true
       RELEASE_PLEASE_APP_PRIVATE_KEY:
         required: true
+    outputs:
+      release_created:
+        description: "true when the release PR was merged and a release cut"
+        value: ${{ jobs.release-please.outputs.release_created }}
+      tag_name:
+        description: "tag of the created release, if any"
+        value: ${{ jobs.release-please.outputs.tag_name }}
 
 jobs:
   release-please:
@@ -77,36 +82,3 @@ jobs:
           release-type: python
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
-
-  publish:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write # Required for OIDC/PyPI trusted publishing
-    environment:
-      name: ${{ inputs.environment }}
-      url: ${{ inputs.pypi-url }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0 # all tags — hatch-vcs derives the version from the tag
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ inputs.python-version }}
-
-      - name: Show current version
-        run: |
-          echo "Version: $(git describe --tags --always)"
-
-      - name: Build
-        run: |
-          pip install --upgrade pip build
-          python -m build
-          ls -la dist/
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
