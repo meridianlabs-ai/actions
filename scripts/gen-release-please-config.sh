@@ -6,13 +6,14 @@
 # whenever the shared type list changes.
 #
 # Usage:
-#   gen-release-please-config.sh <release-type> <include-v-in-tag> [output]
+#   gen-release-please-config.sh <release-type> <include-v-in-tag> [versioning]
 #     release-type      python | node
-#     include-v-in-tag  true | false   (false = bare tags like 0.3.2)
-#     output            defaults to .release-please-config.json
+#     include-v-in-tag  true | false     (false = bare tags like 0.3.2)
+#     versioning        (optional) e.g. always-bump-patch. Omit for the
+#                       Conventional Commits default (feat->minor, fix->patch).
 #
-# Example:
-#   scripts/gen-release-please-config.sh python false > .release-please-config.json
+#   Output is written to stdout — redirect it, e.g.:
+#     scripts/gen-release-please-config.sh python false always-bump-patch > .release-please-config.json
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,25 +21,17 @@ types_file="$repo_root/conventional-commit-types.json"
 
 release_type="${1:?release-type required (python|node)}"
 include_v="${2:?include-v-in-tag required (true|false)}"
-out="${3:-}"
+versioning="${3:-}"
 
-config="$(jq \
+jq \
   --arg rt "$release_type" \
   --argjson vtag "$include_v" \
-  '{
-    "release-type": $rt,
-    "include-v-in-tag": $vtag,
-    "packages": {
-      ".": {
-        "changelog-sections": .,
-        "release-notes-config": { "grouping": true }
-      }
-    }
-  }' "$types_file")"
-
-if [ -n "$out" ]; then
-  printf '%s\n' "$config" > "$out"
-  echo "wrote $out" >&2
-else
-  printf '%s\n' "$config"
-fi
+  --arg ver "$versioning" \
+  '{ "release-type": $rt, "include-v-in-tag": $vtag }
+   + (if $ver != "" then { "versioning": $ver } else {} end)
+   + { "packages": {
+         ".": {
+           "changelog-sections": .,
+           "release-notes-config": { "grouping": true }
+         }
+       } }' "$types_file"
