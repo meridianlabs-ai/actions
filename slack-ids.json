@@ -1,10 +1,10 @@
 {
   "_comment": "GitHub login -> Slack member ID (e.g. U012ABC). Used by the release-please reusable workflows to @-mention release approvers in the approvals channel. Find an ID in Slack: profile -> ... -> Copy member ID. Entries left as TODO are skipped (no mention).",
-  "dragonstyle": "TODO",
-  "jjallaire": "TODO",
-  "epatey": "TODO",
-  "alexandraabbas": "TODO",
-  "kaifronsdal": "TODO",
-  "ransomr": "TODO",
-  "brandly": "TODO"
+  "dragonstyle": "U08L7H4NBQT",
+  "jjallaire": "U07V6G0G0GN",
+  "epatey": "U0862T8T1CH",
+  "alexandraabbas": "U0806EY36KY",
+  "kaifronsdal": "U09SD50BTLY",
+  "ransomr": "U09FQSMKKPC",
+  "brandly": "U095EA33KUZ"
 }
