@@ -11,7 +11,7 @@ Shared release automation for Meridian repos (see `Meridian/Release Process.md` 
 - **`conventional-commit-types.json`** — single source of truth for commit types, feeding both PR-title lint and the release-please changelog sections.
 - **`scripts/gen-release-please-config.sh`** — generate a repo's committed `.release-please-config.json` from the shared type list.
 
-Both release-please workflows post a **Slack "awaiting approval"** ping when a release is cut, if an org (or repo) secret `SLACK_WEBHOOK_URL` is set — GitHub's own deployment-review notifications are unreliable. The ping fires from the release-please job (before the environment gate), links to the repo's Actions, and no-ops silently if the secret is absent.
+Both release-please workflows post a **Slack "awaiting approval"** ping when a release is cut, if the secret `SLACK_APPROVALS_WEBHOOK_URL` is set (a **dedicated approvals channel** webhook, separate from any general update stream). GitHub's own deployment-review notifications are unreliable, so this ensures approvers hear about it. The ping fires from the release-please job (before the environment gate), links to the repo's Actions, no-ops silently if the secret is absent, and **@-mentions the approvers** passed via the `approvers` input (space/comma-separated GitHub logins), resolved to Slack IDs through **`slack-ids.json`** (login → Slack member ID; fill in the `TODO`s). Since the Slack app is incoming-webhook only (no bot token), mentions in the approvals channel are used rather than true DMs.
 
 Minimal caller examples are in each workflow's header comment.
 

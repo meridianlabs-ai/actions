@@ -50,6 +50,10 @@ on:
       manifest-file:
         type: string
         default: ".release-please-manifest.json"
+      approvers:
+        description: "Space/comma-separated GitHub logins to @-mention in the Slack approval ping (resolved via slack-ids.json). Optional."
+        type: string
+        default: ""
     secrets:
       RELEASE_PLEASE_APP_ID:
         required: true
@@ -59,8 +63,8 @@ on:
         required: true
       OVSX_PAT:
         required: false
-      SLACK_WEBHOOK_URL:
-        required: false # if set, posts a Slack ping when a release awaits publish approval
+      SLACK_APPROVALS_WEBHOOK_URL:
+        required: false # if set, posts a Slack ping to a dedicated approvals channel when a release awaits publish approval
 
 jobs:
   release-please:
@@ -86,25 +90,49 @@ jobs:
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
 
-      # Ping Slack when a release is cut, so the publish awaiting approval in the
-      # environment is noticed (GitHub's own deployment-review notifications are
-      # unreliable — e.g. suppressed for the actor who triggered the run).
+      # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
+      # @-mention the right people.
+      - name: Fetch Slack ID map
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          repository: meridianlabs-ai/actions
+          ref: v1
+          sparse-checkout: slack-ids.json
+          sparse-checkout-cone-mode: false
+          path: _meridian_actions
+
+      # Ping the approvals channel when a release is cut, @-mentioning the
+      # approvers, so the publish awaiting approval is noticed (GitHub's own
+      # deployment-review notifications are unreliable — e.g. suppressed for the
+      # actor who triggered the run). No-ops if the webhook secret is unset.
       - name: Notify Slack — release awaiting publish approval
         if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
+          APPROVERS: ${{ inputs.approvers }}
           REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag_name }}
           ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions
         run: |
-          if [ -z "$SLACK_WEBHOOK_URL" ]; then
-            echo "SLACK_WEBHOOK_URL not set — skipping Slack notification"
+          if [ -z "$SLACK_APPROVALS_WEBHOOK_URL" ]; then
+            echo "SLACK_APPROVALS_WEBHOOK_URL not set — skipping Slack notification"
             exit 0
           fi
-          text=":rocket: *${REPO}* ${TAG} release created — Marketplace publish is *awaiting approval*. Review: ${ACTIONS_URL}"
+          mentions=""
+          map=_meridian_actions/slack-ids.json
+          if [ -f "$map" ] && [ -n "$APPROVERS" ]; then
+            for login in $(echo "$APPROVERS" | tr ',' ' '); do
+              id=$(jq -r --arg l "$login" '.[$l] // empty' "$map")
+              if [ -n "$id" ] && [ "$id" != "TODO" ]; then
+                mentions="$mentions <@$id>"
+              fi
+            done
+          fi
+          text=":rocket: *${REPO}* ${TAG} release created — Marketplace publish is *awaiting approval*.${mentions} Review: ${ACTIONS_URL}"
           curl -sf -X POST -H 'Content-type: application/json' \
             --data "$(jq -n --arg t "$text" '{text: $t}')" \
-            "$SLACK_WEBHOOK_URL"
+            "$SLACK_APPROVALS_WEBHOOK_URL"
 
   publish:
     needs: release-please
