@@ -1,0 +1,84 @@
+name: Release Please — Python package (reusable)
+
+# Reusable workflow: Release Please for a Python package (release-type python;
+# repos use hatch-vcs, so RP owns the changelog + creates the tag/GitHub
+# Release, and hatch-vcs derives the version from the tag at build time).
+#
+# IMPORTANT — this workflow does NOT publish. PyPI trusted publishing rejects
+# publishes that run from a cross-repo reusable workflow (it validates the
+# job_workflow_ref against a publisher registered in the package repo). So
+# publishing stays in the package repo's own publish.yaml, which is auto-run by
+# the GitHub Release that this workflow creates:
+#
+#   # publish.yaml (in the package repo) — trusted publisher unchanged
+#   on:
+#     release:
+#       types: [published]      # auto-run when release-please cuts the release
+#     workflow_dispatch:        # keep for manual break-glass
+#       inputs: { confirm: { ... } }
+#   jobs:
+#     publish:
+#       if: ${{ github.event_name == 'release' || inputs.confirm == 'yes' }}
+#       environment: { name: pypi, url: https://pypi.org/p/<project> }
+#       ... build + pypa/gh-action-pypi-publish ...
+#
+# The App token (not GITHUB_TOKEN) creates the Release, so it is allowed to
+# trigger publish.yaml.
+#
+# Caller (in the package repo, .github/workflows/release.yml):
+#   name: Release
+#   on:
+#     push: { branches: [main] }
+#   jobs:
+#     release-please:
+#       permissions:
+#         contents: write
+#         pull-requests: write
+#       uses: meridianlabs-ai/actions/.github/workflows/release-please-python.yml@v1
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      config-file:
+        type: string
+        default: ".release-please-config.json"
+      manifest-file:
+        type: string
+        default: ".release-please-manifest.json"
+    secrets:
+      RELEASE_PLEASE_APP_ID:
+        required: true
+      RELEASE_PLEASE_APP_PRIVATE_KEY:
+        required: true
+    outputs:
+      release_created:
+        description: "true when the release PR was merged and a release cut"
+        value: ${{ jobs.release-please.outputs.release_created }}
+      tag_name:
+        description: "tag of the created release, if any"
+        value: ${{ jobs.release-please.outputs.tag_name }}
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          release-type: python
+          config-file: ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
