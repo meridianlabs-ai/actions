@@ -4,36 +4,20 @@ name: Release Please — Python package (reusable)
 # repos use hatch-vcs, so RP owns the changelog + creates the tag/GitHub
 # Release, and hatch-vcs derives the version from the tag at build time).
 #
-# IMPORTANT — this workflow does NOT publish. PyPI trusted publishing rejects
-# publishes that run from a cross-repo reusable workflow (it validates the
-# job_workflow_ref against a publisher registered in the package repo). So
-# publishing stays in the package repo's own publish.yaml, which is auto-run by
-# the GitHub Release that this workflow creates:
-#
-#   # publish.yaml (in the package repo) — trusted publisher unchanged
-#   on:
-#     release:
-#       types: [published]      # auto-run when release-please cuts the release
-#     workflow_dispatch:        # keep for manual break-glass
-#       inputs: { confirm: { ... } }
-#   jobs:
-#     publish:
-#       if: ${{ github.event_name == 'release' || inputs.confirm == 'yes' }}
-#       environment: { name: pypi, url: https://pypi.org/p/<project> }
-#       ... build + pypa/gh-action-pypi-publish ...
-#
-# The App token (not GITHUB_TOKEN) creates the Release, so it is allowed to
-# trigger publish.yaml.
+# This workflow does ONLY release-please (opens/maintains the release PR;
+# on merge creates the tag + GitHub Release via the App token). It does NOT
+# publish and does NOT post the approval ping:
+#   - Publishing stays in the package repo (PyPI trusted publishing can't run
+#     from a cross-repo reusable workflow). Either an in-repo publish job gated
+#     on `release_created`, or the repo's publish.yaml triggered `on: release`.
+#   - The approval ping is posted from the run that contains the gated publish
+#     (so it can deep-link to the exact paused run) via the
+#     meridianlabs-ai/actions/slack-approval-ping composite action.
 #
 # Caller (in the package repo, .github/workflows/release.yml):
-#   name: Release
-#   on:
-#     push: { branches: [main] }
 #   jobs:
 #     release-please:
-#       permissions:
-#         contents: write
-#         pull-requests: write
+#       permissions: { contents: write, pull-requests: write }
 #       uses: meridianlabs-ai/actions/.github/workflows/release-please-python.yml@v1
 #       secrets: inherit
 
@@ -46,17 +30,11 @@ on:
       manifest-file:
         type: string
         default: ".release-please-manifest.json"
-      approvers:
-        description: "Space/comma-separated GitHub logins to @-mention in the Slack approval ping (resolved via slack-ids.json). Optional."
-        type: string
-        default: ""
     secrets:
       RELEASE_PLEASE_APP_ID:
         required: true
       RELEASE_PLEASE_APP_PRIVATE_KEY:
         required: true
-      SLACK_APPROVALS_WEBHOOK_URL:
-        required: false # if set, posts a Slack ping to a dedicated approvals channel when a release awaits publish approval
     outputs:
       release_created:
         description: "true when the release PR was merged and a release cut"
@@ -79,9 +57,9 @@ jobs:
       pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
       html_url: ${{ steps.release.outputs.html_url }}
       body: ${{ steps.release.outputs.body }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: actions/create-github-app-token@v2
         id: app-token
@@ -96,48 +74,3 @@ jobs:
           release-type: python
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
-
-      # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
-      # @-mention the right people. Only when a release was actually cut.
-      - name: Fetch Slack ID map
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        uses: actions/checkout@v4
-        with:
-          repository: meridianlabs-ai/actions
-          ref: v1
-          sparse-checkout: slack-ids.json
-          sparse-checkout-cone-mode: false
-          path: _meridian_actions
-
-      # Ping the approvals channel when a release is cut, @-mentioning the
-      # approvers, so the publish awaiting approval in the pypi environment is
-      # noticed (GitHub's own deployment-review notifications are unreliable —
-      # e.g. suppressed for the actor who triggered the run). No-ops if the
-      # webhook secret is unset.
-      - name: Notify Slack — release awaiting publish approval
-        if: ${{ steps.release.outputs.release_created == 'true' }}
-        env:
-          SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
-          APPROVERS: ${{ inputs.approvers }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ steps.release.outputs.tag_name }}
-          ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions
-        run: |
-          if [ -z "$SLACK_APPROVALS_WEBHOOK_URL" ]; then
-            echo "SLACK_APPROVALS_WEBHOOK_URL not set — skipping Slack notification"
-            exit 0
-          fi
-          mentions=""
-          map=_meridian_actions/slack-ids.json
-          if [ -f "$map" ] && [ -n "$APPROVERS" ]; then
-            for login in $(echo "$APPROVERS" | tr ',' ' '); do
-              id=$(jq -r --arg l "$login" '.[$l] // empty' "$map")
-              if [ -n "$id" ] && [ "$id" != "TODO" ]; then
-                mentions="$mentions <@$id>"
-              fi
-            done
-          fi
-          text=":rocket: *${REPO}* ${TAG} release created — PyPI publish is *awaiting approval*.${mentions} Review: ${ACTIONS_URL}"
-          curl -sf -X POST -H 'Content-type: application/json' \
-            --data "$(jq -n --arg t "$text" '{text: $t}')" \
-            "$SLACK_APPROVALS_WEBHOOK_URL"
