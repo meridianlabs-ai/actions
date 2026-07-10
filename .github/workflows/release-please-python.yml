@@ -64,6 +64,12 @@ on:
       tag_name:
         description: "tag of the created release, if any"
         value: ${{ jobs.release-please.outputs.tag_name }}
+      html_url:
+        description: "URL of the created GitHub Release (for announcements)"
+        value: ${{ jobs.release-please.outputs.html_url }}
+      body:
+        description: "release notes body of the created release (for announcements)"
+        value: ${{ jobs.release-please.outputs.body }}
 
 jobs:
   release-please:
@@ -73,6 +79,8 @@ jobs:
       pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
+      html_url: ${{ steps.release.outputs.html_url }}
+      body: ${{ steps.release.outputs.body }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: actions/create-github-app-token@v2
