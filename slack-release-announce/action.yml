@@ -1,0 +1,81 @@
+name: Slack release announcement
+description: >-
+  Post a release announcement to a Slack incoming webhook, converting the
+  GitHub release notes (markdown) to Slack mrkdwn. No-ops if webhook is empty.
+
+# Usage (in a repo's release workflow, after a release is created):
+#   - uses: meridianlabs-ai/actions/slack-release-announce@v1
+#     with:
+#       webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+#       title: ":rocket: inspect-flow ${{ needs.release-please.outputs.tag_name }} released"
+#       release-url: ${{ needs.release-please.outputs.html_url }}
+#       release-body: ${{ needs.release-please.outputs.body }}
+#
+# Composite actions run in the caller's job, so this is just an HTTP post — no
+# token/trusted-publishing concerns.
+
+inputs:
+  webhook:
+    description: "Slack incoming webhook URL for the announcement channel. If empty, the step no-ops."
+    required: true
+  title:
+    description: 'Header text, e.g. ":rocket: inspect-flow v1.2.3 released" (emoji shortcodes render).'
+    required: true
+  release-url:
+    description: "URL to the full GitHub release."
+    required: true
+  release-body:
+    description: "Release notes (markdown) to convert to Slack mrkdwn and include."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Post Slack release announcement
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook }}
+        TITLE: ${{ inputs.title }}
+        RELEASE_URL: ${{ inputs.release-url }}
+        RELEASE_BODY: ${{ inputs.release-body }}
+      run: |
+        if [ -z "$WEBHOOK" ]; then
+          echo "webhook not set — skipping Slack announcement"
+          exit 0
+        fi
+        payload=$(python3 <<'PY'
+        import os, re, json
+
+        # Convert GitHub-flavoured markdown release notes to Slack mrkdwn.
+        def convert(text):
+            out = []
+            for line in text.split("\n"):
+                line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", line)
+                heading = re.match(r"^#{1,6}\s+(.*)$", line)
+                if heading:
+                    line = f"*{heading.group(1)}*"
+                else:
+                    line = re.sub(r"^(\s*)[*-]\s+", r"\1• ", line)
+                out.append(line)
+            return out
+
+        # Slack section text caps ~3000 chars; keep headroom.
+        kept, total = [], 0
+        for line in convert(os.environ.get("RELEASE_BODY", "")):
+            if total + len(line) + 1 > 2900:
+                kept.append("… _(truncated — see full release below)_")
+                break
+            kept.append(line)
+            total += len(line) + 1
+        body = "\n".join(kept) or "_(no release notes)_"
+
+        payload = {"blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": os.environ["TITLE"], "emoji": True}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": body}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": f'<{os.environ["RELEASE_URL"]}|View the full release>'}},
+        ]}
+        print(json.dumps(payload))
+        PY
+        )
+        curl -sf -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK"
