@@ -113,7 +113,8 @@ jobs:
           APPROVERS: ${{ inputs.approvers }}
           REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag_name }}
-          ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions
+          # This run contains the gated publish job, so deep-link straight to it.
+          ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$SLACK_APPROVALS_WEBHOOK_URL" ]; then
             echo "SLACK_APPROVALS_WEBHOOK_URL not set — skipping Slack notification"

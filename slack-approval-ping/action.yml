@@ -1,0 +1,62 @@
+name: Slack approval ping
+description: >-
+  Post an "awaiting approval" ping to a Slack webhook, @-mentioning approvers
+  (resolved via slack-ids.json) and deep-linking to the run that needs approval.
+  Call this from the run that contains the environment-gated publish job (a
+  non-gated notify job), so run-url points at the exact paused run. No-ops if
+  webhook is empty.
+
+# Usage (a non-gated notify job in the same run as the gated publish):
+#   - uses: meridianlabs-ai/actions/slack-approval-ping@v1
+#     with:
+#       webhook: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
+#       approvers: "dragonstyle jjallaire epatey"
+#       message: ":rocket: *${{ github.repository }}* ${{ needs.release-please.outputs.tag_name }} — PyPI publish awaiting approval."
+#       run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+inputs:
+  webhook:
+    description: "Slack approvals webhook URL. If empty, the step no-ops."
+    required: true
+  approvers:
+    description: "Space/comma-separated GitHub logins to @-mention (resolved via slack-ids.json)."
+    required: false
+    default: ""
+  message:
+    description: 'Lead message (mrkdwn), e.g. ":rocket: *owner/repo* v1.2.3 — publish awaiting approval."'
+    required: true
+  run-url:
+    description: "URL of the run that needs approval (deep link)."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Post approval ping
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook }}
+        APPROVERS: ${{ inputs.approvers }}
+        MESSAGE: ${{ inputs.message }}
+        RUN_URL: ${{ inputs.run-url }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        if [ -z "$WEBHOOK" ]; then
+          echo "webhook not set — skipping approval ping"
+          exit 0
+        fi
+        # slack-ids.json sits at the actions repo root, one level up from this action.
+        map="$ACTION_PATH/../slack-ids.json"
+        mentions=""
+        if [ -f "$map" ] && [ -n "$APPROVERS" ]; then
+          for login in $(echo "$APPROVERS" | tr ',' ' '); do
+            id=$(jq -r --arg l "$login" '.[$l] // empty' "$map")
+            if [ -n "$id" ] && [ "$id" != "TODO" ]; then
+              mentions="$mentions <@$id>"
+            fi
+          done
+        fi
+        text="${MESSAGE}${mentions} Review: ${RUN_URL}"
+        curl -sf -X POST -H 'Content-type: application/json' \
+          --data "$(jq -n --arg t "$text" '{text: $t}')" \
+          "$WEBHOOK"
