@@ -43,6 +43,10 @@ on:
         description: "Post the approval ping from this workflow (deep-links to github.run_id). Set false if publish is a separate run and you ping from there instead."
         type: boolean
         default: true
+      target-branch:
+        description: "Branch Release Please manages. Leave empty for the default branch (normal releases); set to a maintenance branch (e.g. hotfix/1.4.x) to cut a hotfix release from a released tag."
+        type: string
+        default: ""
     secrets:
       RELEASE_PLEASE_APP_ID:
         required: true
@@ -89,6 +93,8 @@ jobs:
           release-type: python
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
+          # Empty string → the action falls back to the repo default branch.
+          target-branch: ${{ inputs.target-branch }}
 
       # Approval ping (retrofit style: publish runs in this same run, so
       # github.run_id is the run that will pause on the pypi environment).
