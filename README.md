@@ -3,7 +3,7 @@ Global GitHub actions
 
 ## Reusable release workflows
 
-Shared release automation for Meridian repos (see `Meridian/Release Process.md` in the ops vault for the full plan). Standardized on Release Please, authed by the "Meridian Release Bot" GitHub App (org secrets `RELEASE_PLEASE_APP_ID` / `RELEASE_PLEASE_APP_PRIVATE_KEY`). Pin callers to `@v1`.
+Shared release automation for Meridian repos. **See [RELEASING.md](./RELEASING.md) for the maintainer runbook** — how releases work, cadence, who-can-release, hotfixes, and per-repo specifics. Standardized on Release Please, authed by the "Meridian Release Bot" GitHub App (org secrets `RELEASE_PLEASE_APP_ID` / `RELEASE_PLEASE_APP_PRIVATE_KEY`). Pin callers to `@v1`.
 
 - **`.github/workflows/pr-title-lint.yml`** — enforce Conventional Commits on PR titles (we squash-merge, so the PR title becomes the commit). Allowed types are read from `conventional-commit-types.json`.
 - **`.github/workflows/release-please-vscode.yml`** — Release Please + publish for a VS Code extension (Marketplace + Open VSX + `.vsix` release asset).
