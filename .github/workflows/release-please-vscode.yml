@@ -54,6 +54,10 @@ on:
         description: "Space/comma-separated GitHub logins to @-mention in the Slack approval ping (resolved via slack-ids.json). Optional."
         type: string
         default: ""
+      target-branch:
+        description: "Branch Release Please manages. Leave empty for the default branch (normal releases); set to a maintenance branch (e.g. hotfix/1.4.x) to cut a hotfix release from a released tag."
+        type: string
+        default: ""
     secrets:
       RELEASE_PLEASE_APP_ID:
         required: true
@@ -89,6 +93,8 @@ jobs:
           release-type: node
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
+          # Empty string → the action falls back to the repo default branch.
+          target-branch: ${{ inputs.target-branch }}
 
       # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
       # @-mention the right people.
