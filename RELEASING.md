@@ -54,10 +54,17 @@ on PR titles by the shared `pr-title-lint.yml` workflow.
 
 ## Cadence
 
-**Weekly, on Mondays, by default.** Cut a release each Monday *if there's
-anything to ship* — a quiet week means no release (no empty version bumps).
-Releasing early in the week leaves the full week to catch and patch regressions
-before the weekend.
+**We're moving toward a weekly cadence, on Mondays.** The goal is to cut a
+release each Monday *if there's anything to ship* — a quiet week means no release
+(no empty version bumps). Releasing early in the week leaves the full week to
+catch and patch regressions before the weekend. This is the direction we're
+establishing, not yet a strict routine.
+
+**Off-schedule releases are expected.** We'll ship outside the Monday rhythm when
+something warrants it — reacting to a new model release, or getting a fix out for
+a regression. Those go out as soon as they're ready: via the normal flow when
+`main` is clean, or the [hotfix path](#hotfix--maintenance-branch-releases) when
+`main` has other unreleased work you don't want to drag along.
 
 Cadence is **merge timing, not configuration** — every repo runs the identical
 automation, so a repo can ship more or less often with zero config change. See
