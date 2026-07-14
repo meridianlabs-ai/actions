@@ -53,5 +53,5 @@ jq \
   --argjson tag "$tag_extra" \
   '{ "release-type": $rt,
      "packages": {
-       ".": ( { "changelog-sections": ., "release-notes-config": { "grouping": true } } + $ver + $tag )
+       ".": ( { "changelog-sections": . } + $ver + $tag )
      } }' "$types_file"
