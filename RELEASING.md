@@ -56,9 +56,11 @@ on PR titles by the shared `pr-title-lint.yml` workflow.
 
 **We're moving toward a weekly cadence, on Mondays.** The goal is to cut a
 release each Monday *if there's anything to ship* — a quiet week means no release
-(no empty version bumps). Releasing early in the week leaves the full week to
-catch and patch regressions before the weekend. This is the direction we're
-establishing, not yet a strict routine.
+(no empty version bumps). Monday because our tools are production-workload tools
+in our users' toolchains: shipping at the start of the week lets downstream users
+pick up an update as they settle in, rather than having a release land mid-week
+and disrupt work already in flight. This is the direction we're establishing, not
+yet a strict routine.
 
 **Off-schedule releases are expected.** We'll ship outside the Monday rhythm when
 something warrants it — reacting to a new model release, or getting a fix out for
