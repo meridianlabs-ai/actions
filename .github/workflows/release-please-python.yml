@@ -90,7 +90,10 @@ jobs:
         id: release
         with:
           token: ${{ steps.app-token.outputs.token }}
-          release-type: python
+          # No release-type here: in manifest mode it must come from the
+          # config-file. Setting it as an input puts the action in simple mode
+          # and silently overrides the config's per-package options (versioning
+          # strategy, include-v-in-tag, changelog-sections).
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
           # Empty string → the action falls back to the repo default branch.
