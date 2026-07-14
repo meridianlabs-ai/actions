@@ -47,11 +47,15 @@ case "$tagfmt" in
   *) echo "unknown tag-format: $tagfmt (use: v | bare)" >&2; exit 2 ;;
 esac
 
+# include-component-in-tag: false — in manifest mode the node strategy defaults
+# to component-prefixed tags (<package-name>-v1.2.3), which breaks the anchor
+# against our plain-v (or bare) tag history. Python doesn't prefix, so this is a
+# no-op there; emitted always for uniformity.
 jq \
   --arg rt "$release_type" \
   --argjson ver "$ver_extra" \
   --argjson tag "$tag_extra" \
   '{ "release-type": $rt,
      "packages": {
-       ".": ( { "changelog-sections": . } + $ver + $tag )
+       ".": ( { "include-component-in-tag": false, "changelog-sections": . } + $ver + $tag )
      } }' "$types_file"
