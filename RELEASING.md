@@ -106,19 +106,21 @@ are excluded.
 
 ## Hotfix / maintenance-branch releases
 
+> ⚠️ **Not yet exercised on a real hotfix.** The wiring is in place but unproven
+> end-to-end — validate the steps below (especially the dispatch ref and the
+> post-merge trigger) the first time you use it, and correct this section with
+> what you learn.
+
 When `main` has unreleased work but one fix must ship now, you can't release off
 `main` (that would drag everything queued there). Use a maintenance branch
 rooted at the last released tag. Example: last shipped `1.4.0`, need `1.4.1`:
 
-1. **Branch from the tag, not `main`:** `git checkout -b hotfix/1.4.x 1.4.0 && git push -u origin hotfix/1.4.x`
-2. **Cherry-pick the fix** as a `fix:` commit and push it.
-3. **Run Release Please against that branch:** repo → **Actions → Release → Run
-   workflow**, leave the ref on `main` (that's just where the workflow file is
-   read from) and set the **`target-branch`** input to `hotfix/1.4.x`. It opens
-   a release PR proposing `1.4.1` computed only from that branch.
-4. **Merge it** → tag `1.4.1` → approve the publish.
-5. **Forward-port the fix to `main`** — Release Please will *not* do this for
-   you; skip it and the next regular release regresses the bug.
+1. **Branch from the tag, not `main`:** `git checkout -b hotfix/1.4.x 1.4.0 && git push -u origin hotfix/1.4.x`. The branch must contain `.github/workflows/release.yml` with the `workflow_dispatch` trigger — a tag cut *before* that trigger existed needs it **cherry-picked onto the maintenance branch first**.
+2. **Cherry-pick the fix** as a `fix:` commit and push it to the maintenance branch.
+3. **Run Release Please from that branch:** repo → **Actions → Release → Run workflow**, and set **"Use workflow from" to the maintenance branch** (`hotfix/1.4.x`). That's the only control — Release Please targets the branch you dispatch from, and the publish checks out the same branch, so they can't diverge. It opens a release PR proposing `1.4.1` from that branch.
+4. **Merge the release PR** (into the maintenance branch) → tags `1.4.1`. Note: merging into a `hotfix/**` branch is *not* a push to `main`, so it won't auto-trigger Release Please to cut the GitHub Release — **re-run the dispatch** (again from the maintenance branch) after merging so RP creates the release, which fires the publish.
+5. **Approve the publish.**
+6. **Forward-port the fix to `main`** — Release Please will *not* do this for you; skip it and the next regular release regresses the bug.
 
 If nothing else is unreleased on `main`, skip all this — just let the normal
 `main` release flow ship the fix.

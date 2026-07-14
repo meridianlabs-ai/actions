@@ -96,8 +96,13 @@ jobs:
           # strategy, include-v-in-tag, changelog-sections).
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
-          # Empty string → the action falls back to the repo default branch.
-          target-branch: ${{ inputs.target-branch }}
+          # Default to the branch the run was triggered from (github.ref_name):
+          # push to main → main; a workflow_dispatch from a maintenance branch →
+          # that branch. This keeps the Release Please target and the publish
+          # checkout on the SAME branch, so a hotfix is driven solely by the
+          # "Use workflow from" branch selector — no separate input to mismatch.
+          # The target-branch input remains an optional explicit override.
+          target-branch: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
 
       # Approval ping (retrofit style: publish runs in this same run, so
       # github.run_id is the run that will pause on the pypi environment).
