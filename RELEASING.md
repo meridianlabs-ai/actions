@@ -44,9 +44,12 @@ Because every repo **squash-merges**, the **PR title becomes the commit
 message** Release Please parses. So the PR title must be a
 [Conventional Commit](https://www.conventionalcommits.org/): `<type>: <description>`.
 
-Only `feat:` and `fix:` appear in release notes and drive the version bump —
-reserve them for user-facing changes. Everything else (`docs:`, `refactor:`,
-`perf:`, `test:`, `build:`, `chore:`, `ci:`) is excluded from the notes.
+`feat:` and `fix:` drive the version bump and headline the release notes —
+reserve them for user-facing changes. `perf:` and `revert:` also appear in the
+notes (without driving a bump on their own); everything else (`docs:`,
+`refactor:`, `chore:`, `build:`, `ci:`, `test:`, `style:`) is hidden. How
+`feat`/`fix` map to version numbers is per-repo: default-semver repos bump
+minor/patch; pre-1.0 repos on the "patch-pre-major" policy bump patch for both.
 
 The allowed types are defined once in
 [`conventional-commit-types.json`](./conventional-commit-types.json) and enforced
@@ -74,7 +77,9 @@ automation, so a repo can ship more or less often with zero config change. See
 ships on-demand).
 
 **Every release starts with a human clicking merge.** No auto-merge anywhere for
-now.
+now. **For now, Charles (`@dragonstyle`) cuts all releases** while we iron out
+the kinks; a rotation or per-repo owners can come later once the process is
+routine.
 
 ## Cutting a release
 
