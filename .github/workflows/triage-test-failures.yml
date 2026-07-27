@@ -24,10 +24,14 @@ jobs:
     permissions:
       contents: read
       actions: read
-      issues: write
       id-token: write
 
     env:
+      # Tracking issues are created in the meridianlabs-ai fork of inspect_ai,
+      # not in this repo. The workflow GITHUB_TOKEN is scoped to this repo only,
+      # so issue writes use MARVIN_TOKEN (the marvin machine-account PAT; see
+      # the agents repo docs), which has write access on the fork.
+      ISSUES_REPO: meridianlabs-ai/inspect_ai
       UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
       UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url || format('https://github.com/{0}/actions/runs/{1}', github.repository, inputs.run_id) }}
 
@@ -118,6 +122,7 @@ jobs:
             inspect_ai checkout: ${{ steps.sha.outputs.sha }}
             inspect_ai checkout is exact tested commit: ${{ steps.sha.outputs.exact }}
             This (triage) repo: ${{ github.repository }}
+            Issues repo (where all tracking issues live): ${{ env.ISSUES_REPO }}
 
             # Procedure overview
             1. Compute two pre-classification values: `EXISTING_ISSUE` and
@@ -159,8 +164,8 @@ jobs:
 
             1. Extract the failing test node id(s) from `triage/failed.log` (e.g.
                `tests/foo/test_bar.py::test_baz`). Use the most specific identifier you can.
-            2. Search for existing tracking issues in THIS repo:
-                 gh issue list --repo ${{ github.repository }} --state all \
+            2. Search for existing tracking issues in the issues repo:
+                 gh issue list --repo ${{ env.ISSUES_REPO }} --state all \
                    --search "Triage <test-name-or-key-fragment> in:title,body" --limit 20
                Try the full node id, then the test name alone, then the module. Also scan
                recent `Triage:` issues regardless of state.
@@ -234,7 +239,7 @@ jobs:
                 - Stop.
 
               **Otherwise** (no existing issue):
-              1. Open a tracking issue in this repo (${{ github.repository }}) with:
+              1. Open a tracking issue in the issues repo (${{ env.ISSUES_REPO }}) with:
                  - Title: `Triage: <short summary>`
                  - Assignee: `ransomr`
                  - Labels: none required
@@ -258,7 +263,7 @@ jobs:
                    ```
                    cd <path-to-inspect_ai-clone>
                    git checkout -b claude/triage-<UPSTREAM_RUN_ID>
-                   claude "Read issue #<this-issue-number> in <this-repo> and open a PR
+                   claude "Read issue #<this-issue-number> in ${{ env.ISSUES_REPO }} and open a PR
                            against UKGovernmentBEIS/inspect_ai main that implements the
                            proposed fix."
                    ```
@@ -306,6 +311,9 @@ jobs:
             Check the response — Slack returns `{"ok": false, ...}` on errors.
 
             # Guardrails
+            - All `gh issue` commands (list, create, comment, reopen) must pass
+              `--repo ${{ env.ISSUES_REPO }}` — never operate on issues in this
+              (triage) repo or in UKGovernmentBEIS/inspect_ai.
             - At most one issue-related action per run: either open one new issue OR
               comment on (and optionally reopen) one existing issue. Never both.
             - Never open a new issue if `EXISTING_ISSUE` is set.
@@ -316,4 +324,6 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Must be able to read/write issues on $ISSUES_REPO; the default
+          # GITHUB_TOKEN is scoped to this repo and cannot.
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
