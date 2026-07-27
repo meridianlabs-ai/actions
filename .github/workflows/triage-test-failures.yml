@@ -24,7 +24,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      id-token: write
 
     env:
       # Tracking issues are created in the meridianlabs-ai fork of inspect_ai,
@@ -105,6 +104,13 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The action replaces GH_TOKEN/GITHUB_TOKEN in Claude's environment
+          # with its own app installation token, which is read-only on
+          # $ISSUES_REPO ("Resource not accessible by integration" on issue
+          # comments). Passing MARVIN_TOKEN here skips that token exchange so
+          # gh inside the agent authenticates as marvin, which has write
+          # access on $ISSUES_REPO.
+          github_token: ${{ secrets.MARVIN_TOKEN }}
           claude_args: |
             --allowedTools Bash,Read,Edit,Write,Grep,Glob
           prompt: |
@@ -324,6 +330,7 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          # Must be able to read/write issues on $ISSUES_REPO; the default
-          # GITHUB_TOKEN is scoped to this repo and cannot.
+          # Belt-and-braces: the action overrides this in Claude's environment
+          # with the github_token passed above (also MARVIN_TOKEN), but keep it
+          # so gh still authenticates as marvin if that behavior ever changes.
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
