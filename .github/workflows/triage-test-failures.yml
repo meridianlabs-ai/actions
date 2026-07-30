@@ -277,14 +277,18 @@ jobs:
                    ## Links
                    - Failed run: ${{ env.UPSTREAM_RUN_URL }}
                    - Triage run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-              2. Reply in the Slack thread with the tracking-issue link.
+              2. Add the new issue to the Atlas project board:
+                   gh project item-add 1 --owner meridianlabs-ai --url <new-issue-url>
+                 Leave Stage/Status unset — a new triage issue awaiting human
+                 investigation shows as Todo.
+              3. Reply in the Slack thread with the tracking-issue link.
 
             ## Bucket D — Unclear, non-obvious, or risky
             You cannot confidently diagnose, OR the fix would be speculative, OR it touches
             more than ~30 lines, OR multiple tests failed for different reasons.
             Action: same dedup logic as bucket C (if `EXISTING_ISSUE` is set, reopen if
-            needed and comment; otherwise open a new issue). If opening a new issue, body
-            has:
+            needed and comment; otherwise open a new issue and add it to the Atlas board,
+            exactly as in bucket C). If opening a new issue, body has:
               ## Root cause
               <"not yet determined" + what you examined>
 
@@ -322,6 +326,8 @@ jobs:
               (triage) repo or in UKGovernmentBEIS/inspect_ai.
             - At most one issue-related action per run: either open one new issue OR
               comment on (and optionally reopen) one existing issue. Never both.
+              (Adding a newly opened issue to the Atlas board is part of opening it,
+              not a second action.)
             - Never open a new issue if `EXISTING_ISSUE` is set.
             - Never modify files in `inspect_ai/` — treat it as read-only reference.
             - If you hit any error you cannot resolve, still follow bucket-D behavior
