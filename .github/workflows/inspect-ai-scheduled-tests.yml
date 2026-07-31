@@ -33,22 +33,18 @@ name: Inspect AI Scheduled Tests
         type: string
 
 jobs:
-  slow-tests:
+  # Resolve the inspect_ai commit to test and skip if it was already tested
+  # successfully (SHA recorded as an artifact by the report job below).
+  check-commit:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.run_slow_tests }}
     runs-on: ubuntu-latest
+    outputs:
+      skip_tests: ${{ steps.check_commit_artifact.outputs.skip_tests }}
+      sha: ${{ steps.inspect_commit.outputs.sha }}
+      short_sha: ${{ steps.inspect_commit.outputs.short_sha }}
+      ref: ${{ steps.inspect_commit.outputs.ref }}
 
     steps:
-      # Critical: Setup modern Docker build system
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
-        with:
-          version: latest
-          driver-opts: |
-            network=host
-          buildkitd-flags: |
-            --allow-insecure-entitlement security.insecure
-            --allow-insecure-entitlement network.host
-
       - name: Download last tested inspect_ai SHA artifact from previous run
         id: download_artifact
         run: |
@@ -59,11 +55,11 @@ jobs:
           RUN_ID=""
           for run_id in $(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
             --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -10); do
-            
+
             echo "Checking run $run_id for artifacts..."
             artifact_count=$(gh api repos/${{ github.repository }}/actions/runs/$run_id/artifacts \
               --jq '.artifacts[] | select(.name == "last-inspect-ai-sha") | .name' | wc -l)
-            
+
             if [ "$artifact_count" -gt 0 ]; then
               RUN_ID=$run_id
               echo "Found run with artifact: $RUN_ID"
@@ -74,11 +70,11 @@ jobs:
           if [ -n "$RUN_ID" ]; then
             # Create directory for artifact
             mkdir -p .last-inspect-ai-sha
-            
+
             # Download the artifact from the actions repository (where this workflow runs)
             if gh run download $RUN_ID --name last-inspect-ai-sha --dir .last-inspect-ai-sha --repo ${{ github.repository }}; then
               echo "Successfully downloaded artifact from run $RUN_ID"
-              
+
               # Read the SHA immediately and store it as output (before checkout wipes it)
               if [ -f ".last-inspect-ai-sha/last_sha.txt" ]; then
                 last_sha=$(cat ".last-inspect-ai-sha/last_sha.txt")
@@ -144,14 +140,51 @@ jobs:
           echo "Last tested commit: ${{ steps.inspect_commit.outputs.sha }}"
           echo "Current commit: ${{ steps.inspect_commit.outputs.sha }}"
 
+  # The asyncio and trio passes are independent pytest invocations, so run
+  # them as parallel matrix legs (previously sequential steps in one job,
+  # roughly doubling wall-clock time). Both legs test the exact commit
+  # resolved by check-commit.
+  slow-tests:
+    needs: check-commit
+    if: needs.check-commit.outputs.skip_tests != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: asyncio
+            pytest_flags: ""
+            test_timeout: 900
+          - mode: trio
+            pytest_flags: "--runtrio"
+            test_timeout: 1500
+
+    steps:
+      # Critical: Setup modern Docker build system
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          version: latest
+          driver-opts: |
+            network=host
+          buildkitd-flags: |
+            --allow-insecure-entitlement security.insecure
+            --allow-insecure-entitlement network.host
+
+      - name: Checkout inspect_ai repository
+        uses: actions/checkout@v6
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ needs.check-commit.outputs.sha }}
+          fetch-depth: 0
+
       - name: Set up Python
-        if: steps.check_commit_artifact.outputs.skip_tests != 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Cache pip dependencies
-        if: steps.check_commit_artifact.outputs.skip_tests != 'true'
         uses: actions/cache@v5
         with:
           path: ~/.cache/pip
@@ -160,7 +193,6 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Cache built wheels
-        if: steps.check_commit_artifact.outputs.skip_tests != 'true'
         uses: actions/cache@v5
         with:
           path: ~/.cache/pip/wheels
@@ -169,7 +201,6 @@ jobs:
             ${{ runner.os }}-wheels-
 
       - name: Install dependencies
-        if: steps.check_commit_artifact.outputs.skip_tests != 'true'
         # -e is required so that the tests can find dependent media files
         # that are not part of the package.
         run: |
@@ -178,9 +209,7 @@ jobs:
           pip install --only-binary=all -e ".[dev]"
           pip install pytest-timeout
 
-      - name: Run slow tests
-        id: slow_tests
-        if: steps.check_commit_artifact.outputs.skip_tests != 'true'
+      - name: Run slow tests (${{ matrix.mode }})
         timeout-minutes: 180
         env:
           DOCKER_BUILDKIT: 1
@@ -196,37 +225,31 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
         run: |
-          echo "Running slow tests with --runslow flag..."
-          pytest --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=900 ${{ inputs.pytest_args }}
+          echo "Running ${{ matrix.mode }} slow tests..."
+          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=${{ matrix.test_timeout }} ${{ inputs.pytest_args }}
 
-      - name: Run trio tests
-        if: (success() || steps.slow_tests.conclusion == 'failure') && steps.check_commit_artifact.outputs.skip_tests != 'true'
-        timeout-minutes: 180
-        env:
-          DOCKER_BUILDKIT: 1
-          BUILDKIT_PROGRESS: plain
-          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
-          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-
+      - name: Cleanup Docker resources
+        if: always()
         run: |
-          echo "Running trio tests with --runslow and --runtrio flags..."
-          pytest --runtrio --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=1500 ${{ inputs.pytest_args }}
+          docker system prune -f
+          docker volume prune -f
 
+  # Once-per-run bookkeeping: record the tested SHA (so later scheduled runs
+  # skip it) and post the Slack notification. Runs after both matrix legs.
+  report:
+    needs: [check-commit, slow-tests]
+    if: always() && needs.check-commit.result == 'success' && needs.check-commit.outputs.skip_tests != 'true'
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Save tested inspect_ai SHA as artifact
-        if: success() && github.event_name == 'schedule'
+        if: needs.slow-tests.result == 'success' && github.event_name == 'schedule'
         run: |
           mkdir -p .last-inspect-ai-sha
-          echo "${{ steps.inspect_commit.outputs.sha }}" > .last-inspect-ai-sha/last_sha.txt
+          echo "${{ needs.check-commit.outputs.sha }}" > .last-inspect-ai-sha/last_sha.txt
 
       - name: Upload tested SHA artifact
-        if: success() && github.event_name == 'schedule'
+        if: needs.slow-tests.result == 'success' && github.event_name == 'schedule'
         uses: actions/upload-artifact@v7
         with:
           name: last-inspect-ai-sha
@@ -234,7 +257,7 @@ jobs:
 
       - name: Report test results to Slack
         id: slack_notification
-        if: always() && steps.inspect_commit.outputs.ref == 'main' && steps.check_commit_artifact.outputs.skip_tests != 'true' && job.status != 'cancelled'
+        if: always() && needs.check-commit.outputs.ref == 'main' && needs.slow-tests.result != 'cancelled'
         uses: slackapi/slack-github-action@v3.0.1
         with:
           method: chat.postMessage
@@ -242,13 +265,13 @@ jobs:
           payload: |
             {
               "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
-              "text": "${{ job.status == 'success' && '✅ Slow Tests Passed' || '🚨 Slow Tests Failed' }}",
+              "text": "${{ needs.slow-tests.result == 'success' && '✅ Slow Tests Passed' || '🚨 Slow Tests Failed' }}",
               "blocks": [
                 {
                   "type": "header",
                   "text": {
                     "type": "plain_text",
-                    "text": "${{ job.status == 'success' && '✅ Slow Tests Passed' || '🚨 Slow Tests Failed' }}"
+                    "text": "${{ needs.slow-tests.result == 'success' && '✅ Slow Tests Passed' || '🚨 Slow Tests Failed' }}"
                   }
                 },
                 {
@@ -272,7 +295,7 @@ jobs:
                     },
                     {
                       "type": "mrkdwn",
-                      "text": "*Tested:*\n<https://github.com/UKGovernmentBEIS/inspect_ai/commit/${{ steps.inspect_commit.outputs.sha }}|inspect_ai@${{ steps.inspect_commit.outputs.ref }}#${{ steps.inspect_commit.outputs.short_sha }}>"
+                      "text": "*Tested:*\n<https://github.com/UKGovernmentBEIS/inspect_ai/commit/${{ needs.check-commit.outputs.sha }}|inspect_ai@${{ needs.check-commit.outputs.ref }}#${{ needs.check-commit.outputs.short_sha }}>"
                     }
                   ]
                 },
@@ -280,7 +303,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "${{ job.status == 'failure' && '<!channel> The slow tests have failed. Please investigate.' || 'All tests completed successfully! 🎉' }}"
+                    "text": "${{ needs.slow-tests.result != 'success' && '<!channel> The slow tests have failed. Please investigate.' || 'All tests completed successfully! 🎉' }}"
                   }
                 },
                 {
@@ -296,31 +319,25 @@ jobs:
             }
 
       - name: Upload Slack thread info for triage
-        if: failure() && steps.slack_notification.outcome == 'success'
+        if: always() && needs.slow-tests.result != 'success' && steps.slack_notification.outcome == 'success'
         run: |
           mkdir -p .triage
           cat > .triage/slack_thread.json <<EOF
           {
             "channel": "${{ steps.slack_notification.outputs.channel_id || secrets.SLACK_CHANNEL_ID }}",
             "thread_ts": "${{ steps.slack_notification.outputs.ts }}",
-            "inspect_ai_sha": "${{ steps.inspect_commit.outputs.sha }}",
-            "inspect_ai_ref": "${{ steps.inspect_commit.outputs.ref }}"
+            "inspect_ai_sha": "${{ needs.check-commit.outputs.sha }}",
+            "inspect_ai_ref": "${{ needs.check-commit.outputs.ref }}"
           }
           EOF
 
       - name: Upload triage artifact
-        if: failure() && steps.slack_notification.outcome == 'success'
+        if: always() && needs.slow-tests.result != 'success' && steps.slack_notification.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: triage-context
           path: .triage/slack_thread.json
           retention-days: 7
-
-      - name: Cleanup Docker resources
-        if: always()
-        run: |
-          docker system prune -f
-          docker volume prune -f
 
   test-slack-access:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_slack_access }}
