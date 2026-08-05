@@ -238,7 +238,11 @@ jobs:
 
         run: |
           echo "Running ${{ matrix.mode }} slow tests..."
-          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" --timeout=${{ matrix.test_timeout }} ${{ inputs.pytest_args }}
+          # -n auto / --timeout-method=thread mirror the main repo's CI test
+          # job (build.yml). The suite is latency-bound (serial provider API
+          # calls and docker container churn), not CPU-bound, so xdist
+          # parallelism cuts wall-clock dramatically.
+          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n auto --timeout=${{ matrix.test_timeout }} --timeout-method=thread ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
