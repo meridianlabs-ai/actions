@@ -240,11 +240,13 @@ jobs:
 
         run: |
           echo "Running ${{ matrix.mode }} slow tests..."
-          # -n auto / --timeout-method=thread mirror the main repo's CI test
-          # job (build.yml). The suite is latency-bound (serial provider API
+          # --timeout-method=thread mirrors the main repo's CI test job
+          # (build.yml). The suite is latency-bound (serial provider API
           # calls and docker container churn), not CPU-bound, so xdist
-          # parallelism cuts wall-clock dramatically.
-          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n auto --timeout=${{ matrix.test_timeout }} --timeout-method=thread ${{ inputs.pytest_args }}
+          # parallelism cuts wall-clock dramatically. -n logical (not auto):
+          # with psutil installed, auto counts physical cores — 4 on this
+          # hyperthreaded 8-vCPU runner — while logical uses all 8.
+          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
