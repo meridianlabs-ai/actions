@@ -179,6 +179,18 @@ jobs:
           ref: ${{ needs.check-commit.outputs.sha }}
           fetch-depth: 0
 
+      # Checking out a pinned SHA leaves a detached HEAD with no local `main`
+      # branch. inspect_ai's sandbox-tools install-state check runs
+      # `git diff main` to detect edits to sandbox-tools code and treats a
+      # failure to resolve `main` as "edited", which resolves a `-dev` helper
+      # binary that doesn't exist in CI (SandboxInjectionError in all
+      # sandbox-tools tests). Recreate `main` at the tested commit's closest
+      # ancestor on origin/main (the commit itself for scheduled runs) so the
+      # check sees exactly the sandbox-tools changes the commit carries
+      # relative to real main.
+      - name: Create local main ref for inspect_ai install-state check
+        run: git branch -f main "$(git merge-base HEAD origin/main)"
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
