@@ -65,10 +65,16 @@ jobs:
       # Checking out a pinned SHA/other-repo ref leaves a detached HEAD with
       # no local `main`; some install-state checks in inspect_ai run
       # `git diff main` and treat a failure to resolve it as "edited". Same
-      # workaround as inspect-ai-scheduled-tests.yml.
+      # workaround as inspect-ai-scheduled-tests.yml — but only when HEAD is
+      # actually detached: checking out the default branch puts us ON `main`,
+      # which both makes the ref exist already and makes force-updating it
+      # fatal ("used by worktree").
       - name: Create local main ref for inspect_ai install-state check
         shell: bash
-        run: git branch -f main "$(git merge-base HEAD origin/main)"
+        run: |
+          if [ "$(git rev-parse --abbrev-ref HEAD)" = "HEAD" ]; then
+            git branch -f main "$(git merge-base HEAD origin/main)"
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
