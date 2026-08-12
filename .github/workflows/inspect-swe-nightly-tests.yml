@@ -1,0 +1,148 @@
+---
+name: Inspect SWE Nightly Tests
+
+# Nightly run of the inspect_swe test suite with --runslow, so the slow and
+# API-key-gated tests (docker sandbox installs, real agent evals) that are
+# silently skipped by the repo's own CI actually run somewhere. Unlike the
+# inspect_ai scheduled tests, there is deliberately NO skip-if-unchanged
+# check: inspect_swe breaks via upstream drift (weekly inspect_ai releases,
+# agent CLI churn), so re-testing an unchanged commit is the point.
+
+"on":
+  schedule:
+    # Run nightly at 08:00 UTC (4am Boston)
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      inspect_swe_ref:
+        description: "inspect_swe branch/tag/commit to checkout"
+        required: false
+        default: ""
+        type: string
+      pytest_args:
+        description: "Additional arguments to pass to pytest (as a single string)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  nightly-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      sha: ${{ steps.swe_commit.outputs.sha }}
+      short_sha: ${{ steps.swe_commit.outputs.short_sha }}
+      ref: ${{ steps.swe_commit.outputs.ref }}
+
+    steps:
+      - name: Checkout inspect_swe repository
+        uses: actions/checkout@v6
+        with:
+          repository: meridianlabs-ai/inspect_swe
+          ref: ${{ inputs.inspect_swe_ref || '' }}
+
+      - name: Get inspect_swe commit info
+        id: swe_commit
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "ref=${{ inputs.inspect_swe_ref || 'main' }}" >> $GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-swe-pip-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-swe-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          # Not in the dev extras; mirrors the inspect_ai scheduled tests
+          # (xdist for docker/API latency, thread-method per-test timeouts).
+          pip install pytest-timeout pytest-xdist
+
+      - name: Run tests (fast + slow)
+        timeout-minutes: 120
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # --runslow also keeps the fast suite in the same invocation, so
+          # this is "CI tests + slow tests" in one pass. k8s and
+          # terminal-bench tests skip via their conftest guards; flaky tests
+          # stay excluded (no --runflaky).
+          pytest --runslow -n auto --timeout=900 --timeout-method=thread ${{ inputs.pytest_args }}
+
+      - name: Cleanup Docker resources
+        if: always()
+        run: |
+          docker system prune -f
+          docker volume prune -f
+
+  report:
+    needs: nightly-tests
+    if: always() && needs.nightly-tests.result != 'cancelled'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Report test results to Slack
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ secrets.SLACK_CHANNEL_ID_INSPECT_SWE }}",
+              "text": "${{ needs.nightly-tests.result == 'success' && '✅ Inspect SWE Nightly Tests Passed' || '🚨 Inspect SWE Nightly Tests Failed' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ needs.nightly-tests.result == 'success' && '✅ Inspect SWE Nightly Tests Passed' || '🚨 Inspect SWE Nightly Tests Failed' }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Trigger:*\n${{ github.event_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Workflow:*\n<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Tested:*\n<https://github.com/meridianlabs-ai/inspect_swe/commit/${{ needs.nightly-tests.outputs.sha }}|inspect_swe@${{ needs.nightly-tests.outputs.ref }}#${{ needs.nightly-tests.outputs.short_sha }}>"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ needs.nightly-tests.result != 'success' && '<!channel> The nightly tests have failed. Please investigate.' || 'All tests completed successfully! 🎉' }}"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Actor: ${{ github.actor }}"
+                    }
+                  ]
+                }
+              ]
+            }
