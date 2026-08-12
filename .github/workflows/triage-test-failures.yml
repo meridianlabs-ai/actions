@@ -334,3 +334,42 @@ jobs:
           # with the github_token passed above (also MARVIN_TOKEN), but keep it
           # so gh still authenticates as marvin if that behavior ever changes.
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+
+      # Issues the agent just created belong on the Atlas board (project 1 in
+      # meridianlabs-ai) like every other tracked work item — without this
+      # they are invisible to the board's flows (observed: inspect_ai#198).
+      # Detection is deterministic: a created issue's Links section carries
+      # THIS run's URL (the prompt template guarantees it), so search the
+      # issues repo for this run id. Comments on existing issues don't match
+      # (issue-body search only), so bucket A/B/C-existing runs no-op here.
+      # Search indexing lags issue creation — retry briefly. MARVIN_TOKEN has
+      # the `project` scope (same token the Atlas sync uses). Adding is
+      # idempotent; the board's built-in workflow sets Status=Todo.
+      - name: Add created triage issues to Atlas
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          PROJECT_ID: PVT_kwDOC7YMCM4BU68p
+        run: |
+          set -uo pipefail
+          nums=""
+          for attempt in 1 2 3 4; do
+            nums=$(gh search issues --repo "$ISSUES_REPO" \
+                     "actions/runs/${{ github.run_id }}" \
+                     --json number --jq '.[].number' 2>/dev/null || true)
+            [ -n "$nums" ] && break
+            sleep 20
+          done
+          if [ -z "$nums" ]; then
+            echo "No issues created by this run (or search index lagged; the"
+            echo "hourly board flows do not cover these — add manually if the"
+            echo "agent's summary shows a new issue)."
+            exit 0
+          fi
+          for n in $nums; do
+            node=$(gh api "repos/$ISSUES_REPO/issues/$n" --jq .node_id)
+            gh api graphql \
+              -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+              -f p="$PROJECT_ID" -f c="$node" --silent \
+              && echo "added $ISSUES_REPO#$n to Atlas"
+          done
