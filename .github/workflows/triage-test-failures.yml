@@ -248,7 +248,16 @@ jobs:
               1. Open a tracking issue in the issues repo (${{ env.ISSUES_REPO }}) with:
                  - Title: `Triage: <short summary>`
                  - Assignee: `ransomr`
-                 - Labels: none required
+                 - Labels: none at creation. AFTER the issue is created (body
+                   complete), add the `auto` label as a separate step:
+                   `gh issue edit <n> --repo ${{ env.ISSUES_REPO }} --add-label auto`
+                   The label hands the issue to the autonomous pipeline: the
+                   fork's agent implements your Proposed fix and opens a PR
+                   into the automated review loop, so write the Proposed fix
+                   section as a brief the implementer can follow verbatim.
+                   Bucket C ONLY — this is the well-understood-fix bucket; if
+                   your confidence wavers while writing the issue, drop back
+                   to bucket D (unlabeled) instead.
                  - Body structured as:
                    ## Summary
                    <one-line description>
@@ -265,7 +274,10 @@ jobs:
                     Reference absolute paths under inspect_ai/ so a human can apply it.>
 
                    ## Suggested follow-up
-                   A PR can be created from this fix. To do so, run locally:
+                   This issue carries the `auto` label, so the autonomous agent
+                   will implement the proposed fix and open a PR into the
+                   automated review loop. If that doesn't engage (or the fix
+                   needs rework), a PR can be created manually:
                    ```
                    cd <path-to-inspect_ai-clone>
                    git checkout -b claude/triage-<UPSTREAM_RUN_ID>
@@ -283,8 +295,10 @@ jobs:
             You cannot confidently diagnose, OR the fix would be speculative, OR it touches
             more than ~30 lines, OR multiple tests failed for different reasons.
             Action: same dedup logic as bucket C (if `EXISTING_ISSUE` is set, reopen if
-            needed and comment; otherwise open a new issue). If opening a new issue, body
-            has:
+            needed and comment; otherwise open a new issue) — but NEVER add the `auto`
+            label here: bucket D means the fix is not well understood, and the label
+            would hand a speculative brief to the autonomous pipeline. If opening a
+            new issue, body has:
               ## Root cause
               <"not yet determined" + what you examined>
 
@@ -320,8 +334,9 @@ jobs:
             - All `gh issue` commands (list, create, comment, reopen) must pass
               `--repo ${{ env.ISSUES_REPO }}` — never operate on issues in this
               (triage) repo or in UKGovernmentBEIS/inspect_ai.
-            - At most one issue-related action per run: either open one new issue OR
-              comment on (and optionally reopen) one existing issue. Never both.
+            - At most one issue-related action per run: either open one new issue
+              (bucket C's follow-up `auto` label add is part of that single action)
+              OR comment on (and optionally reopen) one existing issue. Never both.
             - Never open a new issue if `EXISTING_ISSUE` is set.
             - Never modify files in `inspect_ai/` — treat it as read-only reference.
             - If you hit any error you cannot resolve, still follow bucket-D behavior
@@ -334,3 +349,42 @@ jobs:
           # with the github_token passed above (also MARVIN_TOKEN), but keep it
           # so gh still authenticates as marvin if that behavior ever changes.
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+
+      # Issues the agent just created belong on the Atlas board (project 1 in
+      # meridianlabs-ai) like every other tracked work item — without this
+      # they are invisible to the board's flows (observed: inspect_ai#198).
+      # Detection is deterministic: a created issue's Links section carries
+      # THIS run's URL (the prompt template guarantees it), so search the
+      # issues repo for this run id. Comments on existing issues don't match
+      # (issue-body search only), so bucket A/B/C-existing runs no-op here.
+      # Search indexing lags issue creation — retry briefly. MARVIN_TOKEN has
+      # the `project` scope (same token the Atlas sync uses). Adding is
+      # idempotent; the board's built-in workflow sets Status=Todo.
+      - name: Add created triage issues to Atlas
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          PROJECT_ID: PVT_kwDOC7YMCM4BU68p
+        run: |
+          set -uo pipefail
+          nums=""
+          for attempt in 1 2 3 4; do
+            nums=$(gh search issues --repo "$ISSUES_REPO" \
+                     "actions/runs/${{ github.run_id }}" \
+                     --json number --jq '.[].number' 2>/dev/null || true)
+            [ -n "$nums" ] && break
+            sleep 20
+          done
+          if [ -z "$nums" ]; then
+            echo "No issues created by this run (or search index lagged; the"
+            echo "hourly board flows do not cover these — add manually if the"
+            echo "agent's summary shows a new issue)."
+            exit 0
+          fi
+          for n in $nums; do
+            node=$(gh api "repos/$ISSUES_REPO/issues/$n" --jq .node_id)
+            gh api graphql \
+              -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+              -f p="$PROJECT_ID" -f c="$node" --silent \
+              && echo "added $ISSUES_REPO#$n to Atlas"
+          done
