@@ -79,12 +79,20 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Plain-text eval output: no rich box-drawing panels or animated
+          # progress bars in the CI log (they render as thousands of wrapped
+          # junk lines when 20 tests dump captured output).
+          INSPECT_DISPLAY: plain
         run: |
           # --runslow also keeps the fast suite in the same invocation, so
           # this is "CI tests + slow tests" in one pass. k8s and
           # terminal-bench tests skip via their conftest guards; flaky tests
           # stay excluded (no --runflaky).
-          pytest --runslow -n auto --timeout=900 --timeout-method=thread ${{ inputs.pytest_args }}
+          # --tb=short + log_level=warning keep failure dumps readable:
+          # inspect_ai's TRACE-level subprocess logging (~3k lines in the
+          # first run) otherwise lands in every failed test's captured-log
+          # section.
+          pytest --runslow -n auto --timeout=900 --timeout-method=thread --tb=short -o log_level=warning ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
