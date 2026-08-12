@@ -68,6 +68,10 @@ jobs:
           # Not in the dev extras; mirrors the inspect_ai scheduled tests
           # (xdist for docker/API latency, thread-method per-test timeouts).
           pip install pytest-timeout pytest-xdist
+          # The gemini_cli tests are gated on GOOGLE_API_KEY (which we set)
+          # but inspect_ai's Google provider needs google-genai installed —
+          # without it they fail with PrerequisiteError instead of skipping.
+          pip install google-genai
 
       - name: Run tests (fast + slow)
         timeout-minutes: 120
