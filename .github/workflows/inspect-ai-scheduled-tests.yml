@@ -282,6 +282,10 @@ jobs:
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.check-commit.outputs.sha }}
+          # Full history so setuptools_scm sees tags; a shallow clone yields a
+          # bogus 0.1.dev version that conflicts with inspect-scout's
+          # inspect-ai>=… pin.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
