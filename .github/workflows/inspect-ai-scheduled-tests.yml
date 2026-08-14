@@ -282,10 +282,14 @@ jobs:
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.check-commit.outputs.sha }}
-          # Full history so setuptools_scm sees tags; a shallow clone yields a
-          # bogus 0.1.dev version that conflicts with inspect-scout's
-          # inspect-ai>=… pin.
+          # All refs/commits so setuptools_scm sees tags (a shallow clone
+          # yields a bogus 0.1.dev version that conflicts with inspect-scout's
+          # inspect-ai>=… pin), but blob:none to skip historical file
+          # contents — the full pack is ~400MB. Same pattern as inspect_ai's
+          # own CI.
           fetch-depth: 0
+          fetch-tags: true
+          filter: "blob:none"
 
       - name: Set up Python
         uses: actions/setup-python@v6
