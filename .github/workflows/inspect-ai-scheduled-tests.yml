@@ -258,22 +258,80 @@ jobs:
           docker system prune -f
           docker volume prune -f
 
+  # Static analysis (the CI-safe equivalent of inspect_ai's `make check`)
+  # against a fresh dependency resolution. inspect_ai's own CI gates run
+  # mypy/ruff via `uv run`, which syncs the env against uv.lock — so upstream
+  # static analysis only ever validates the locked dependency versions. This
+  # job installs with plain pip (the frontier resolution a new user would
+  # get), where newer deps can break mypy — it reads installed packages'
+  # types/stubs — in ways the locked gate never sees. Separate job rather
+  # than a step in the asyncio/trio matrix so it runs once, not twice.
+  # Mirrors inspect_ai's `make check` recipe, which mutates (`ruff check
+  # --fix` auto-fixes, `ruff format` rewrites), swapped for the check-only
+  # equivalents. If that recipe changes upstream, this job drifts; accepted
+  # to keep the no-inspect_ai-changes constraint.
+  static-analysis:
+    needs: check-commit
+    if: needs.check-commit.outputs.skip_tests != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout inspect_ai repository
+        uses: actions/checkout@v6
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ needs.check-commit.outputs.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --only-binary=all -e ".[dev]"
+
+      - name: Run ruff
+        run: |
+          ruff check
+          ruff format --check
+
+      - name: Run ruff (inspect_tool_support)
+        working-directory: src/inspect_tool_support/src
+        run: |
+          ruff check
+          ruff format --check
+
+      - name: Run mypy
+        run: mypy --exclude tests/test_package src tests
+
   # Once-per-run bookkeeping: record the tested SHA (so later scheduled runs
-  # skip it) and post the Slack notification. Runs after both matrix legs.
+  # skip it) and post the Slack notification. Runs after both matrix legs
+  # and the static-analysis job.
   report:
-    needs: [check-commit, slow-tests]
+    needs: [check-commit, slow-tests, static-analysis]
     if: always() && needs.check-commit.result == 'success' && needs.check-commit.outputs.skip_tests != 'true'
     runs-on: ubuntu-latest
 
     steps:
       - name: Save tested inspect_ai SHA as artifact
-        if: needs.slow-tests.result == 'success' && github.event_name == 'schedule'
+        if: needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule'
         run: |
           mkdir -p .last-inspect-ai-sha
           echo "${{ needs.check-commit.outputs.sha }}" > .last-inspect-ai-sha/last_sha.txt
 
       - name: Upload tested SHA artifact
-        if: needs.slow-tests.result == 'success' && github.event_name == 'schedule'
+        if: needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule'
         uses: actions/upload-artifact@v7
         with:
           name: last-inspect-ai-sha
@@ -281,7 +339,7 @@ jobs:
 
       - name: Report test results to Slack
         id: slack_notification
-        if: always() && needs.check-commit.outputs.ref == 'main' && needs.slow-tests.result != 'cancelled'
+        if: always() && needs.check-commit.outputs.ref == 'main' && needs.slow-tests.result != 'cancelled' && needs.static-analysis.result != 'cancelled'
         uses: slackapi/slack-github-action@v3.0.1
         with:
           method: chat.postMessage
@@ -289,13 +347,13 @@ jobs:
           payload: |
             {
               "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
-              "text": "${{ needs.slow-tests.result == 'success' && '✅ Slow Tests Passed' || '🚨 Slow Tests Failed' }}",
+              "text": "${{ (needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success') && '✅ Scheduled Tests Passed' || '🚨 Scheduled Tests Failed' }}",
               "blocks": [
                 {
                   "type": "header",
                   "text": {
                     "type": "plain_text",
-                    "text": "${{ needs.slow-tests.result == 'success' && '✅ Slow Tests Passed' || '🚨 Slow Tests Failed' }}"
+                    "text": "${{ (needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success') && '✅ Scheduled Tests Passed' || '🚨 Scheduled Tests Failed' }}"
                   }
                 },
                 {
@@ -320,6 +378,14 @@ jobs:
                     {
                       "type": "mrkdwn",
                       "text": "*Tested:*\n<https://github.com/UKGovernmentBEIS/inspect_ai/commit/${{ needs.check-commit.outputs.sha }}|inspect_ai@${{ needs.check-commit.outputs.ref }}#${{ needs.check-commit.outputs.short_sha }}>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Slow Tests:*\n${{ needs.slow-tests.result == 'success' && '✅' || '❌' }} ${{ needs.slow-tests.result }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Static Analysis:*\n${{ needs.static-analysis.result == 'success' && '✅' || '❌' }} ${{ needs.static-analysis.result }}"
                     }
                   ]
                 },
@@ -327,7 +393,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "${{ needs.slow-tests.result != 'success' && '<!channel> The slow tests have failed. Please investigate.' || 'All tests completed successfully! 🎉' }}"
+                    "text": "${{ (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && '<!channel> The scheduled tests have failed. Please investigate.' || 'All tests and static analysis completed successfully! 🎉' }}"
                   }
                 },
                 {
@@ -343,7 +409,7 @@ jobs:
             }
 
       - name: Upload Slack thread info for triage
-        if: always() && needs.slow-tests.result != 'success' && steps.slack_notification.outcome == 'success'
+        if: always() && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
         run: |
           mkdir -p .triage
           cat > .triage/slack_thread.json <<EOF
@@ -356,7 +422,7 @@ jobs:
           EOF
 
       - name: Upload triage artifact
-        if: always() && needs.slow-tests.result != 'success' && steps.slack_notification.outcome == 'success'
+        if: always() && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: triage-context
