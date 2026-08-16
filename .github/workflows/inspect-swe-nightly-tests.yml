@@ -66,12 +66,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           # Not in the dev extras; mirrors the inspect_ai scheduled tests
-          # (xdist for docker/API latency, thread-method per-test timeouts).
+          # (xdist for docker/API latency, per-test timeouts).
           pip install pytest-timeout pytest-xdist
           # The gemini_cli tests are gated on GOOGLE_API_KEY (which we set)
           # but inspect_ai's Google provider needs google-genai installed —
           # without it they fail with PrerequisiteError instead of skipping.
           pip install google-genai
+          # inspect_ai 0.3.259 raised its OpenAI provider's runtime floor to
+          # openai>=3.1.0, but litellm (pulled in by mini_swe_agent) still
+          # declares openai<3.0.0, so the resolver lands on 2.54.0 and every
+          # openai/* test dies with:
+          #   PrerequisiteError: OpenAI API requires at least version 3.1.0 of
+          #   package openai (you have version 2.54.0 installed)
+          # The litellm cap is stale metadata rather than a real
+          # incompatibility — with openai 3.1.0 forced, litellm and
+          # minisweagent both import and the fast suite is green — so override
+          # it here. Drop this once litellm ships a release allowing openai 3.
+          pip install --upgrade 'openai>=3.1.0'
 
       - name: Run tests (fast + slow)
         timeout-minutes: 120
@@ -92,7 +103,32 @@ jobs:
           # inspect_ai's TRACE-level subprocess logging (~3k lines in the
           # first run) otherwise lands in every failed test's captured-log
           # section.
-          pytest --runslow -n auto --timeout=1500 --timeout-method=thread --tb=short -o log_level=warning ${{ inputs.pytest_args }}
+          #
+          # --timeout-method=signal (not thread): the thread method dumps
+          # stacks to the worker's stderr and then os._exit()s it, which
+          # xdist can only report as "worker 'gwN' crashed" — the stack dump
+          # naming the hung await is lost. SIGALRM instead raises inside the
+          # test, so a stall is reported as `Failed: Timeout >600.0s` with a
+          # traceback, and the worker survives. These are asyncio evals, so
+          # the signal always lands (the thread method's one advantage —
+          # interrupting a blocking C call — doesn't apply).
+          #
+          # --timeout=900 (was 1500): a healthy full run is ~27 min, so a
+          # 25-minute per-test timeout meant a single hung test could sit
+          # silent for nearly the length of the whole suite.
+          #
+          # 900s is deliberately generous rather than tight. Measured by
+          # --durations in run 31970591224, the slowest passing test is
+          # test_mini_swe_attempts[docker] at 440s -- and that was five tests
+          # on two workers, with far less docker contention than the full
+          # suite. This ceiling is the last-resort backstop; the real bound
+          # belongs in the evals themselves (inspect_swe#129 adds a 300s
+          # per-sample time limit), so it should be clear of honest runs
+          # rather than racing them.
+          #
+          # --durations=15 keeps that measurement coming, so the ceiling can
+          # be re-tuned from data instead of guesswork.
+          pytest --runslow -n auto --timeout=900 --timeout-method=signal --durations=15 --tb=short -o log_level=warning ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
