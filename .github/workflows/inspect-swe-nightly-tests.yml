@@ -113,14 +113,22 @@ jobs:
           # the signal always lands (the thread method's one advantage —
           # interrupting a blocking C call — doesn't apply).
           #
-          # --timeout=600 (was 1500): a healthy full run is ~27 min, so a
+          # --timeout=900 (was 1500): a healthy full run is ~27 min, so a
           # 25-minute per-test timeout meant a single hung test could sit
-          # silent for nearly the length of the whole suite. The slowest
-          # real test is well under 10 min.
+          # silent for nearly the length of the whole suite.
           #
-          # --durations=15 so the 600s ceiling can be re-tuned against what
-          # the slow tests actually cost, rather than by guesswork.
-          pytest --runslow -n auto --timeout=600 --timeout-method=signal --durations=15 --tb=short -o log_level=warning ${{ inputs.pytest_args }}
+          # 900s is deliberately generous rather than tight. Measured by
+          # --durations in run 31970591224, the slowest passing test is
+          # test_mini_swe_attempts[docker] at 440s -- and that was five tests
+          # on two workers, with far less docker contention than the full
+          # suite. This ceiling is the last-resort backstop; the real bound
+          # belongs in the evals themselves (inspect_swe#129 adds a 300s
+          # per-sample time limit), so it should be clear of honest runs
+          # rather than racing them.
+          #
+          # --durations=15 keeps that measurement coming, so the ceiling can
+          # be re-tuned from data instead of guesswork.
+          pytest --runslow -n auto --timeout=900 --timeout-method=signal --durations=15 --tb=short -o log_level=warning ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
