@@ -66,7 +66,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           # Not in the dev extras; mirrors the inspect_ai scheduled tests
-          # (xdist for docker/API latency, thread-method per-test timeouts).
+          # (xdist for docker/API latency, per-test timeouts).
           pip install pytest-timeout pytest-xdist
           # The gemini_cli tests are gated on GOOGLE_API_KEY (which we set)
           # but inspect_ai's Google provider needs google-genai installed —
@@ -92,7 +92,21 @@ jobs:
           # inspect_ai's TRACE-level subprocess logging (~3k lines in the
           # first run) otherwise lands in every failed test's captured-log
           # section.
-          pytest --runslow -n auto --timeout=1500 --timeout-method=thread --tb=short -o log_level=warning ${{ inputs.pytest_args }}
+          #
+          # --timeout-method=signal (not thread): the thread method dumps
+          # stacks to the worker's stderr and then os._exit()s it, which
+          # xdist can only report as "worker 'gwN' crashed" — the stack dump
+          # naming the hung await is lost. SIGALRM instead raises inside the
+          # test, so a stall is reported as `Failed: Timeout >600.0s` with a
+          # traceback, and the worker survives. These are asyncio evals, so
+          # the signal always lands (the thread method's one advantage —
+          # interrupting a blocking C call — doesn't apply).
+          #
+          # --timeout=600 (was 1500): a healthy full run is ~27 min, so a
+          # 25-minute per-test timeout meant a single hung test could sit
+          # silent for nearly the length of the whole suite. The slowest
+          # real test is well under 10 min.
+          pytest --runslow -n auto --timeout=600 --timeout-method=signal --tb=short -o log_level=warning ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
