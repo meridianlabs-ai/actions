@@ -72,6 +72,17 @@ jobs:
           # but inspect_ai's Google provider needs google-genai installed —
           # without it they fail with PrerequisiteError instead of skipping.
           pip install google-genai
+          # inspect_ai 0.3.259 raised its OpenAI provider's runtime floor to
+          # openai>=3.1.0, but litellm (pulled in by mini_swe_agent) still
+          # declares openai<3.0.0, so the resolver lands on 2.54.0 and every
+          # openai/* test dies with:
+          #   PrerequisiteError: OpenAI API requires at least version 3.1.0 of
+          #   package openai (you have version 2.54.0 installed)
+          # The litellm cap is stale metadata rather than a real
+          # incompatibility — with openai 3.1.0 forced, litellm and
+          # minisweagent both import and the fast suite is green — so override
+          # it here. Drop this once litellm ships a release allowing openai 3.
+          pip install --upgrade 'openai>=3.1.0'
 
       - name: Run tests (fast + slow)
         timeout-minutes: 120
@@ -106,7 +117,10 @@ jobs:
           # 25-minute per-test timeout meant a single hung test could sit
           # silent for nearly the length of the whole suite. The slowest
           # real test is well under 10 min.
-          pytest --runslow -n auto --timeout=600 --timeout-method=signal --tb=short -o log_level=warning ${{ inputs.pytest_args }}
+          #
+          # --durations=15 so the 600s ceiling can be re-tuned against what
+          # the slow tests actually cost, rather than by guesswork.
+          pytest --runslow -n auto --timeout=600 --timeout-method=signal --durations=15 --tb=short -o log_level=warning ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
