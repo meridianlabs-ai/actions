@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout inspect_ai
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ inputs.inspect_ai_ref || 'main' }}
@@ -42,6 +42,10 @@ jobs:
           # ~400MB historical pack (the skill's own recommendation).
           fetch-depth: 0
           filter: "blob:none"
+          # Don't persist the read-only workflow token as an extraheader in
+          # .git/config — it would override MARVIN_TOKEN on `git push fork`
+          # (403). The repo is public; nothing here needs that token.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
