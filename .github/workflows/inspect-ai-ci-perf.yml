@@ -48,7 +48,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -62,14 +62,19 @@ jobs:
         # Marvin has write on the meridianlabs-ai/inspect_ai fork, not
         # upstream: branches push to the `fork` remote and PRs open against
         # upstream via `gh api` with head_repo (see AGENTS.md, "Opening an
-        # upstream PR from an org fork").
+        # upstream PR from an org fork"). The remote URL stays credential-free;
+        # `gh auth setup-git` installs gh as git's credential helper, which
+        # resolves the PAT from GH_TOKEN at push time (the agent step runs
+        # with GH_TOKEN=MARVIN_TOKEN) — keeping the token out of .git/config
+        # and `git remote -v` output.
         working-directory: inspect_ai
         env:
-          MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
         run: |
           git config user.name "i-am-marvin"
           git config user.email "294938113+i-am-marvin@users.noreply.github.com"
-          git remote add fork "https://x-access-token:${MARVIN_TOKEN}@github.com/meridianlabs-ai/inspect_ai.git"
+          git remote add fork "https://github.com/meridianlabs-ai/inspect_ai.git"
+          gh auth setup-git --hostname github.com
 
       - name: Run ci-perf skill
         uses: anthropics/claude-code-action@v1
