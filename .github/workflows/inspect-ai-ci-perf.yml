@@ -1,0 +1,112 @@
+---
+name: Inspect AI CI Perf
+
+# Recurring CI-performance run for UKGovernmentBEIS/inspect_ai: executes the
+# repo's ci-perf skill (.claude/skills/ci-perf/SKILL.md) unattended. Each run
+# collects a fresh timing snapshot, rewrites the report, updates the PR
+# ledger, and may open a report PR plus up to 2 safe-fix PRs upstream (from
+# the meridianlabs-ai/inspect_ai fork, authored by marvin). The skill's
+# "Scheduled (unattended) mode" section defines what a run may and may not do.
+
+"on":
+  schedule:
+    # Every 2 days (odd days of month) at 09:00 UTC — early morning US East.
+    - cron: "0 9 */2 * *"
+  workflow_dispatch:
+    inputs:
+      inspect_ai_ref:
+        description: "inspect_ai branch/tag/commit to run against"
+        required: false
+        default: "main"
+        type: string
+
+concurrency:
+  group: inspect-ai-ci-perf
+  cancel-in-progress: false
+
+jobs:
+  ci-perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout inspect_ai
+        uses: actions/checkout@v7
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ inputs.inspect_ai_ref || 'main' }}
+          path: inspect_ai
+          # Full history for branching/merge-base, blob:none to skip the
+          # ~400MB historical pack (the skill's own recommendation).
+          fetch-depth: 0
+          filter: "blob:none"
+          # Don't persist the read-only workflow token as an extraheader in
+          # .git/config — it would override MARVIN_TOKEN on `git push fork`
+          # (403). The repo is public; nothing here needs that token.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install inspect_ai dev dependencies
+        # The skill's fix phase validates safe fixes locally (ruff, mypy,
+        # affected tests); its collector needs only stdlib + gh.
+        working-directory: inspect_ai
+        run: python -m pip install -e ".[dev]"
+
+      - name: Configure git as marvin with push access to the fork
+        # Marvin has write on the meridianlabs-ai/inspect_ai fork, not
+        # upstream: branches push to the `fork` remote and PRs open against
+        # upstream via `gh api` with head_repo (see AGENTS.md, "Opening an
+        # upstream PR from an org fork"). The remote URL stays credential-free;
+        # `gh auth setup-git` installs gh as git's credential helper, which
+        # resolves the PAT from GH_TOKEN at push time (the agent step runs
+        # with GH_TOKEN=MARVIN_TOKEN) — keeping the token out of .git/config
+        # and `git remote -v` output.
+        working-directory: inspect_ai
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+        run: |
+          git config user.name "i-am-marvin"
+          git config user.email "294938113+i-am-marvin@users.noreply.github.com"
+          git remote add fork "https://github.com/meridianlabs-ai/inspect_ai.git"
+          gh auth setup-git --hostname github.com
+
+      - name: Run ci-perf skill
+        uses: anthropics/claude-code-action@v1
+        env:
+          CI_PERF_SCHEDULED: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Marvin's PAT so gh inside the agent can open upstream PRs and
+          # push isn't limited to this repo's read-only workflow token.
+          github_token: ${{ secrets.MARVIN_TOKEN }}
+          claude_args: |
+            --allowedTools Bash,Read,Edit,Write,Grep,Glob
+          prompt: |
+            This is the scheduled, unattended CI-performance run for
+            UKGovernmentBEIS/inspect_ai (CI_PERF_SCHEDULED=1; no user is
+            present to answer questions).
+
+            Work in `inspect_ai/` (a full-history, blob:none checkout of
+            upstream at ${{ inputs.inspect_ai_ref || 'main' }}). Read
+            `inspect_ai/.claude/skills/ci-perf/SKILL.md` and execute the
+            skill end to end, following its "Scheduled (unattended) mode"
+            section for everything the interactive instructions would ask
+            the user about.
+
+            Environment notes:
+            - `gh` is authenticated as the marvin machine account.
+            - inspect_ai dev dependencies are installed into the ambient
+              Python (no venv to activate).
+            - git is configured as marvin; the `fork` remote points at
+              meridianlabs-ai/inspect_ai with push access. `origin` is
+              upstream (read-only). Branch off `origin/main`, push branches
+              to `fork`, and open PRs against upstream per AGENTS.md's
+              "Opening an upstream PR from an org fork" section.
+            - Link this workflow run in each PR body:
+              ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
