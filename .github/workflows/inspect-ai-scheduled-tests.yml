@@ -227,6 +227,18 @@ jobs:
           # pip-installing it mid-run on the xdist critical path (~9s).
           pip install --no-deps ./tests/test_package
 
+      # Sandbox containers intermittently die mid-test with no output and are
+      # gone from `docker ps --all` before inspect_ai's own post-mortem probes
+      # run (meridianlabs-ai/actions#264). Record the daemon's event stream
+      # for the whole test run: `die` events carry the exit code, `oom`/`kill`
+      # events say what hit the container, and a `destroy` event pins down
+      # when (and that) something removed it. Uploaded as an artifact below.
+      - name: Start docker events recorder
+        run: |
+          mkdir -p /tmp/docker-forensics
+          docker events --format '{{json .}}' > /tmp/docker-forensics/docker-events.jsonl 2>&1 &
+          echo $! > /tmp/docker-forensics/events.pid
+
       - name: Run slow tests (${{ matrix.mode }})
         timeout-minutes: 180
         env:
@@ -251,6 +263,25 @@ jobs:
           # with psutil installed, auto counts physical cores — 4 on this
           # hyperthreaded 8-vCPU runner — while logical uses all 8.
           pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread ${{ inputs.pytest_args }}
+
+      # Stop the recorder before the prune below so the tape ends with the
+      # test run, and add the two other places a container killer leaves
+      # tracks: dockerd's journal (daemon-side errors, restarts, API-driven
+      # removes) and the kernel log (OOM kills).
+      - name: Collect docker forensics
+        if: always()
+        run: |
+          kill "$(cat /tmp/docker-forensics/events.pid)" 2>/dev/null || true
+          sudo journalctl -u docker --no-pager > /tmp/docker-forensics/dockerd.log 2>&1 || true
+          sudo dmesg --ctime > /tmp/docker-forensics/dmesg.log 2>&1 || true
+
+      - name: Upload docker forensics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-forensics-${{ matrix.mode }}
+          path: /tmp/docker-forensics/
+          retention-days: 14
 
       - name: Cleanup Docker resources
         if: always()
