@@ -148,7 +148,7 @@ jobs:
     needs: check-commit
     if: needs.check-commit.outputs.skip_tests != 'true'
     # Larger GitHub-hosted runner (8-core / 32 GB / 300 GB SSD); the suite's
-    # -n auto xdist parallelism and docker churn scale with cores.
+    # -n logical xdist parallelism and docker churn scale with cores.
     runs-on: slow_test_runner
     timeout-minutes: 180
     strategy:
@@ -250,7 +250,11 @@ jobs:
           # parallelism cuts wall-clock dramatically. -n logical (not auto):
           # with psutil installed, auto counts physical cores — 4 on this
           # hyperthreaded 8-vCPU runner — while logical uses all 8.
-          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread ${{ inputs.pytest_args }}
+          # --dist worksteal (not xdist's default load): load hands each
+          # worker a large upfront chunk, so one worker stuck with slow tests
+          # runs long after the others finish; worksteal rebalances idle
+          # workers onto the remaining queue.
+          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --dist worksteal --timeout=${{ matrix.test_timeout }} --timeout-method=thread ${{ inputs.pytest_args }}
 
       - name: Cleanup Docker resources
         if: always()
