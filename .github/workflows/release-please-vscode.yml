@@ -78,13 +78,13 @@ on:
         type: string
         default: ""
       vsce-version:
-        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies)."
+        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies). Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
         type: string
-        default: "3.6.0"
+        default: "3.9.2"
       ovsx-version:
         description: "Pinned ovsx version used by the publish job (deliberately NOT taken from the repo's devDependencies)."
         type: string
-        default: "0.10.5"
+        default: "0.10.12"
     secrets:
       RELEASE_PLEASE_APP_ID:
         required: true
@@ -308,8 +308,11 @@ jobs:
             ovsx publish "$VSIX" --pat "$OVSX_PAT"
           fi
 
+      # No checkout in this job, so `gh` cannot infer the repository from a git
+      # remote; GH_REPO tells it which repo owns the release.
       - name: Upload VSIX to GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
         run: gh release upload "$TAG" "$VSIX" --clobber
