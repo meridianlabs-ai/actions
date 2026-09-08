@@ -16,9 +16,9 @@ name: Inspect AI CI Perf
     inputs:
       inspect_ai_ref:
         description: >-
-          inspect_ai ref to run against: 'main', a release tag (vX.Y.Z), or
-          a 40-hex commit reachable from main. Other refs (branches, PR heads)
-          are rejected.
+          inspect_ai ref to run against: 'main', a release tag (X.Y.Z, e.g.
+          0.3.263), or a 40-hex commit reachable from main. Other refs
+          (branches, PR heads) are rejected.
         required: false
         default: "main"
         type: string
@@ -53,15 +53,16 @@ jobs:
           if [ "$REF" = "main" ]; then
             checkout_ref="main"
           elif [[ "$REF" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.-]*$ ]]; then
-            # Release tag, e.g. v0.3.100 or v0.3.100rc1 (upstream tags are
-            # maintainer-controlled; no '/' so it cannot name a PR ref).
+            # Release tag, e.g. 0.3.263 or 0.3.263rc1 (upstream tags have no
+            # 'v' prefix; the optional 'v' is tolerated). Upstream tags are
+            # maintainer-controlled; no '/' so it cannot name a PR ref.
             checkout_ref="$REF"
           elif [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
             # Check out main first; the ancestry check below then moves HEAD.
             checkout_ref="main"
             is_sha=true
           else
-            echo "::error::inspect_ai_ref must be 'main', a release tag (vX.Y.Z), or a 40-hex commit reachable from main; got '$REF'"
+            echo "::error::inspect_ai_ref must be 'main', a release tag (X.Y.Z, e.g. 0.3.263), or a 40-hex commit reachable from main; got '$REF'"
             exit 1
           fi
           {
