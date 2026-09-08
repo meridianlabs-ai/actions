@@ -35,7 +35,16 @@ name: Release Please — VS Code extension (reusable)
 # The consuming repo must provide these pnpm scripts: lint, build,
 # build:production, test, vsce:package. `vsce:package` must produce exactly one
 # .vsix in the repo root. Add required reviewers to the `environment` (default
-# `marketplace`) to gate who can ship.
+# `marketplace`) to gate who can ship, and store VSCE_PAT / OVSX_PAT as
+# ENVIRONMENT secrets on that environment, not as repository or organisation
+# secrets. The caller passes `secrets: inherit`, and the caller's own
+# release.yml is repo-authored code on the release branch: if the PATs were
+# repo-level, any job added to that file could read them with no approval and
+# without touching this workflow. Environment-scoped secrets are only exposed to
+# jobs that reference the environment, which puts the reviewer gate in the path.
+# The caller workflow file itself therefore stays inside the trust boundary —
+# before approving, reviewers should confirm the run's workflow file is the
+# expected one and unchanged.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
@@ -66,7 +75,7 @@ on:
         type: boolean
         default: true
       environment:
-        description: "Deployment environment for the publish job (add required reviewers to gate releases)"
+        description: "Deployment environment for the publish job. Add required reviewers to gate releases, and store VSCE_PAT / OVSX_PAT as environment secrets on it (not repo secrets) so only approved jobs can read them."
         type: string
         default: "marketplace"
       config-file:
