@@ -23,8 +23,11 @@ name: Release Please — VS Code extension (reusable)
 # the job that runs it, so the job that runs it must not hold them. The
 # marketplace CLIs used by publish are pinned via `vsce-version` /
 # `ovsx-version` rather than resolved from the repo's devDependencies, for the
-# same reason. Auth for release-please is a short-lived token from the Meridian
-# release GitHub App.
+# same reason, and are installed with --ignore-scripts in a step that holds no
+# secrets. Note the pins cover only vsce/ovsx themselves, not their transitive
+# dependency trees (neither ships a lockfile), and vsce necessarily sees the
+# PAT at run time — so this is hardening, not isolation, for the CLIs. Auth for
+# release-please is a short-lived token from the Meridian release GitHub App.
 #
 # The consuming repo must provide these pnpm scripts: lint, build,
 # build:production, test, vsce:package. `vsce:package` must produce exactly one
@@ -240,12 +243,15 @@ jobs:
           fi
           echo "vsix=${files[0]}" >> "$GITHUB_OUTPUT"
 
+      # 30 days matches the maximum time a pending environment approval can
+      # wait; a shorter retention would make a late approval fail at
+      # download-artifact and force a full re-run.
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v7
         with:
           name: vsix
           path: ${{ steps.package.outputs.vsix }}
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
 
   # Holds the marketplace PATs and the release-upload token, and is gated by the
@@ -286,14 +292,24 @@ jobs:
           fi
           echo "Publishing $VSIX (v$VERSION) as $EXTENSION_ID"
 
+      # Install both CLIs in one step that holds no secrets, so the npm install
+      # (which resolves their transitive dependencies fresh from the registry —
+      # the pins cover only vsce/ovsx themselves) and any lifecycle scripts run
+      # without the PATs in the environment. --ignore-scripts skips those
+      # scripts altogether; the only native module in the tree is vsce's
+      # optional keytar, which vsce loads lazily and only when no --pat is
+      # given, so publish --pat is unaffected.
+      - name: Install marketplace CLIs
+        run: npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
+
       - name: Publish to VS Code Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          if npx --yes "@vscode/vsce@${VSCE_VERSION}" show "$EXTENSION_ID" --json 2>/dev/null | grep -q "\"version\": \"${VERSION}\""; then
+          if vsce show "$EXTENSION_ID" --json 2>/dev/null | grep -q "\"version\": \"${VERSION}\""; then
             echo "v${VERSION} already on VS Code Marketplace, skipping"
           else
-            npx --yes "@vscode/vsce@${VSCE_VERSION}" publish --packagePath "$VSIX" --pat "$VSCE_PAT"
+            vsce publish --packagePath "$VSIX" --pat "$VSCE_PAT"
           fi
 
       - name: Publish to Open VSX
@@ -301,7 +317,6 @@ jobs:
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
-          npm install -g "ovsx@${OVSX_VERSION}"
           if ovsx get "$EXTENSION_ID" --metadata 2>/dev/null | grep -q "\"version\": \"${VERSION}\""; then
             echo "v${VERSION} already on Open VSX, skipping"
           else
