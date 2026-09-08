@@ -24,10 +24,13 @@ name: Release Please — VS Code extension (reusable)
 # marketplace CLIs used by publish are pinned via `vsce-version` /
 # `ovsx-version` rather than resolved from the repo's devDependencies, for the
 # same reason, and are installed with --ignore-scripts in a step that holds no
-# secrets. Note the pins cover only vsce/ovsx themselves, not their transitive
-# dependency trees (neither ships a lockfile), and vsce necessarily sees the
-# PAT at run time — so this is hardening, not isolation, for the CLIs. Auth for
-# release-please is a short-lived token from the Meridian release GitHub App.
+# secrets. The version inputs are validated as exact x.y.z so a caller cannot
+# smuggle an npm alias or git spec into the install (the caller controls the
+# inputs, and the environment reviewer never sees them). Note the pins cover
+# only vsce/ovsx themselves, not their transitive dependency trees (neither
+# ships a lockfile), and vsce necessarily sees the PAT at run time — so this is
+# hardening, not isolation, for the CLIs. Auth for release-please is a
+# short-lived token from the Meridian release GitHub App.
 #
 # The consuming repo must provide these pnpm scripts: lint, build,
 # build:production, test, vsce:package. `vsce:package` must produce exactly one
@@ -81,11 +84,11 @@ on:
         type: string
         default: ""
       vsce-version:
-        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies). Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
+        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
         type: string
         default: "3.9.2"
       ovsx-version:
-        description: "Pinned ovsx version used by the publish job (deliberately NOT taken from the repo's devDependencies)."
+        description: "Pinned ovsx version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected."
         type: string
         default: "0.10.12"
     secrets:
@@ -299,8 +302,22 @@ jobs:
       # scripts altogether; the only native module in the tree is vsce's
       # optional keytar, which vsce loads lazily and only when no --pat is
       # given, so publish --pat is unaffected.
+      #
+      # The version inputs are controlled by the caller workflow, and npm treats
+      # anything after `@` as a package spec, not just a version: an alias such
+      # as `npm:other-package` or a hosted-git spec like `github:user/repo`
+      # would install arbitrary code as the `vsce` / `ovsx` binaries that later
+      # run with the PATs. Require an exact x.y.z version so only the pinned
+      # registry package can be installed.
       - name: Install marketplace CLIs
-        run: npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
+        run: |
+          for v in "$VSCE_VERSION" "$OVSX_VERSION"; do
+            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::vsce-version / ovsx-version must be exact x.y.z versions, got '$v'"
+              exit 1
+            fi
+          done
+          npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
 
       - name: Publish to VS Code Marketplace
         env:
