@@ -237,6 +237,12 @@ jobs:
             Action:
               **If `EXISTING_ISSUE` is set**: do NOT open a new issue. Instead:
                 - If the existing issue is closed, reopen it (`gh issue reopen`).
+                - If the existing issue has no assignee, assign `ransomr`
+                  (`gh issue edit <n> --repo ${{ env.ISSUES_REPO }} --add-assignee ransomr`):
+                  an issue filed by another automation (e.g. the recurring ci-perf
+                  run) may be unowned, and the board's working views filter on
+                  assignee — unassigned means invisible to the maintainer
+                  (observed: inspect_ai#444).
                 - Add a comment containing: the new failed run link, a one-line "still
                   failing on run <id>" note, and — if your analysis has refined or changed
                   since the original issue was opened — an updated root cause and/or
@@ -335,7 +341,8 @@ jobs:
               `--repo ${{ env.ISSUES_REPO }}` — never operate on issues in this
               (triage) repo or in UKGovernmentBEIS/inspect_ai.
             - At most one issue-related action per run: either open one new issue
-              (bucket C's follow-up `auto` label add is part of that single action)
+              (bucket C's follow-up `auto` label add, and the assign-if-unassigned on an
+              adopted existing issue, are part of that single action)
               OR comment on (and optionally reopen) one existing issue. Never both.
             - Never open a new issue if `EXISTING_ISSUE` is set.
             - Never modify files in `inspect_ai/` — treat it as read-only reference.
@@ -355,16 +362,24 @@ jobs:
       # they are invisible to the board's flows (observed: inspect_ai#198).
       # Detection is deterministic: a created issue's Links section carries
       # THIS run's URL (the prompt template guarantees it), so search the
-      # issues repo for this run id. Comments on existing issues don't match
-      # (issue-body search only), so bucket A/B/C-existing runs no-op here.
+      # issues repo for this run id. `gh search issues` matches title, body
+      # AND comments, so an existing issue this run commented on (with its
+      # run link) is picked up too — desirable: it gets owned and boarded
+      # like a created one, and adding is idempotent (that is exactly how
+      # inspect_ai#444, filed unowned by the ci-perf run, reached the board).
       # Search indexing lags issue creation — retry briefly. MARVIN_TOKEN has
-      # the `project` scope (same token the Atlas sync uses). Adding is
-      # idempotent; the board's built-in workflow sets Status=Todo.
+      # the `project` scope (same token the Atlas sync uses). Assignee and
+      # Status are set explicitly below: the board's built-in "item added ->
+      # Todo" flow is not reliable (#444 landed at Done), and the views
+      # filter on assignee.
       - name: Add created triage issues to Atlas
         if: always()
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
           PROJECT_ID: PVT_kwDOC7YMCM4BU68p
+          STATUS_FIELD: PVTSSF_lADOC7YMCM4BU68pzhKizZM
+          TODO_OPTION: f75ad846
+          ASSIGNEE: ransomr
         run: |
           set -uo pipefail
           nums=""
@@ -382,9 +397,27 @@ jobs:
             exit 0
           fi
           for n in $nums; do
+            # Ownership first: the board's working views filter on
+            # assignee:@me, so an unassigned issue is on the board yet
+            # invisible to the maintainer.
+            if [ "$(gh issue view "$n" --repo "$ISSUES_REPO" --json assignees --jq '.assignees | length')" = "0" ]; then
+              gh issue edit "$n" --repo "$ISSUES_REPO" --add-assignee "$ASSIGNEE" >/dev/null \
+                && echo "assigned $ISSUES_REPO#$n to $ASSIGNEE"
+            fi
             node=$(gh api "repos/$ISSUES_REPO/issues/$n" --jq .node_id)
-            gh api graphql \
+            item=$(gh api graphql \
               -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
-              -f p="$PROJECT_ID" -f c="$node" --silent \
-              && echo "added $ISSUES_REPO#$n to Atlas"
+              -f p="$PROJECT_ID" -f c="$node" --jq '.data.addProjectV2ItemById.item.id') \
+              && echo "added $ISSUES_REPO#$n to Atlas ($item)"
+            # Status explicitly, not via the board's built-in "item added ->
+            # Todo" flow: that flow left inspect_ai#444 at Done on add.
+            # Only when unset — never clobber a status a human already moved.
+            cur=$(gh api graphql -f query='query($i:ID!){node(id:$i){... on ProjectV2Item{s: fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}' \
+                    -f i="$item" --jq '.data.node.s.name // ""')
+            if [ -z "$cur" ] || [ "$cur" = "Done" ]; then
+              gh api graphql \
+                -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+                -f p="$PROJECT_ID" -f i="$item" -f f="$STATUS_FIELD" -f o="$TODO_OPTION" --silent \
+                && echo "set $ISSUES_REPO#$n Status=Todo (was '${cur:-unset}')"
+            fi
           done

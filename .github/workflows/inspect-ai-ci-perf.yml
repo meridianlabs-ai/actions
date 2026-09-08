@@ -110,3 +110,68 @@ jobs:
               "Opening an upstream PR from an org fork" section.
             - Link this workflow run in each PR body:
               ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - Issues you file on the tracking repo (meridianlabs-ai/inspect_ai,
+              per the skill's fix phase): create them with `--assignee ransomr`
+              — the Atlas board's working views filter on assignee, so an
+              unassigned issue is invisible to the maintainer (observed:
+              inspect_ai#444) — and keep the "Filed by the recurring unattended
+              ci-perf run" footer with this run's URL: the post-step below finds
+              the run's issues by that URL and puts them on the board.
+
+      # Issues the skill filed belong on the Atlas board (project 1 in
+      # meridianlabs-ai) like every other tracked work item, owned by the
+      # maintainer — same step as triage-test-failures.yml. Detection: the
+      # skill's issue footer carries THIS run's URL, so search the tracking
+      # repo for the run id (`gh search issues` matches comments too, so an
+      # existing issue this run added evidence to is owned/boarded as well —
+      # idempotent). Assignee and Status are set explicitly: the board's
+      # built-in "item added -> Todo" flow left inspect_ai#444 at Done, and
+      # the views filter on assignee. Search indexing lags — retry briefly.
+      - name: Add filed issues to Atlas
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          ISSUES_REPO: meridianlabs-ai/inspect_ai
+          PROJECT_ID: PVT_kwDOC7YMCM4BU68p
+          STATUS_FIELD: PVTSSF_lADOC7YMCM4BU68pzhKizZM
+          TODO_OPTION: f75ad846
+          ASSIGNEE: ransomr
+        run: |
+          set -uo pipefail
+          nums=""
+          for attempt in 1 2 3 4; do
+            nums=$(gh search issues --repo "$ISSUES_REPO" --state open \
+                     "actions/runs/${{ github.run_id }}" \
+                     --json number --jq '.[].number' 2>/dev/null || true)
+            [ -n "$nums" ] && break
+            sleep 20
+          done
+          if [ -z "$nums" ]; then
+            echo "No tracking issues carry this run's URL (none filed, or search index lagged)."
+            exit 0
+          fi
+          for n in $nums; do
+            # Ownership first: the board's working views filter on
+            # assignee:@me, so an unassigned issue is on the board yet
+            # invisible to the maintainer.
+            if [ "$(gh issue view "$n" --repo "$ISSUES_REPO" --json assignees --jq '.assignees | length')" = "0" ]; then
+              gh issue edit "$n" --repo "$ISSUES_REPO" --add-assignee "$ASSIGNEE" >/dev/null \
+                && echo "assigned $ISSUES_REPO#$n to $ASSIGNEE"
+            fi
+            node=$(gh api "repos/$ISSUES_REPO/issues/$n" --jq .node_id)
+            item=$(gh api graphql \
+              -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+              -f p="$PROJECT_ID" -f c="$node" --jq '.data.addProjectV2ItemById.item.id') \
+              && echo "added $ISSUES_REPO#$n to Atlas ($item)"
+            # Status explicitly, not via the board's built-in "item added ->
+            # Todo" flow: that flow left inspect_ai#444 at Done on add.
+            # Only when unset — never clobber a status a human already moved.
+            cur=$(gh api graphql -f query='query($i:ID!){node(id:$i){... on ProjectV2Item{s: fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}' \
+                    -f i="$item" --jq '.data.node.s.name // ""')
+            if [ -z "$cur" ] || [ "$cur" = "Done" ]; then
+              gh api graphql \
+                -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+                -f p="$PROJECT_ID" -f i="$item" -f f="$STATUS_FIELD" -f o="$TODO_OPTION" --silent \
+                && echo "set $ISSUES_REPO#$n Status=Todo (was '${cur:-unset}')"
+            fi
+          done
