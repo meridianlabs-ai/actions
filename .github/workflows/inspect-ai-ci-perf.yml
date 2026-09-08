@@ -15,7 +15,10 @@ name: Inspect AI CI Perf
   workflow_dispatch:
     inputs:
       inspect_ai_ref:
-        description: "inspect_ai branch/tag/commit to run against"
+        description: >-
+          inspect_ai ref to run against: 'main', a release tag (vX.Y.Z), or
+          a 40-hex commit reachable from main. Other refs (branches, PR heads)
+          are rejected.
         required: false
         default: "main"
         type: string
@@ -32,11 +35,46 @@ jobs:
       contents: read
 
     steps:
+      - name: Validate inspect_ai_ref
+        # The checkout below is untrusted input to a credentialed agent: pip
+        # runs its build backend, and the agent executes its ci-perf skill and
+        # AGENTS.md unattended with Bash, MARVIN_TOKEN and ANTHROPIC_API_KEY.
+        # Only accept shapes that can name Meridian-controlled content on
+        # upstream — never a free-form ref such as refs/pull/N/head. A 40-hex
+        # commit is checked out only after "Verify commit is on main" below
+        # confirms it is an ancestor of main. The input is read via env, not
+        # interpolated into the script.
+        id: ref
+        env:
+          INPUT_REF: ${{ inputs.inspect_ai_ref }}
+        run: |
+          REF="${INPUT_REF:-main}"
+          is_sha=false
+          if [ "$REF" = "main" ]; then
+            checkout_ref="main"
+          elif [[ "$REF" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.-]*$ ]]; then
+            # Release tag, e.g. v0.3.100 or v0.3.100rc1 (upstream tags are
+            # maintainer-controlled; no '/' so it cannot name a PR ref).
+            checkout_ref="$REF"
+          elif [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            # Check out main first; the ancestry check below then moves HEAD.
+            checkout_ref="main"
+            is_sha=true
+          else
+            echo "::error::inspect_ai_ref must be 'main', a release tag (vX.Y.Z), or a 40-hex commit reachable from main; got '$REF'"
+            exit 1
+          fi
+          {
+            echo "ref=$REF"
+            echo "checkout_ref=$checkout_ref"
+            echo "is_sha=$is_sha"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout inspect_ai
         uses: actions/checkout@v7
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: ${{ inputs.inspect_ai_ref || 'main' }}
+          ref: ${{ steps.ref.outputs.checkout_ref }}
           path: inspect_ai
           # Full history for branching/merge-base, blob:none to skip the
           # ~400MB historical pack (the skill's own recommendation).
@@ -46,6 +84,22 @@ jobs:
           # .git/config — it would override MARVIN_TOKEN on `git push fork`
           # (403). The repo is public; nothing here needs that token.
           persist-credentials: false
+
+      - name: Verify commit is on main
+        # A SHA from a PR branch (or any other non-main history) fails here,
+        # before anything from the checkout is installed or executed. With
+        # fetch-depth: 0 the full main history is local, so an unknown commit
+        # also fails ("not a valid commit name").
+        if: steps.ref.outputs.is_sha == 'true'
+        working-directory: inspect_ai
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          if ! git merge-base --is-ancestor "$REF" origin/main; then
+            echo "::error::inspect_ai_ref commit $REF is not reachable from main"
+            exit 1
+          fi
+          git checkout --detach "$REF"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -93,7 +147,7 @@ jobs:
             present to answer questions).
 
             Work in `inspect_ai/` (a full-history, blob:none checkout of
-            upstream at ${{ inputs.inspect_ai_ref || 'main' }}). Read
+            upstream at ${{ steps.ref.outputs.ref }}). Read
             `inspect_ai/.claude/skills/ci-perf/SKILL.md` and execute the
             skill end to end, following its "Scheduled (unattended) mode"
             section for everything the interactive instructions would ask
