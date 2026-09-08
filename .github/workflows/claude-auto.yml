@@ -1,0 +1,46 @@
+# The @auto-loop stub for the meridianlabs-ai/actions repo (adapted from
+# meridianlabs-ai/agents examples/claude-auto-stub.yml). ONE deliberate
+# deviation: this repo has NO PR-triggered CI — its workflows are reusable
+# definitions consumed by other repos (`workflow_call`) plus scheduled runs —
+# so the example's `workflow_run` trigger and ci-fix job are omitted; there
+# is nothing for the CI-fix loop to react to. Only the review->fix half of
+# @auto runs here. If a PR-triggered CI workflow is ever added, restore the
+# ci-fix job from the example and name that workflow in
+# on.workflow_run.workflows.
+#
+# Requires the MARVIN_TOKEN org secret scoped to this repo (already used by
+# the triage and ci-perf workflows) and, for the engine:codex label, the
+# OPENAI_API_KEY org secret.
+
+name: Claude Auto
+
+on:
+  # Phase 2/3: react to the reviewer's marked summary comment.
+  issue_comment:
+    types: [created]
+
+jobs:
+  # Review -> fix / handoff. Fire only on the reviewer's marked summary comment
+  # on a PR. Cheap gate here (it's a PR, body has the marker); the reusable
+  # workflow does the rest (comment author == reviewer, same-repo, `auto`
+  # label, round cap).
+  review-fix:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != '' &&
+      contains(github.event.comment.body, '<!-- claude-review-summary -->')
+    uses: meridianlabs-ai/agents/.github/workflows/claude-auto-review.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    secrets:
+      MARVIN_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      # codex engine (design/codex-engine.md in the agents repo):
+      # consumed only on items labeled engine:codex; optional.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    with:
+      pr_number: ${{ github.event.issue.number }}
+      comment_author: ${{ github.event.comment.user.login }}
