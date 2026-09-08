@@ -4,13 +4,47 @@ name: Release Please — VS Code extension (reusable)
 #
 # On push to main, release-please maintains a rolling release PR (release-type
 # node — it owns the package.json version). Merging the PR creates the tag and
-# triggers the gated publish job, which packages the extension and publishes to
-# the VS Code Marketplace + Open VSX, and attaches the .vsix to the GitHub
-# release. Auth is a short-lived token from the Meridian release GitHub App.
+# triggers two further jobs:
+#
+#   build   — checks out the release commit, installs, lints, builds, tests and
+#             packages the extension, then uploads the single .vsix as an
+#             artifact. Runs with NO secrets and NO environment, and only a
+#             read-only token.
+#   publish — gated by `environment`. Downloads the .vsix artifact and publishes
+#             it to the VS Code Marketplace + Open VSX, then attaches it to the
+#             GitHub release. It never checks out the repo or runs pnpm install,
+#             so no code from the consuming repo (package.json scripts,
+#             dependency install hooks, vscode:prepublish) executes here.
+#
+# The split exists so that code authored in the consuming repo — or in any of
+# its dependencies — never runs in a job that can read the publisher-wide
+# VSCE_PAT / OVSX_PAT. The environment reviewer gate controls who can START a
+# publish; it cannot stop a compromised release commit from reading secrets in
+# the job that runs it, so the job that runs it must not hold them. The
+# marketplace CLIs used by publish are pinned via `vsce-version` /
+# `ovsx-version` rather than resolved from the repo's devDependencies, for the
+# same reason, and are installed with --ignore-scripts in a step that holds no
+# secrets. The version inputs are validated as exact x.y.z so a caller cannot
+# smuggle an npm alias or git spec into the install (the caller controls the
+# inputs, and the environment reviewer never sees them). Note the pins cover
+# only vsce/ovsx themselves, not their transitive dependency trees (neither
+# ships a lockfile), and vsce necessarily sees the PAT at run time — so this is
+# hardening, not isolation, for the CLIs. Auth for release-please is a
+# short-lived token from the Meridian release GitHub App.
 #
 # The consuming repo must provide these pnpm scripts: lint, build,
-# build:production, test, vsce:package. Add required reviewers to the
-# `environment` (default `marketplace`) to gate who can ship.
+# build:production, test, vsce:package. `vsce:package` must produce exactly one
+# .vsix in the repo root. Add required reviewers to the `environment` (default
+# `marketplace`) to gate who can ship, and store VSCE_PAT / OVSX_PAT as
+# ENVIRONMENT secrets on that environment, not as repository or organisation
+# secrets. The caller passes `secrets: inherit`, and the caller's own
+# release.yml is repo-authored code on the release branch: if the PATs were
+# repo-level, any job added to that file could read them with no approval and
+# without touching this workflow. Environment-scoped secrets are only exposed to
+# jobs that reference the environment, which puts the reviewer gate in the path.
+# The caller workflow file itself therefore stays inside the trust boundary —
+# before approving, reviewers should confirm the run's workflow file is the
+# expected one and unchanged.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
@@ -41,7 +75,7 @@ on:
         type: boolean
         default: true
       environment:
-        description: "Deployment environment for the publish job (add required reviewers to gate releases)"
+        description: "Deployment environment for the publish job. Add required reviewers to gate releases, and store VSCE_PAT / OVSX_PAT as environment secrets on it (not repo secrets) so only approved jobs can read them."
         type: string
         default: "marketplace"
       config-file:
@@ -58,6 +92,14 @@ on:
         description: "Branch Release Please manages. Leave empty for the default branch (normal releases); set to a maintenance branch (e.g. hotfix/1.4.x) to cut a hotfix release from a released tag."
         type: string
         default: ""
+      vsce-version:
+        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
+        type: string
+        default: "3.9.2"
+      ovsx-version:
+        description: "Pinned ovsx version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected."
+        type: string
+        default: "0.10.12"
     secrets:
       RELEASE_PLEASE_APP_ID:
         required: true
@@ -98,7 +140,7 @@ jobs:
           manifest-file: ${{ inputs.manifest-file }}
           # Default to the branch the run was triggered from (github.ref_name):
           # push to main → main; a workflow_dispatch from a maintenance branch →
-          # that branch. This keeps the Release Please target and the publish
+          # that branch. This keeps the Release Please target and the build
           # checkout on the SAME branch, so a hotfix is driven solely by the
           # "Use workflow from" branch selector — no separate input to mismatch.
           # The target-branch input remains an optional explicit override.
@@ -149,13 +191,19 @@ jobs:
             --data "$(jq -n --arg t "$text" '{text: $t}')" \
             "$SLACK_APPROVALS_WEBHOOK_URL"
 
-  publish:
+  # Everything that executes code from the consuming repo (dependency install
+  # hooks, package.json scripts, tests, vsce:package) happens here, with no
+  # secrets, no environment and a read-only token. Do NOT add `secrets.*` or
+  # `environment:` to this job — see the header comment.
+  build:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      vsix: ${{ steps.package.outputs.vsix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -189,21 +237,105 @@ jobs:
       - name: Run tests
         run: xvfb-run -a pnpm test
 
-      - name: Package extension
-        run: pnpm vsce:package
-
       - name: Get version
         id: version
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Require exactly one .vsix so the publish job ships the file this step
+      # produced and nothing else that happens to match a glob.
+      - name: Package extension
+        id: package
+        run: |
+          pnpm vsce:package
+          shopt -s nullglob
+          files=(*.vsix)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::vsce:package must produce exactly one .vsix in the repo root; found ${#files[@]}: ${files[*]}"
+            exit 1
+          fi
+          echo "vsix=${files[0]}" >> "$GITHUB_OUTPUT"
+
+      # 30 days matches the maximum time a pending environment approval can
+      # wait; a shorter retention would make a late approval fail at
+      # download-artifact and force a full re-run.
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: vsix
+          path: ${{ steps.package.outputs.vsix }}
+          retention-days: 30
+          if-no-files-found: error
+
+  # Holds the marketplace PATs and the release-upload token, and is gated by the
+  # `environment` reviewers. Deliberately has no checkout and no pnpm install:
+  # nothing from the consuming repo runs here. Publishing a pre-built
+  # --packagePath does not invoke vscode:prepublish or any other repo script.
+  publish:
+    needs: [release-please, build]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+    env:
+      EXTENSION_ID: ${{ inputs.extension-id }}
+      VERSION: ${{ needs.build.outputs.version }}
+      VSIX: vsix/${{ needs.build.outputs.vsix }}
+      VSCE_VERSION: ${{ inputs.vsce-version }}
+      OVSX_VERSION: ${{ inputs.ovsx-version }}
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Download VSIX artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: vsix
+          path: vsix
+
+      - name: Verify VSIX
+        run: |
+          if [ ! -f "$VSIX" ]; then
+            echo "::error::expected artifact file '$VSIX' not found"
+            ls -la vsix || true
+            exit 1
+          fi
+          echo "Publishing $VSIX (v$VERSION) as $EXTENSION_ID"
+
+      # Install both CLIs in one step that holds no secrets, so the npm install
+      # (which resolves their transitive dependencies fresh from the registry —
+      # the pins cover only vsce/ovsx themselves) and any lifecycle scripts run
+      # without the PATs in the environment. --ignore-scripts skips those
+      # scripts altogether; the only native module in the tree is vsce's
+      # optional keytar, which vsce loads lazily and only when no --pat is
+      # given, so publish --pat is unaffected.
+      #
+      # The version inputs are controlled by the caller workflow, and npm treats
+      # anything after `@` as a package spec, not just a version: an alias such
+      # as `npm:other-package` or a hosted-git spec like `github:user/repo`
+      # would install arbitrary code as the `vsce` / `ovsx` binaries that later
+      # run with the PATs. Require an exact x.y.z version so only the pinned
+      # registry package can be installed.
+      - name: Install marketplace CLIs
+        run: |
+          for v in "$VSCE_VERSION" "$OVSX_VERSION"; do
+            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::vsce-version / ovsx-version must be exact x.y.z versions, got '$v'"
+              exit 1
+            fi
+          done
+          npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
 
       - name: Publish to VS Code Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          if npx @vscode/vsce show ${{ inputs.extension-id }} --json 2>/dev/null | grep -q "\"version\": \"${{ steps.version.outputs.version }}\""; then
-            echo "v${{ steps.version.outputs.version }} already on VS Code Marketplace, skipping"
+          if vsce show "$EXTENSION_ID" --json 2>/dev/null | grep -q "\"version\": \"${VERSION}\""; then
+            echo "v${VERSION} already on VS Code Marketplace, skipping"
           else
-            pnpm vsce publish --no-dependencies --pat "$VSCE_PAT"
+            vsce publish --packagePath "$VSIX" --pat "$VSCE_PAT"
           fi
 
       - name: Publish to Open VSX
@@ -211,14 +343,17 @@ jobs:
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
-          npm install -g ovsx
-          if ovsx get ${{ inputs.extension-id }} --metadata 2>/dev/null | grep -q "\"version\": \"${{ steps.version.outputs.version }}\""; then
-            echo "v${{ steps.version.outputs.version }} already on Open VSX, skipping"
+          if ovsx get "$EXTENSION_ID" --metadata 2>/dev/null | grep -q "\"version\": \"${VERSION}\""; then
+            echo "v${VERSION} already on Open VSX, skipping"
           else
-            ovsx publish *.vsix --pat "$OVSX_PAT"
+            ovsx publish "$VSIX" --pat "$OVSX_PAT"
           fi
 
+      # No checkout in this job, so `gh` cannot infer the repository from a git
+      # remote; GH_REPO tells it which repo owns the release.
       - name: Upload VSIX to GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ needs.release-please.outputs.tag_name }} *.vsix --clobber
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG" "$VSIX" --clobber
