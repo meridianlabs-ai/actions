@@ -130,7 +130,7 @@ jobs:
             --directory "$CI_PERF_OUTPUT_DIR" --publish \
             --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
 
-      - name: Add published issues to Atlas and assign Eric
+      - name: Add published issues to Atlas and assign unowned ones to Eric
         if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
@@ -152,12 +152,15 @@ jobs:
           for url in dict.fromkeys(urls):
               number = url.rsplit("/", 1)[1]
               endpoint = f"repos/meridianlabs-ai/inspect_ai/issues/{number}"
-              node = subprocess.check_output(["gh", "api", endpoint, "--jq", ".node_id"], text=True).strip()
+              issue = json.loads(subprocess.check_output(["gh", "api", endpoint], text=True))
               subprocess.run([
                   "gh", "api", "graphql",
                   "-f", "query=mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}",
-                  "-f", "p=PVT_kwDOC7YMCM4BU68p", "-f", f"c={node}", "--silent",
+                  "-f", "p=PVT_kwDOC7YMCM4BU68p", "-f", f"c={issue['node_id']}", "--silent",
               ], check=True)
+              if issue["assignees"]:
+                  print(f"Issue {number} already assigned to {', '.join(a['login'] for a in issue['assignees'])}; leaving as is")
+                  continue
               subprocess.run([
                   "gh", "api", f"{endpoint}/assignees", "--method", "POST", "--input", "-", "--silent",
               ], input=json.dumps({"assignees": ["epatey"]}), text=True, check=True)
