@@ -122,7 +122,7 @@ jobs:
             --directory "$CI_PERF_OUTPUT_DIR"
 
       - name: Publish fork issues and trend summary
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
         run: |
@@ -131,13 +131,10 @@ jobs:
             --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
 
       - name: Add published issues to Atlas and assign Eric
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
         run: |
-          if ! test -f "$CI_PERF_OUTPUT_DIR/published.json"; then
-            exit 0
-          fi
           python - <<'PYTHON'
           import json
           import os
