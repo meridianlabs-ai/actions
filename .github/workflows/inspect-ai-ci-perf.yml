@@ -37,6 +37,7 @@ jobs:
       pull-requests: read
     env:
       CI_PERF_SCHEDULED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
       CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
@@ -72,7 +73,7 @@ jobs:
       - name: Test CI tooling
         run: |
           python -m pip install pytest
-          python -m pytest ci_perf/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
+          python -m pytest -c /dev/null -p no:cacheprovider ci_perf/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
 
       - name: Collect timings and prior summaries
         id: data
@@ -88,6 +89,7 @@ jobs:
           python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --read-history
           echo "raw_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/raw.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Analyze CI performance
@@ -124,6 +126,7 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.commit }}
           TOOLING_SHA: ${{ steps.tooling.outputs.commit }}
           RAW_SHA: ${{ steps.data.outputs.raw_sha }}
+          MEASUREMENTS_SHA: ${{ steps.data.outputs.measurements_sha }}
           SUMMARY_SHA: ${{ steps.data.outputs.summary_sha }}
         run: |
           python -c 'import json, os; assert json.loads(os.environ["ANALYSIS_OUTPUTS"]).get("conclusion") == "success", "Analysis did not succeed"'
@@ -132,6 +135,7 @@ jobs:
           test "$(git -C ci_perf rev-parse HEAD)" = "$TOOLING_SHA"
           test "$(git -C inspect_ai rev-parse HEAD)" = "$SOURCE_SHA"
           echo "$RAW_SHA  $CI_PERF_OUTPUT_DIR/raw.json" | sha256sum --check
+          echo "$MEASUREMENTS_SHA  $CI_PERF_OUTPUT_DIR/measurements.md" | sha256sum --check
           echo "$SUMMARY_SHA  $CI_PERF_OUTPUT_DIR/summary.json" | sha256sum --check
           python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR"
@@ -155,6 +159,7 @@ jobs:
           for file in report.md measurements.md; do
             if test -f "$CI_PERF_OUTPUT_DIR/$file"; then
               cat "$CI_PERF_OUTPUT_DIR/$file" >> "$GITHUB_STEP_SUMMARY"
+              echo >> "$GITHUB_STEP_SUMMARY"
             fi
           done
           if test -f "$CI_PERF_OUTPUT_DIR/published.json"; then
