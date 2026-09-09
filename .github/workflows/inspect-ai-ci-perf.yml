@@ -7,14 +7,9 @@ name: Inspect AI CI Perf
   workflow_dispatch:
     inputs:
       inspect_ai_ref:
-        description: "Upstream inspect_ai branch/tag/commit to analyze"
+        description: "Upstream inspect_ai branch/tag/commit for analysis and tooling"
         required: false
         default: "main"
-        type: string
-      ci_perf_ref:
-        description: "Meridian inspect_ai branch/tag/commit containing the ci-perf tooling"
-        required: false
-        default: "meridian"
         type: string
       dry_run:
         description: "Collect and analyze without creating issues or comments"
@@ -54,18 +49,6 @@ jobs:
           path: inspect_ai
           persist-credentials: false
 
-      - name: Checkout Meridian CI tooling
-        id: tooling
-        uses: actions/checkout@v7
-        with:
-          repository: meridianlabs-ai/inspect_ai
-          ref: ${{ inputs.ci_perf_ref || 'meridian' }}
-          path: ci_perf
-          sparse-checkout: |
-            .claude/skills/ci-perf
-            design/ci-perf
-          persist-credentials: false
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -74,20 +57,20 @@ jobs:
       - name: Test CI tooling
         run: |
           python -m pip install pytest
-          python -m pytest -c /dev/null -p no:cacheprovider ci_perf/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
+          python -m pytest -c /dev/null -p no:cacheprovider inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
 
       - name: Collect timings and prior summaries
         id: data
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python ci_perf/.claude/skills/ci-perf/scripts/collect_ci_data.py \
+          python inspect_ai/.claude/skills/ci-perf/scripts/collect_ci_data.py \
             --out "$CI_PERF_OUTPUT_DIR/raw.json"
-          python ci_perf/.claude/skills/ci-perf/scripts/summarize_ci_data.py \
+          python inspect_ai/.claude/skills/ci-perf/scripts/summarize_ci_data.py \
             "$CI_PERF_OUTPUT_DIR/raw.json" \
             --out "$CI_PERF_OUTPUT_DIR/summary.json" \
             --markdown "$CI_PERF_OUTPUT_DIR/measurements.md"
-          python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --read-history
           echo "raw_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/raw.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -105,14 +88,14 @@ jobs:
             --allowedTools Bash,Read,Edit,Write,Grep,Glob
           prompt: |
             Run the scheduled analysis described in
-            ci_perf/.claude/skills/ci-perf/SKILL.md.
+            inspect_ai/.claude/skills/ci-perf/SKILL.md.
             Collection is already complete in CI_PERF_OUTPUT_DIR. Read the
             raw snapshot, summary.json and previous-summaries.json there.
             The one-time baseline and archived report/ledger are under
-            ci_perf/design/ci-perf/. The source being analyzed is inspect_ai/.
+            inspect_ai/design/ci-perf/. The source being analyzed is inspect_ai/.
 
             Write report.md and findings.json in CI_PERF_OUTPUT_DIR.
-            Analyze only: do not edit either checkout, implement fixes,
+            Analyze only: do not edit the checkout, implement fixes,
             commit, push, create PRs, or write GitHub issues or comments.
             Use gh only to read evidence and find duplicate issues and PRs
             on meridianlabs-ai/inspect_ai. A separate publisher handles writes.
@@ -125,20 +108,17 @@ jobs:
         env:
           ANALYSIS_OUTPUTS: ${{ toJSON(steps.analysis.outputs) }}
           SOURCE_SHA: ${{ steps.source.outputs.commit }}
-          TOOLING_SHA: ${{ steps.tooling.outputs.commit }}
           RAW_SHA: ${{ steps.data.outputs.raw_sha }}
           MEASUREMENTS_SHA: ${{ steps.data.outputs.measurements_sha }}
           SUMMARY_SHA: ${{ steps.data.outputs.summary_sha }}
         run: |
           python -c 'import json, os; assert json.loads(os.environ["ANALYSIS_OUTPUTS"]).get("conclusion") == "success", "Analysis did not succeed"'
-          test -z "$(git -C ci_perf status --porcelain --untracked-files=all)"
           test -z "$(git -C inspect_ai status --porcelain --untracked-files=all)"
-          test "$(git -C ci_perf rev-parse HEAD)" = "$TOOLING_SHA"
           test "$(git -C inspect_ai rev-parse HEAD)" = "$SOURCE_SHA"
           echo "$RAW_SHA  $CI_PERF_OUTPUT_DIR/raw.json" | sha256sum --check
           echo "$MEASUREMENTS_SHA  $CI_PERF_OUTPUT_DIR/measurements.md" | sha256sum --check
           echo "$SUMMARY_SHA  $CI_PERF_OUTPUT_DIR/summary.json" | sha256sum --check
-          python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR"
 
       - name: Publish fork issues and trend summary
@@ -146,9 +126,45 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
         run: |
-          python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --publish \
             --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
+
+      - name: Add published issues to Atlas and assign Eric
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+        run: |
+          if ! test -f "$CI_PERF_OUTPUT_DIR/published.json"; then
+            exit 0
+          fi
+          python - <<'PYTHON'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          urls = json.loads((Path(os.environ["CI_PERF_OUTPUT_DIR"]) / "published.json").read_text())
+          if not isinstance(urls, list) or any(
+              not isinstance(url, str)
+              or re.fullmatch(r"https://github\.com/meridianlabs-ai/inspect_ai/issues/[1-9][0-9]*", url) is None
+              for url in urls
+          ):
+              raise ValueError("Expected published fork issue URLs")
+          for url in dict.fromkeys(urls):
+              number = url.rsplit("/", 1)[1]
+              endpoint = f"repos/meridianlabs-ai/inspect_ai/issues/{number}"
+              node = subprocess.check_output(["gh", "api", endpoint, "--jq", ".node_id"], text=True).strip()
+              subprocess.run([
+                  "gh", "api", "graphql",
+                  "-f", "query=mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}",
+                  "-f", "p=PVT_kwDOC7YMCM4BU68p", "-f", f"c={node}", "--silent",
+              ], check=True)
+              subprocess.run([
+                  "gh", "api", f"{endpoint}/assignees", "--method", "POST", "--input", "-", "--silent",
+              ], input=json.dumps({"assignees": ["epatey"]}), text=True, check=True)
+          PYTHON
 
       - name: Show report
         if: always()
