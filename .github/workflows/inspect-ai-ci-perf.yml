@@ -36,6 +36,7 @@ jobs:
       issues: read
       pull-requests: read
     env:
+      CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
       CI_PERF_SCHEDULED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -147,7 +148,7 @@ jobs:
         run: |
           python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --publish \
-            --run-url "$CI_PERF_RUN_URL"
+            --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
 
       - name: Show report
         if: always()
