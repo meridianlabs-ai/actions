@@ -36,11 +36,13 @@ jobs:
       issues: read
       pull-requests: read
     env:
-      CI_PERF_OUTPUT_DIR: ${{ runner.temp }}/ci-perf
       CI_PERF_SCHEDULED: "1"
       CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
+      - name: Initialize output directory
+        run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
+
       - name: Checkout upstream source for analysis
         uses: actions/checkout@v7
         with:
