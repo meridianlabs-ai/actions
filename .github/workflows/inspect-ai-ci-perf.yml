@@ -44,6 +44,7 @@ jobs:
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
 
       - name: Checkout upstream source for analysis
+        id: source
         uses: actions/checkout@v7
         with:
           repository: UKGovernmentBEIS/inspect_ai
@@ -52,6 +53,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout Meridian CI tooling
+        id: tooling
         uses: actions/checkout@v7
         with:
           repository: meridianlabs-ai/inspect_ai
@@ -67,19 +69,26 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Test CI tooling
+        run: |
+          python -m pip install pytest
+          python -m pytest ci_perf/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
+
       - name: Collect timings and prior summaries
+        id: data
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python ci_perf/.claude/skills/ci-perf/scripts/collect_ci_data.py \
-            --out "$CI_PERF_OUTPUT_DIR/raw.json" \
-            --summary-out "$CI_PERF_OUTPUT_DIR/summary.json"
+            --out "$CI_PERF_OUTPUT_DIR/raw.json"
           python ci_perf/.claude/skills/ci-perf/scripts/summarize_ci_data.py \
             "$CI_PERF_OUTPUT_DIR/raw.json" \
             --out "$CI_PERF_OUTPUT_DIR/summary.json" \
             --markdown "$CI_PERF_OUTPUT_DIR/measurements.md"
           python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --read-history
+          echo "raw_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/raw.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Analyze CI performance
         id: analysis
@@ -111,16 +120,24 @@ jobs:
 
       - name: Validate proposed findings
         env:
-          ANALYSIS_CONCLUSION: ${{ steps.analysis.outputs.conclusion }}
+          ANALYSIS_OUTPUTS: ${{ toJSON(steps.analysis.outputs) }}
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+          TOOLING_SHA: ${{ steps.tooling.outputs.commit }}
+          RAW_SHA: ${{ steps.data.outputs.raw_sha }}
+          SUMMARY_SHA: ${{ steps.data.outputs.summary_sha }}
         run: |
-          test "$ANALYSIS_CONCLUSION" = success
-          git -C ci_perf diff --exit-code
-          git -C inspect_ai diff --exit-code
+          python -c 'import json, os; assert json.loads(os.environ["ANALYSIS_OUTPUTS"]).get("conclusion") == "success", "Analysis did not succeed"'
+          test -z "$(git -C ci_perf status --porcelain --untracked-files=all)"
+          test -z "$(git -C inspect_ai status --porcelain --untracked-files=all)"
+          test "$(git -C ci_perf rev-parse HEAD)" = "$TOOLING_SHA"
+          test "$(git -C inspect_ai rev-parse HEAD)" = "$SOURCE_SHA"
+          echo "$RAW_SHA  $CI_PERF_OUTPUT_DIR/raw.json" | sha256sum --check
+          echo "$SUMMARY_SHA  $CI_PERF_OUTPUT_DIR/summary.json" | sha256sum --check
           python ci_perf/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR"
 
       - name: Publish fork issues and trend summary
-        if: github.event_name == 'schedule' || !inputs.dry_run
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
         run: |
@@ -134,6 +151,7 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           echo "Dry-run: $DRY_RUN" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
           for file in report.md measurements.md; do
             if test -f "$CI_PERF_OUTPUT_DIR/$file"; then
               cat "$CI_PERF_OUTPUT_DIR/$file" >> "$GITHUB_STEP_SUMMARY"
