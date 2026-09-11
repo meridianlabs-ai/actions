@@ -1,24 +1,21 @@
 ---
 name: Inspect AI CI Perf
 
-# Recurring CI-performance run for UKGovernmentBEIS/inspect_ai: executes the
-# repo's ci-perf skill (.claude/skills/ci-perf/SKILL.md) unattended. Each run
-# collects a fresh timing snapshot, rewrites the report, updates the PR
-# ledger, and may open a report PR plus up to 2 safe-fix PRs upstream (from
-# the meridianlabs-ai/inspect_ai fork, authored by marvin). The skill's
-# "Scheduled (unattended) mode" section defines what a run may and may not do.
-
 "on":
   schedule:
-    # Every 2 days (odd days of month) at 09:00 UTC — early morning US East.
     - cron: "0 9 */2 * *"
   workflow_dispatch:
     inputs:
       inspect_ai_ref:
-        description: "inspect_ai branch/tag/commit to run against"
+        description: "Upstream inspect_ai branch/tag/commit for analysis and tooling"
         required: false
         default: "main"
         type: string
+      dry_run:
+        description: "Collect and analyze without creating issues or comments"
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: inspect-ai-ci-perf
@@ -30,21 +27,26 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+    env:
+      CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CI_PERF_SCHEDULED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      - name: Checkout inspect_ai
+      - name: Initialize output directory
+        run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
+
+      - name: Checkout upstream source for analysis
+        id: source
         uses: actions/checkout@v7
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ inputs.inspect_ai_ref || 'main' }}
           path: inspect_ai
-          # Full history for branching/merge-base, blob:none to skip the
-          # ~400MB historical pack (the skill's own recommendation).
-          fetch-depth: 0
-          filter: "blob:none"
-          # Don't persist the read-only workflow token as an extraheader in
-          # .git/config — it would override MARVIN_TOKEN on `git push fork`
-          # (403). The repo is public; nothing here needs that token.
           persist-credentials: false
 
       - name: Set up Python
@@ -52,126 +54,140 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install inspect_ai dev dependencies
-        # The skill's fix phase validates safe fixes locally (ruff, mypy,
-        # affected tests); its collector needs only stdlib + gh.
-        working-directory: inspect_ai
-        run: python -m pip install -e ".[dev]"
-
-      - name: Configure git as marvin with push access to the fork
-        # Marvin has write on the meridianlabs-ai/inspect_ai fork, not
-        # upstream: branches push to the `fork` remote and PRs open against
-        # upstream via `gh api` with head_repo (see AGENTS.md, "Opening an
-        # upstream PR from an org fork"). The remote URL stays credential-free;
-        # `gh auth setup-git` installs gh as git's credential helper, which
-        # resolves the PAT from GH_TOKEN at push time (the agent step runs
-        # with GH_TOKEN=MARVIN_TOKEN) — keeping the token out of .git/config
-        # and `git remote -v` output.
-        working-directory: inspect_ai
-        env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+      - name: Test CI tooling
         run: |
-          git config user.name "i-am-marvin"
-          git config user.email "294938113+i-am-marvin@users.noreply.github.com"
-          git remote add fork "https://github.com/meridianlabs-ai/inspect_ai.git"
-          gh auth setup-git --hostname github.com
+          python -m pip install pytest
+          python -m pytest -c /dev/null -p no:cacheprovider inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
 
-      - name: Run ci-perf skill
-        uses: anthropics/claude-code-action@v1
+      - name: Collect timings and prior summaries
+        id: data
         env:
-          CI_PERF_SCHEDULED: "1"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python inspect_ai/.claude/skills/ci-perf/scripts/collect_ci_data.py \
+            --out "$CI_PERF_OUTPUT_DIR/raw.json"
+          python inspect_ai/.claude/skills/ci-perf/scripts/summarize_ci_data.py \
+            "$CI_PERF_OUTPUT_DIR/raw.json" \
+            --out "$CI_PERF_OUTPUT_DIR/summary.json" \
+            --markdown "$CI_PERF_OUTPUT_DIR/measurements.md"
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+            --directory "$CI_PERF_OUTPUT_DIR" --read-history
+          echo "raw_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/raw.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Analyze CI performance
+        id: analysis
+        env:
+          GH_TOKEN: ${{ github.token }}
+        uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Marvin's PAT so gh inside the agent can open upstream PRs and
-          # push isn't limited to this repo's read-only workflow token.
-          github_token: ${{ secrets.MARVIN_TOKEN }}
+          github_token: ${{ github.token }}
           claude_args: |
             --allowedTools Bash,Read,Edit,Write,Grep,Glob
           prompt: |
-            This is the scheduled, unattended CI-performance run for
-            UKGovernmentBEIS/inspect_ai (CI_PERF_SCHEDULED=1; no user is
-            present to answer questions).
+            Run the scheduled analysis described in
+            inspect_ai/.claude/skills/ci-perf/SKILL.md.
+            Collection is already complete in CI_PERF_OUTPUT_DIR. Read the
+            raw snapshot, summary.json and previous-summaries.json there.
+            The one-time baseline and archived report/ledger are under
+            inspect_ai/design/ci-perf/. The source being analyzed is inspect_ai/.
 
-            Work in `inspect_ai/` (a full-history, blob:none checkout of
-            upstream at ${{ inputs.inspect_ai_ref || 'main' }}). Read
-            `inspect_ai/.claude/skills/ci-perf/SKILL.md` and execute the
-            skill end to end, following its "Scheduled (unattended) mode"
-            section for everything the interactive instructions would ask
-            the user about.
+            Write report.md and findings.json in CI_PERF_OUTPUT_DIR.
+            Analyze only: do not edit the checkout, implement fixes,
+            commit, push, create PRs, or write GitHub issues or comments.
+            Use gh only to read evidence and find duplicate issues and PRs
+            on meridianlabs-ai/inspect_ai. A separate publisher handles writes.
+            Link CI_PERF_RUN_URL in the report and use upstream run URLs for
+            measurements. Write [] in findings.json if nothing is actionable.
+            Missing observations are not zero. Do not retry known permission
+            blockers. Do not run the collector again.
 
-            Environment notes:
-            - `gh` is authenticated as the marvin machine account.
-            - inspect_ai dev dependencies are installed into the ambient
-              Python (no venv to activate).
-            - git is configured as marvin; the `fork` remote points at
-              meridianlabs-ai/inspect_ai with push access. `origin` is
-              upstream (read-only). Branch off `origin/main`, push branches
-              to `fork`, and open PRs against upstream per AGENTS.md's
-              "Opening an upstream PR from an org fork" section.
-            - Link this workflow run in each PR body:
-              ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            - Issues you file on the tracking repo (meridianlabs-ai/inspect_ai,
-              per the skill's fix phase): create them with `--assignee ransomr`
-              — the Atlas board's working views filter on assignee, so an
-              unassigned issue is invisible to the maintainer (observed:
-              inspect_ai#444) — and keep the "Filed by the recurring unattended
-              ci-perf run" footer with this run's URL: the post-step below finds
-              the run's issues by that URL and puts them on the board.
+      - name: Validate proposed findings
+        env:
+          ANALYSIS_OUTPUTS: ${{ toJSON(steps.analysis.outputs) }}
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+          RAW_SHA: ${{ steps.data.outputs.raw_sha }}
+          MEASUREMENTS_SHA: ${{ steps.data.outputs.measurements_sha }}
+          SUMMARY_SHA: ${{ steps.data.outputs.summary_sha }}
+        run: |
+          python -c 'import json, os; assert json.loads(os.environ["ANALYSIS_OUTPUTS"]).get("conclusion") == "success", "Analysis did not succeed"'
+          test -z "$(git -C inspect_ai status --porcelain --untracked-files=all)"
+          test "$(git -C inspect_ai rev-parse HEAD)" = "$SOURCE_SHA"
+          echo "$RAW_SHA  $CI_PERF_OUTPUT_DIR/raw.json" | sha256sum --check
+          echo "$MEASUREMENTS_SHA  $CI_PERF_OUTPUT_DIR/measurements.md" | sha256sum --check
+          echo "$SUMMARY_SHA  $CI_PERF_OUTPUT_DIR/summary.json" | sha256sum --check
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+            --directory "$CI_PERF_OUTPUT_DIR"
 
-      # Issues the skill filed belong on the Atlas board (project 1 in
-      # meridianlabs-ai) like every other tracked work item, owned by the
-      # maintainer — same step as triage-test-failures.yml. Detection: the
-      # skill's issue footer carries THIS run's URL, so search the tracking
-      # repo for the run id (`gh search issues` matches comments too, so an
-      # existing issue this run added evidence to is owned/boarded as well —
-      # idempotent). Assignee and Status are set explicitly: the board's
-      # built-in "item added -> Todo" flow left inspect_ai#444 at Done, and
-      # the views filter on assignee. Search indexing lags — retry briefly.
-      - name: Add filed issues to Atlas
-        if: always()
+      - name: Publish fork issues and trend summary
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
-          ISSUES_REPO: meridianlabs-ai/inspect_ai
-          PROJECT_ID: PVT_kwDOC7YMCM4BU68p
-          STATUS_FIELD: PVTSSF_lADOC7YMCM4BU68pzhKizZM
-          TODO_OPTION: f75ad846
-          ASSIGNEE: ransomr
         run: |
-          set -uo pipefail
-          nums=""
-          for attempt in 1 2 3 4; do
-            nums=$(gh search issues --repo "$ISSUES_REPO" --state open \
-                     "actions/runs/${{ github.run_id }}" \
-                     --json number --jq '.[].number' 2>/dev/null || true)
-            [ -n "$nums" ] && break
-            sleep 20
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+            --directory "$CI_PERF_OUTPUT_DIR" --publish \
+            --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
+
+      - name: Add published issues to Atlas and assign unowned ones to Eric
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
+        env:
+          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          urls = json.loads((Path(os.environ["CI_PERF_OUTPUT_DIR"]) / "published.json").read_text())
+          if not isinstance(urls, list) or any(
+              not isinstance(url, str)
+              or re.fullmatch(r"https://github\.com/meridianlabs-ai/inspect_ai/issues/[1-9][0-9]*", url) is None
+              for url in urls
+          ):
+              raise ValueError("Expected published fork issue URLs")
+          for url in dict.fromkeys(urls):
+              number = url.rsplit("/", 1)[1]
+              endpoint = f"repos/meridianlabs-ai/inspect_ai/issues/{number}"
+              issue = json.loads(subprocess.check_output(["gh", "api", endpoint], text=True))
+              subprocess.run([
+                  "gh", "api", "graphql",
+                  "-f", "query=mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}",
+                  "-f", "p=PVT_kwDOC7YMCM4BU68p", "-f", f"c={issue['node_id']}", "--silent",
+              ], check=True)
+              if issue["assignees"]:
+                  print(f"Issue {number} already assigned to {', '.join(a['login'] for a in issue['assignees'])}; leaving as is")
+                  continue
+              subprocess.run([
+                  "gh", "api", f"{endpoint}/assignees", "--method", "POST", "--input", "-", "--silent",
+              ], input=json.dumps({"assignees": ["epatey"]}), text=True, check=True)
+          PYTHON
+
+      - name: Show report
+        if: always()
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          echo "Dry-run: $DRY_RUN" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          for file in report.md measurements.md; do
+            if test -f "$CI_PERF_OUTPUT_DIR/$file"; then
+              cat "$CI_PERF_OUTPUT_DIR/$file" >> "$GITHUB_STEP_SUMMARY"
+              echo >> "$GITHUB_STEP_SUMMARY"
+            fi
           done
-          if [ -z "$nums" ]; then
-            echo "No tracking issues carry this run's URL (none filed, or search index lagged)."
-            exit 0
+          if test -f "$CI_PERF_OUTPUT_DIR/published.json"; then
+            cat "$CI_PERF_OUTPUT_DIR/published.json" >> "$GITHUB_STEP_SUMMARY"
           fi
-          for n in $nums; do
-            # Ownership first: the board's working views filter on
-            # assignee:@me, so an unassigned issue is on the board yet
-            # invisible to the maintainer.
-            if [ "$(gh issue view "$n" --repo "$ISSUES_REPO" --json assignees --jq '.assignees | length')" = "0" ]; then
-              gh issue edit "$n" --repo "$ISSUES_REPO" --add-assignee "$ASSIGNEE" >/dev/null \
-                && echo "assigned $ISSUES_REPO#$n to $ASSIGNEE"
-            fi
-            node=$(gh api "repos/$ISSUES_REPO/issues/$n" --jq .node_id)
-            item=$(gh api graphql \
-              -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
-              -f p="$PROJECT_ID" -f c="$node" --jq '.data.addProjectV2ItemById.item.id') \
-              && echo "added $ISSUES_REPO#$n to Atlas ($item)"
-            # Status explicitly, not via the board's built-in "item added ->
-            # Todo" flow: that flow left inspect_ai#444 at Done on add.
-            # Only when unset — never clobber a status a human already moved.
-            cur=$(gh api graphql -f query='query($i:ID!){node(id:$i){... on ProjectV2Item{s: fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}' \
-                    -f i="$item" --jq '.data.node.s.name // ""')
-            if [ -z "$cur" ] || [ "$cur" = "Done" ]; then
-              gh api graphql \
-                -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
-                -f p="$PROJECT_ID" -f i="$item" -f f="$STATUS_FIELD" -f o="$TODO_OPTION" --silent \
-                && echo "set $ISSUES_REPO#$n Status=Todo (was '${cur:-unset}')"
-            fi
-          done
+
+      - name: Retain CI evidence outside Git
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-perf/
+          retention-days: 90
+          if-no-files-found: warn
