@@ -163,17 +163,6 @@ jobs:
             test_timeout: 1500
 
     steps:
-      # Critical: Setup modern Docker build system
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
-        with:
-          version: latest
-          driver-opts: |
-            network=host
-          buildkitd-flags: |
-            --allow-insecure-entitlement security.insecure
-            --allow-insecure-entitlement network.host
-
       - name: Checkout inspect_ai repository
         uses: actions/checkout@v6
         with:
@@ -232,8 +221,6 @@ jobs:
         env:
           DOCKER_BUILDKIT: 1
           BUILDKIT_PROGRESS: plain
-          BUILDX_CACHE_FROM: type=local,src=/tmp/.buildx-cache
-          BUILDX_CACHE_TO: type=local,dest=/tmp/.buildx-cache,mode=max
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
