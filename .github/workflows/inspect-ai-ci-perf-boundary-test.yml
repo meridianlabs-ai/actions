@@ -2,23 +2,20 @@
 # TEMPORARY, removed before merge (PR #110). Exercises the analyze/publish
 # runner boundary of inspect-ai-ci-perf.yml with no Anthropic key and no
 # GitHub writes: the Claude step is replaced by synthetic report.md and
-# findings.json, `poison` mode plants a gh shim on $GITHUB_PATH, a
+# findings.json; after it, analyze plants a gh shim on $GITHUB_PATH, a
 # CI_PERF_OUTPUT_DIR override in $GITHUB_ENV and a sitecustomize.py in the
-# ambient Python after the analysis, and `tamper` mode edits raw.json after
-# its sha256 was recorded. publish is the real job with the two MARVIN_TOKEN
-# steps replaced by assertions and a stubbed gh.
+# ambient Python, and also uploads a copy of the evidence whose raw.json was
+# edited after its sha256 was recorded. publish is the real job with the two
+# MARVIN_TOKEN steps replaced by assertions and a stubbed gh: the clean copy
+# must validate and reach the (stubbed) writes, the tampered copy must fail
+# the sha256 check. Runs on push to the PR branch because a workflow that is
+# not on the default branch cannot be dispatched.
 name: Inspect AI CI Perf boundary test
 
 "on":
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "poison: taint the analysis runner; tamper: modify raw.json after collection"
-        required: true
-        type: choice
-        options:
-          - poison
-          - tamper
+  push:
+    branches:
+      - issue-105-phase-1-inspect-ai-ci-perf-publish-on-a
 
 concurrency:
   group: inspect-ai-ci-perf-boundary-test
@@ -91,19 +88,20 @@ jobs:
           echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Tamper with raw.json after its sha256 was recorded
-        if: inputs.mode == 'tamper'
-        run: echo 'tampered' >> "$CI_PERF_OUTPUT_DIR/raw.json"
+      - name: Copy the evidence and tamper with raw.json after its sha256 was recorded
+        run: |
+          cp -r "$CI_PERF_OUTPUT_DIR" "$RUNNER_TEMP/ci-perf-tampered"
+          echo 'tampered' >> "$RUNNER_TEMP/ci-perf-tampered/raw.json"
 
       - name: Analyze CI performance (synthetic stand-in for the agent)
         id: analysis
         run: |
           printf '# Boundary test report\n\nSynthetic analysis for %s. No findings.\n' "$CI_PERF_RUN_URL" > "$CI_PERF_OUTPUT_DIR/report.md"
           echo '[]' > "$CI_PERF_OUTPUT_DIR/findings.json"
+          cp "$CI_PERF_OUTPUT_DIR/report.md" "$CI_PERF_OUTPUT_DIR/findings.json" "$RUNNER_TEMP/ci-perf-tampered/"
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Poison the analysis runner
-        if: inputs.mode == 'poison'
         run: |
           mkdir -p "$RUNNER_TEMP/poison"
           printf '#!/bin/sh\necho "$GH_TOKEN" > /tmp/stolen-token\nexit 1\n' > "$RUNNER_TEMP/poison/gh"
@@ -114,7 +112,6 @@ jobs:
           printf 'open("/tmp/poisoned", "w").close()\n' > "$site/sitecustomize.py"
 
       - name: Confirm the poison took effect on this runner
-        if: inputs.mode == 'poison'
         run: |
           test "$(command -v gh)" = "$RUNNER_TEMP/poison/gh"
           test "$CI_PERF_OUTPUT_DIR" = /tmp/elsewhere
@@ -130,6 +127,14 @@ jobs:
           path: ${{ runner.temp }}/ci-perf/
           retention-days: 1
           if-no-files-found: warn
+
+      - name: Retain the tampered copy
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}-tampered
+          path: ${{ runner.temp }}/ci-perf-tampered/
+          retention-days: 1
+          if-no-files-found: error
 
   publish:
     needs: analyze
@@ -163,9 +168,14 @@ jobs:
           name: ${{ needs.analyze.outputs.artifact_name }}
           path: ${{ env.CI_PERF_OUTPUT_DIR }}
 
+      - name: Download the tampered copy
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.analyze.outputs.artifact_name }}-tampered
+          path: ${{ github.workspace }}/ci-perf-tampered
+
       - name: Validate proposed findings
         id: validate
-        continue-on-error: true
         env:
           ANALYSIS_CONCLUSION: ${{ needs.analyze.outputs.analysis_conclusion }}
           RAW_SHA: ${{ needs.analyze.outputs.raw_sha }}
@@ -179,21 +189,33 @@ jobs:
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR"
 
-      - name: Tampered evidence fails validation before any write
-        if: inputs.mode == 'tamper'
+      - name: Validate the tampered copy (same checks, expected to fail)
+        id: validate_tampered
+        continue-on-error: true
         env:
-          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          CI_PERF_OUTPUT_DIR: ${{ github.workspace }}/ci-perf-tampered
+          ANALYSIS_CONCLUSION: ${{ needs.analyze.outputs.analysis_conclusion }}
+          RAW_SHA: ${{ needs.analyze.outputs.raw_sha }}
+          MEASUREMENTS_SHA: ${{ needs.analyze.outputs.measurements_sha }}
+          SUMMARY_SHA: ${{ needs.analyze.outputs.summary_sha }}
+        run: |
+          test "$ANALYSIS_CONCLUSION" = "success" || { echo "Analysis did not succeed"; exit 1; }
+          echo "$RAW_SHA  $CI_PERF_OUTPUT_DIR/raw.json" | sha256sum --check
+          echo "$MEASUREMENTS_SHA  $CI_PERF_OUTPUT_DIR/measurements.md" | sha256sum --check
+          echo "$SUMMARY_SHA  $CI_PERF_OUTPUT_DIR/summary.json" | sha256sum --check
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+            --directory "$CI_PERF_OUTPUT_DIR"
+
+      - name: Tampered evidence fails validation before any write
+        env:
+          VALIDATE_OUTCOME: ${{ steps.validate_tampered.outcome }}
         run: |
           test "$VALIDATE_OUTCOME" = failure
-          test ! -e "$CI_PERF_OUTPUT_DIR/published.json"
+          test ! -e "$GITHUB_WORKSPACE/ci-perf-tampered/published.json"
           echo "Tampered raw.json was rejected; nothing was published"
 
       - name: Publisher runner is unaffected by the poisoned analysis runner
-        if: inputs.mode == 'poison'
-        env:
-          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
         run: |
-          test "$VALIDATE_OUTCOME" = success
           test "$(command -v gh)" = /usr/bin/gh
           test "$CI_PERF_OUTPUT_DIR" = "$GITHUB_WORKSPACE/ci-perf"
           test ! -e /tmp/stolen-token
@@ -204,7 +226,6 @@ jobs:
           echo "Publisher runner is clean: real gh, job-level output dir, no planted files"
 
       - name: Publish fork issues and trend summary (gh stubbed, no writes)
-        if: inputs.mode == 'poison'
         env:
           GH_TOKEN: not-a-real-token
           STUB_LOG: ${{ github.workspace }}/gh-stub.log
