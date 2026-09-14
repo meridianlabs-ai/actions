@@ -14,16 +14,18 @@
 # landing manifest, which emit-landing uploads as an artifact.
 #
 # land runs on a fresh runner the agent never had, with no checkout. The
-# `land` composite validates the manifest and only then creates or comments
-# on the fork's tracking issues as marvin — adding each issue it creates to
-# Atlas by node ID — and posts the Slack message to the channel and thread
-# the agent job validated (never to a destination the manifest names).
-# secrets.MARVIN_TOKEN and the SLACK_* secrets appear in `land` only.
+# `land` composite validates the manifest and only then creates, comments
+# on, reopens and assigns the fork's tracking issues as marvin — putting
+# each issue it creates or adopts on Atlas at Todo by node ID — and posts
+# the Slack message to the channel and thread the agent job validated
+# (never to a destination the manifest names). secrets.MARVIN_TOKEN and
+# the SLACK_* secrets appear in `land` only.
 #
-# The manifest's `slack` field and land's `slack-token` / `slack-channel` /
-# `slack-thread-ts` inputs are the Slack extension of the landing pair in the
-# agents repo; until it lands there the validator refuses a manifest that
-# carries `slack`.
+# Blocked by meridianlabs-ai/agents#102: the manifest's `slack` field,
+# `issues[].assignees` / `issues[].reopen`, land's `slack-*` inputs and the
+# Atlas Todo status are that PR's extension of the landing pair; until it
+# lands at `@main` the validator refuses a manifest carrying `slack` or
+# those issue fields.
 name: Triage Test Failures
 
 "on":
@@ -247,12 +249,17 @@ jobs:
             - `issues`: an array with AT MOST ONE entry, either
               - a new tracking issue: `{"title": "Triage: <short summary>",
                 "body_file": "issue.md", "labels": ["auto"]}` (`labels` only when the
-                bucket below says so; otherwise omit it), or
+                bucket below says so; otherwise omit it). It is assigned to `ransomr`
+                and put on the Atlas board for you; do not add other assignees.
               - a comment on an existing issue: `{"comment_on": <issue number>,
-                "body_file": "comment.md"}`.
+                "body_file": "comment.md", "reopen": true, "assignees": ["ransomr"]}`
+                — `reopen` only when the issue is closed (a regression), `assignees`
+                only when the issue has no assignee (the landing job adds the owner
+                only to an unowned issue, and puts a reopened or newly owned issue on
+                the board); omit both otherwise.
               Every entry targets ${{ env.ISSUES_REPO }}; the landing job refuses any
-              other repo, drops every label other than `auto`, and lands only the
-              first entry.
+              other repo, drops every label other than `auto` and every assignee other
+              than `ransomr`, and lands only the first entry.
             - `slack`: `{"text_file": "slack.txt"}` — the reply to post in the Slack
               thread of the failed run's notification (the landing job knows the
               channel and thread; you do not choose them). Plain text with Slack
@@ -313,8 +320,8 @@ jobs:
             3. Set `EXISTING_ISSUE`:
                - **Open issue matches** → record its number and URL.
                - **Closed issue matches, closed within the last 30 days** → record its
-                 number and URL; treat as a regression (say so when commenting — you
-                 cannot reopen it; a human will).
+                 number and URL; treat as a regression (you'll set `reopen` when
+                 commenting).
                - **Closed >30 days ago, OR no match** → `EXISTING_ISSUE` is empty.
 
             ## ALREADY_FIXED_ON_MAIN — has main already moved past this bug?
@@ -376,16 +383,18 @@ jobs:
                   link, a one-line "still failing on run <id>" note, and — if your
                   analysis has refined or changed since the original issue was opened —
                   an updated root cause and/or proposed fix. Otherwise keep the comment
-                  brief. If the issue is closed, say it should be reopened; if it has no
-                  assignee, say it needs an owner (the board's working views filter on
-                  assignee — unassigned means invisible to the maintainer; observed:
-                  inspect_ai#444).
+                  brief. If the issue is closed, set `reopen: true`; if it has no
+                  assignee, set `assignees: ["ransomr"]` — an issue filed by another
+                  automation (e.g. the recurring ci-perf run) may be unowned, and the
+                  board's working views filter on assignee, so unassigned means
+                  invisible to the maintainer (observed: inspect_ai#444).
                 - Slack text with the existing-issue URL (not a new one).
                 - Stop.
 
               **Otherwise** (no existing issue):
               1. Describe a new tracking issue in the issues repo (${{ env.ISSUES_REPO }}):
                  - Title: `Triage: <short summary>`
+                 - Assignee: `ransomr` (the landing job adds it)
                  - Labels: `["auto"]`. The label hands the issue to the autonomous
                    pipeline: the fork's agent implements your Proposed fix and opens a
                    PR into the automated review loop, so write the Proposed fix
@@ -431,7 +440,8 @@ jobs:
             You cannot confidently diagnose, OR the fix would be speculative, OR it touches
             more than ~30 lines, OR multiple tests failed for different reasons.
             Action: same dedup logic as bucket C (if `EXISTING_ISSUE` is set, a
-            `comment_on` entry; otherwise a new issue) — but NEVER give the `auto`
+            `comment_on` entry with `reopen` / `assignees` as needed; otherwise a new
+            issue) — but NEVER give the `auto`
             label here: bucket D means the fix is not well understood, and the label
             would hand a speculative brief to the autonomous pipeline. If describing a
             new issue, body has:
@@ -456,7 +466,8 @@ jobs:
               or in UKGovernmentBEIS/inspect_ai. The landing job enforces this; every
               `gh issue list/view` you run passes `--repo ${{ env.ISSUES_REPO }}`.
             - At most one issue-related action per run: either one new issue OR one
-              comment on one existing issue. Never both, and never a new issue when
+              comment on one existing issue (its `reopen` and `assignees` are part of
+              that single action). Never both, and never a new issue when
               `EXISTING_ISSUE` is set.
             - Never modify files in `inspect_ai/` — treat it as read-only reference.
             - Every run ends with Slack text; the manifest is how it gets posted.
@@ -471,8 +482,11 @@ jobs:
       # validator refuse the WHOLE manifest, so dropping it with a warning is
       # the proportionate failure. Every issue entry is pinned to ISSUES_REPO
       # (the agent's `repo`, if any, is ignored), its labels are reduced to
-      # `auto`, and only the first entry survives — one issue action per run,
-      # the prompt's rule, enforced here. A failed agent step, an unparsable
+      # `auto`, its assignees to ASSIGNEE (a new issue is always assigned; an
+      # existing one only when the agent asks and the land job finds it
+      # unowned), `reopen` is kept only on a comment, and only the first
+      # entry survives — one issue action per run, the prompt's rule,
+      # enforced here. A failed agent step, an unparsable
       # manifest or a run that described nothing becomes the manifest's
       # `error` (fail_run), so the land job fails loudly instead of ending a
       # triage with nothing posted.
@@ -484,6 +498,9 @@ jobs:
           EXTRA: ${{ runner.temp }}/landing-extra.json
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Owner of every tracking issue: the board's working views filter
+          # on assignee, so an unassigned issue is invisible (inspect_ai#444).
+          ASSIGNEE: ransomr
         run: |
           set -uo pipefail
           mkdir -p "$DIR"
@@ -497,7 +514,7 @@ jobs:
               agent='{}'
             fi
           fi
-          norm=$(jq -c --arg repo "$ISSUES_REPO" '{
+          norm=$(jq -c --arg repo "$ISSUES_REPO" --arg owner "$ASSIGNEE" '{
               issues: [(.issues // [])[]? | select(type == "object"
                           and (.body_file | type) == "string" and (.body_file | test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$"))
                           and ((.comment_on == null)
@@ -507,9 +524,14 @@ jobs:
                            title: (if (.title | type) == "string" and .title != "" then .title[0:256] else "Comment on #\(.comment_on)" end),
                            body_file,
                            labels: (if .comment_on == null then [(.labels // [])[]? | strings | select(. == "auto")] else [] end),
+                           assignees: (if .comment_on == null then [$owner]
+                                       else [(.assignees // [])[]? | strings | select(. == $owner)] | unique end),
+                           reopen: (.comment_on != null and .reopen == true),
                            comment_on}
                         | if .comment_on == null then del(.comment_on) else . end
-                        | if .labels == [] then del(.labels) else . end],
+                        | if .labels == [] then del(.labels) else . end
+                        | if .assignees == [] then del(.assignees) else . end
+                        | if .reopen then . else del(.reopen) end],
               slack: ((.slack.text_file? // "") | if type == "string" and test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$") then . else "" end),
               had_slack: (has("slack")),
               dropped_issues: ((.issues // []) | if type == "array" then length else 0 end),
@@ -562,8 +584,9 @@ jobs:
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate
   # (refusing any manifest that carries commits: nothing here may push),
-  # create or comment on the fork's tracking issues as marvin (created
-  # issues are added to Atlas by node ID), post the Slack message to the
+  # create, comment on, reopen and assign the fork's tracking issues as
+  # marvin (created and adopted issues go on Atlas at Todo by node ID; the
+  # assignee is added only to an unowned issue), post the Slack message to the
   # destination the agent job validated, report the manifest's error and
   # fail the run when it says so. Skipped when the agent job was skipped
   # (trigger not met: no artifact) or cancelled.
