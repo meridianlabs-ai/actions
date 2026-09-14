@@ -26,12 +26,25 @@
 # - MARVIN_TOKEN: used only in publish.
 #
 # Egress: harden-runner is the first step of analyze with egress-policy
-# audit. After one scheduled run, copy the observed endpoints from the
-# harden-runner summary into allowed-endpoints and switch to block. Expected:
-# github.com:443, api.github.com:443, objects.githubusercontent.com:443,
-# pypi.org:443, files.pythonhosted.org:443, api.anthropic.com:443, plus what
-# the action itself contacts. publish needs no allow-list: its only egress is
-# GitHub.
+# block. allowed-endpoints is the egress observed in audit mode on run
+# https://github.com/meridianlabs-ai/actions/actions/runs/34880688791:
+# Anthropic (api.anthropic.com; claude.ai and downloads.claude.ai are the
+# action's Claude Code installer), GitHub (github.com and api.github.com,
+# listed explicitly in case the agent's meta-domain fetch fails;
+# release-assets.githubusercontent.com is the action downloading a release
+# asset) and the package indexes the action and the tooling test install
+# from (registry.npmjs.org, pypi.org, files.pythonhosted.org). The agent
+# allows GitHub Actions infrastructure without listing: the GitHub meta
+# domains (github.com, *.github.com, *.githubapp.com, ghcr.io),
+# *.actions.githubusercontent.com, codeload.github.com,
+# productionresultssa*.blob.core.windows.net, and the Azure wire and
+# metadata IPs. Claude Code's telemetry intake (datadoghq.com) is not
+# allowed; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC on the analysis step
+# stops Claude Code from attempting telemetry, error reporting and update
+# checks. A newly needed endpoint shows up as a blocked call in the
+# harden-runner step summary and as a job annotation; add it only if it is
+# clearly required, that is an Anthropic, GitHub or package-index host.
+# publish needs no allow-list: its only egress is GitHub.
 name: Inspect AI CI Perf
 
 "on":
@@ -80,7 +93,17 @@ jobs:
       - name: Harden runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            api.anthropic.com:443
+            api.github.com:443
+            github.com:443
+            claude.ai:443
+            downloads.claude.ai:443
+            registry.npmjs.org:443
+            release-assets.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
 
       - name: Initialize output directory
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
@@ -125,6 +148,7 @@ jobs:
         id: analysis
         env:
           GH_TOKEN: ${{ github.token }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
