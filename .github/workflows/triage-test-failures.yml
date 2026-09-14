@@ -527,7 +527,7 @@ jobs:
             fi
           fi
           norm=$(jq -c --arg repo "$ISSUES_REPO" --arg owner "$ASSIGNEE" '{
-              issues: [(.issues // [])[]? | select(type == "object"
+              issues: [((.issues // []) | if type == "array" then . else [] end)[] | select(type == "object"
                           and (.body_file | type) == "string" and (.body_file | test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$"))
                           and ((.comment_on == null)
                                or ((.comment_on | type) == "number" and .comment_on == (.comment_on | floor) and .comment_on > 0))

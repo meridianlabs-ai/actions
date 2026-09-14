@@ -261,7 +261,17 @@ def test_compose_malformed_issue_entry_is_dropped_and_fails_the_run(tmp_path, ba
 
 @pytest.mark.parametrize(
     "container",
-    [{"title": "Triage: fixture", "body_file": "a.md"}, "a.md", 1, True, {}],
+    [
+        {"title": "Triage: fixture", "body_file": "a.md"},
+        # Blocking finding, review round 3: an object whose VALUES are valid
+        # entries must not have them iterated as if it were an array.
+        {"first": {"title": "Triage: fixture", "body_file": "a.md"}},
+        {"c": {"comment_on": 444, "body_file": "a.md", "reopen": True}},
+        "a.md",
+        1,
+        True,
+        {},
+    ],
 )
 def test_compose_non_array_issues_container_is_dropped_and_fails_the_run(tmp_path, container):
     # Blocking finding, review round 2: a malformed `issues` container (an
@@ -272,6 +282,7 @@ def test_compose_non_array_issues_container_is_dropped_and_fails_the_run(tmp_pat
     assert extra["slack"] == {"text_file": "s.txt"}
     assert extra["error"]["fail_run"] is True
     assert "`issues` value is not an array" in extra["error"]["message"]
+    assert "malformed issue entr" not in extra["error"]["message"]  # no negative dropped count
 
 
 def test_compose_null_issues_is_absent_not_malformed(tmp_path):
