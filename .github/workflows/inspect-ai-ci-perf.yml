@@ -56,8 +56,9 @@
 # but the report the agent writes is itself published, so the step "Refuse
 # to publish evidence that contains a secret" fails the job if any file in
 # CI_PERF_OUTPUT_DIR contains the Anthropic key, its base64 encoding or the
-# sk-ant- prefix. Show report and Retain CI evidence outside Git run only if
-# that step did not fail.
+# sk-ant- prefix, if anything there is not a regular file (publication
+# follows symlinks), or if a file cannot be scanned. Show report and Retain
+# CI evidence outside Git run only if that step did not fail.
 name: Inspect AI CI Perf
 
 "on":
@@ -193,26 +194,60 @@ jobs:
         env:
           CI_PERF_ANTHROPIC_API_KEY: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
         run: |
-          if ! test -d "$CI_PERF_OUTPUT_DIR"; then
+          # Scan the directory the next two steps publish. Show report reads
+          # CI_PERF_OUTPUT_DIR, the upload reads runner.temp/ci-perf; the
+          # agent could have changed GITHUB_ENV, so they must still agree.
+          dir="$RUNNER_TEMP/ci-perf"
+          if test "$CI_PERF_OUTPUT_DIR" != "$dir"; then
+            echo "::error::CI_PERF_OUTPUT_DIR is $CI_PERF_OUTPUT_DIR, expected $dir; not publishing"
+            exit 1
+          fi
+          if test -L "$dir"; then
+            echo "::error::$dir is a symlink; not publishing"
+            exit 1
+          fi
+          if ! test -d "$dir"; then
             echo "No output directory; nothing to scan"
             exit 0
+          fi
+          # Publication follows symlinks, so only regular files and
+          # directories may be present. find and the listings fail the step
+          # on any error (bash -e, pipefail).
+          entries=$(mktemp)
+          find "$dir" -mindepth 1 ! -type f ! -type d -print > "$entries"
+          if test -s "$entries"; then
+            sed 's/^/::error::not a regular file, not publishing: /' "$entries"
+            exit 1
+          fi
+          files=$(mktemp)
+          find "$dir" -type f -print0 > "$files"
+          key_b64=""
+          if test -n "$CI_PERF_ANTHROPIC_API_KEY"; then
+            key_b64=$(printf '%s' "$CI_PERF_ANTHROPIC_API_KEY" | base64 -w0)
           fi
           # Patterns reach grep through a pipe, never argv or the log.
           patterns() {
             printf '%s\n' 'sk-ant-'
             if test -n "$CI_PERF_ANTHROPIC_API_KEY"; then
-              printf '%s\n' "$CI_PERF_ANTHROPIC_API_KEY"
-              printf '%s' "$CI_PERF_ANTHROPIC_API_KEY" | base64 -w0
-              echo
+              printf '%s\n' "$CI_PERF_ANTHROPIC_API_KEY" "$key_b64"
             fi
           }
           status=0
           while IFS= read -r -d '' file; do
-            if grep -F -q -f <(patterns) -- "$file"; then
-              echo "::error::$file contains an Anthropic key or key prefix; not publishing"
-              status=1
-            fi
-          done < <(find "$CI_PERF_OUTPUT_DIR" -type f -print0)
+            rc=0
+            grep -F -q -f <(patterns) -- "$file" || rc=$?
+            case "$rc" in
+              0)
+                echo "::error::$file contains an Anthropic key or key prefix; not publishing"
+                status=1
+                ;;
+              1) ;;
+              *)
+                echo "::error::could not scan $file (grep exit $rc); not publishing"
+                status=1
+                ;;
+            esac
+          done < "$files"
           exit "$status"
 
       - name: Show report
