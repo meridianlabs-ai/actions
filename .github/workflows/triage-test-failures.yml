@@ -546,11 +546,16 @@ jobs:
                         | if .reopen then . else del(.reopen) end],
               slack: ((.slack.text_file? // "") | if type == "string" and test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$") then . else "" end),
               had_slack: (has("slack")),
+              bad_issues: (has("issues") and .issues != null and (.issues | type) != "array"),
               dropped_issues: ((.issues // []) | if type == "array" then length else 0 end),
               unknown: [keys[] | select(. != "issues" and . != "slack")]
             } | .dropped_issues -= (.issues | length)' <<<"$agent" 2>/dev/null) \
-            || norm='{"issues":[],"slack":"","had_slack":false,"dropped_issues":0,"unknown":[]}'
+            || norm='{"issues":[],"slack":"","had_slack":false,"bad_issues":false,"dropped_issues":0,"unknown":[]}'
           n=$(jq -r '.issues | length' <<<"$norm")
+          if [ "$(jq -r '.bad_issues' <<<"$norm")" = "true" ]; then
+            echo "::error::landing: the agent's manifest has an \`issues\` value that is not an array; no issue action lands."
+            problem="${problem:+$problem; and }its \`issues\` value is not an array, so no issue action was landed"
+          fi
           dropped=$(jq -r '.dropped_issues' <<<"$norm")
           if [ "$dropped" != "0" ]; then
             echo "::error::landing: dropped $dropped malformed issues entr(ies) from the agent's manifest (need a body_file name and either a non-empty title or a positive integer comment_on)."
