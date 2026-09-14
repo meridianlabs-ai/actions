@@ -187,8 +187,15 @@ jobs:
       #
       # Tools: the allow list is reads plus Edit (which governs Write too)
       # under the landing directory, given as an absolute-path rule (`//`
-      # prefix). The deny list closes the gh verbs and the gh-api flags that
-      # write, and curl (the old Slack channel); deny beats allow. Guard
+      # prefix). git runs as `git -C inspect_ai <verb>` (the clone is a
+      # subdirectory and `cd` is not granted; Bash rules match each
+      # subcommand of a compound command on its own). No `sed -n`: sed's `w`
+      # command writes a file and no pattern denies it without also denying
+      # `/warning/p`; the Read tool's offset/limit covers line ranges. The
+      # deny list closes the gh verbs and the gh-api flags that write, git's
+      # `--output` (log and show write a file with it), and curl/wget (the
+      # old Slack channel); deny beats allow. tests/test_triage_workflow.py
+      # checks these rules against the write vectors named here. Guard
       # rails: the boundary is that nothing in this job can write as marvin
       # or reach Slack — the land job does both, from the validated manifest.
       - name: Run Claude triage agent
@@ -206,16 +213,15 @@ jobs:
                   "Edit(/${{ runner.temp }}/landing/**)",
                   "Bash(gh issue list *)", "Bash(gh issue view *)",
                   "Bash(gh run view *)", "Bash(gh api repos/*)",
-                  "Bash(cd *)",
-                  "Bash(git log *)", "Bash(git show *)", "Bash(git blame *)",
-                  "Bash(grep *)", "Bash(sed -n *)",
-                  "Bash(head *)", "Bash(tail *)", "Bash(wc *)", "Bash(ls *)", "Bash(jq *)"
+                  "Bash(git -C inspect_ai log *)", "Bash(git -C inspect_ai show *)", "Bash(git -C inspect_ai blame *)",
+                  "Bash(grep *)"
                 ],
                 "deny": [
                   "Bash(gh issue create *)", "Bash(gh issue comment *)",
                   "Bash(gh issue edit *)", "Bash(gh issue reopen *)", "Bash(gh issue close *)",
                   "Bash(gh api *-X*)", "Bash(gh api *--method*)", "Bash(gh api *--input*)",
                   "Bash(gh api *-f *)", "Bash(gh api *-F *)", "Bash(gh api *--field*)", "Bash(gh api *--raw-field*)",
+                  "Bash(git *--output*)",
                   "Bash(curl *)", "Bash(wget *)"
                 ]
               }
@@ -239,8 +245,12 @@ jobs:
             # How your actions reach GitHub and Slack
             You hold no credential that can create or comment on issues or post to
             Slack, and your tools are limited to reads plus files under the landing
-            directory. Do NOT try `gh issue create`, `gh issue comment`, `gh issue
-            edit`, `gh issue reopen` or curl — they are denied. Instead, describe the
+            directory: the Read, Grep and Glob tools, `gh issue list/view`, `gh run
+            view`, `gh api repos/...` (reads), `git -C inspect_ai log/show/blame`, and
+            `grep`. Nothing else runs (no `cd`, pipes into other commands, `head`,
+            `jq`, `sed`); use the Read tool for line ranges and JSON files. Do NOT try
+            `gh issue create`, `gh issue comment`, `gh issue edit`, `gh issue reopen`
+            or curl — they are denied. Instead, describe the
             writes you want in a landing manifest; after your run ends, a separate job
             validates it and performs exactly those writes as the machine account.
 
@@ -331,17 +341,18 @@ jobs:
 
             Otherwise, check whether inspect_ai main has moved past the tested commit in
             a way that likely fixes the failure. The `inspect_ai/` clone has all history;
-            `origin/main` refs the current main. Run git from inside the clone:
+            `origin/main` refs the current main. Run git with `-C inspect_ai` (you cannot
+            `cd`):
 
-              cd inspect_ai
-              git log --oneline ${{ steps.base.outputs.sha }}..origin/main | head -50
+              git -C inspect_ai log --oneline -50 ${{ steps.base.outputs.sha }}..origin/main
 
             If there are commits since the tested SHA:
               - Identify the files implicated in the failure (from `triage/failed.log`).
-              - Run `git log --oneline ${{ steps.base.outputs.sha }}..origin/main -- <file>`
+              - Run `git -C inspect_ai log --oneline ${{ steps.base.outputs.sha }}..origin/main -- <file>`
                 for each to see whether those files have been modified on main.
               - Skim commit messages on main for keywords matching the failure (test name,
-                error message substring, module involved); `git show` a commit's diff.
+                error message substring, module involved); `git -C inspect_ai show <sha>`
+                for a commit's diff.
 
             Set `ALREADY_FIXED_ON_MAIN = true` only with specific evidence: file + commit
             + plausible mechanism. If evidence is weak, set it to false and mention the
@@ -486,10 +497,11 @@ jobs:
       # existing one only when the agent asks and the land job finds it
       # unowned), `reopen` is kept only on a comment, and only the first
       # entry survives — one issue action per run, the prompt's rule,
-      # enforced here. A failed agent step, an unparsable
-      # manifest or a run that described nothing becomes the manifest's
-      # `error` (fail_run), so the land job fails loudly instead of ending a
-      # triage with nothing posted.
+      # enforced here. What is valid still lands, but a failed agent step,
+      # an unparsable manifest, any entry or key that was dropped, or a run
+      # without Slack text (every triage owes the thread a reply) becomes
+      # the manifest's `error` (fail_run), so the land job fails loudly
+      # instead of ending a triage green with part of it missing.
       - name: Compose landing manifest
         id: landing
         if: always()
@@ -539,10 +551,18 @@ jobs:
             } | .dropped_issues -= (.issues | length)' <<<"$agent" 2>/dev/null) \
             || norm='{"issues":[],"slack":"","had_slack":false,"dropped_issues":0,"unknown":[]}'
           n=$(jq -r '.issues | length' <<<"$norm")
-          [ "$(jq -r '.dropped_issues' <<<"$norm")" = "0" ] || echo "::warning::landing: dropped $(jq -r '.dropped_issues' <<<"$norm") malformed issues entr(ies) from the agent's manifest (need a body_file name and either a non-empty title or a positive integer comment_on)."
-          [ "$(jq -r '.unknown | length' <<<"$norm")" = "0" ] || echo "::warning::landing: ignored keys the agent may not set in its manifest: $(jq -r '.unknown | join(", ")' <<<"$norm")."
+          dropped=$(jq -r '.dropped_issues' <<<"$norm")
+          if [ "$dropped" != "0" ]; then
+            echo "::error::landing: dropped $dropped malformed issues entr(ies) from the agent's manifest (need a body_file name and either a non-empty title or a positive integer comment_on)."
+            problem="${problem:+$problem; and }$dropped malformed issue entr(ies) in its manifest were dropped"
+          fi
+          if [ "$(jq -r '.unknown | length' <<<"$norm")" != "0" ]; then
+            echo "::error::landing: ignored keys the agent may not set in its manifest: $(jq -r '.unknown | join(", ")' <<<"$norm")."
+            problem="${problem:+$problem; and }its manifest carried keys it may not set ($(jq -r '.unknown | join(", ")' <<<"$norm")), which were ignored"
+          fi
           if [ "$n" -gt 1 ]; then
-            echo "::warning::landing: the agent described $n issue actions; only the first lands (one issue action per run)."
+            echo "::error::landing: the agent described $n issue actions; only the first lands (one issue action per run)."
+            problem="${problem:+$problem; and }it described $n issue actions where one is allowed; only the first was landed"
             norm=$(jq -c '.issues |= .[0:1]' <<<"$norm")
             n=1
           fi
@@ -551,12 +571,14 @@ jobs:
           if [ -n "$slack" ]; then
             extra=$(jq -c --arg f "$slack" '.slack = {text_file: $f}' <<<"$extra")
           elif [ "$(jq -r '.had_slack' <<<"$norm")" = "true" ]; then
-            echo "::warning::landing: the agent's slack entry has no valid text_file name; no Slack message lands."
+            echo "::error::landing: the agent's slack entry has no valid text_file name; no Slack message lands."
+            problem="${problem:+$problem; and }its slack entry names no valid text_file, so no Slack reply was posted"
+          elif [ "${CLAUDE_OUTCOME:-}" = "success" ]; then
+            echo "::error::landing: the agent described no Slack message; every triage owes the thread a reply."
+            problem="${problem:+$problem; and }it described no Slack reply"
           fi
           if [ "${CLAUDE_OUTCOME:-}" != "success" ]; then
             problem="${problem:+$problem; and }the triage agent step ended with outcome '${CLAUDE_OUTCOME:-unknown}'"
-          elif [ "$n" = "0" ] && [ -z "$slack" ]; then
-            problem="${problem:+$problem; and }the triage agent described no issue action and no Slack message"
           fi
           if [ -n "$problem" ]; then
             echo "::error::landing: $problem."
