@@ -44,7 +44,20 @@
 # checks. A newly needed endpoint shows up as a blocked call in the
 # harden-runner step summary and as a job annotation; add it only if it is
 # clearly required, that is an Anthropic, GitHub or package-index host.
-# publish needs no allow-list: its only egress is GitHub.
+# publish needs no allow-list: its only egress is GitHub. The same
+# harden-runner step sets disable-sudo-and-containers: the runner user has
+# passwordless sudo, and without it a process on the runner could alter the
+# iptables rules that enforce the allow-list. Nothing in analyze needs sudo
+# or Docker: pip, the collector, the tests and Claude all run as the runner
+# user.
+#
+# Published output: this repo is public, so the job summary and the artifact
+# are world-readable. The allow-list closes the network exfiltration path,
+# but the report the agent writes is itself published, so the step "Refuse
+# to publish evidence that contains a secret" fails the job if any file in
+# CI_PERF_OUTPUT_DIR contains the Anthropic key, its base64 encoding or the
+# sk-ant- prefix. Show report and Retain CI evidence outside Git run only if
+# that step did not fail.
 name: Inspect AI CI Perf
 
 "on":
@@ -94,6 +107,7 @@ jobs:
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
           egress-policy: block
+          disable-sudo-and-containers: true
           allowed-endpoints: >
             api.anthropic.com:443
             api.github.com:443
@@ -173,8 +187,36 @@ jobs:
             Missing observations are not zero. Do not retry known permission
             blockers. Do not run the collector again.
 
-      - name: Show report
+      - name: Refuse to publish evidence that contains a secret
+        id: secret_scan
         if: always()
+        env:
+          CI_PERF_ANTHROPIC_API_KEY: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
+        run: |
+          if ! test -d "$CI_PERF_OUTPUT_DIR"; then
+            echo "No output directory; nothing to scan"
+            exit 0
+          fi
+          # Patterns reach grep through a pipe, never argv or the log.
+          patterns() {
+            printf '%s\n' 'sk-ant-'
+            if test -n "$CI_PERF_ANTHROPIC_API_KEY"; then
+              printf '%s\n' "$CI_PERF_ANTHROPIC_API_KEY"
+              printf '%s' "$CI_PERF_ANTHROPIC_API_KEY" | base64 -w0
+              echo
+            fi
+          }
+          status=0
+          while IFS= read -r -d '' file; do
+            if grep -F -q -f <(patterns) -- "$file"; then
+              echo "::error::$file contains an Anthropic key or key prefix; not publishing"
+              status=1
+            fi
+          done < <(find "$CI_PERF_OUTPUT_DIR" -type f -print0)
+          exit "$status"
+
+      - name: Show report
+        if: always() && steps.secret_scan.outcome != 'failure'
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
@@ -188,7 +230,7 @@ jobs:
           done
 
       - name: Retain CI evidence outside Git
-        if: always()
+        if: always() && steps.secret_scan.outcome != 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
