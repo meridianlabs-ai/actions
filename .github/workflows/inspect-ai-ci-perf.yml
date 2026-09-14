@@ -1,4 +1,37 @@
 ---
+# Inspect AI CI performance analysis, in two jobs with a runner boundary
+# between them.
+#
+# analyze checks out upstream inspect_ai, collects CI timings, and runs the
+# Claude agent that writes report.md and findings.json. The agent reads
+# upstream CI logs, upstream PR titles and bodies, and fork issue text, so its
+# runner is untrusted once the agent has run: injected text could leave a gh
+# shim on $GITHUB_PATH, a variable in $GITHUB_ENV, or a .pth file in the
+# ambient Python. analyze holds only read tokens and the capped Anthropic key,
+# and uploads its evidence as an artifact.
+#
+# publish runs on a fresh runner the agent never had. It downloads that
+# artifact, checks the collected data against the sha256 values recorded
+# before the agent ran, validates report.md and findings.json, and only then
+# writes fork issues and Atlas cards with MARVIN_TOKEN. The publisher never
+# shares a runner with the agent, and secrets.MARVIN_TOKEN must not appear in
+# analyze. A compromised analysis can produce a bad report.md and
+# findings.json, which the publisher validates, and nothing else.
+#
+# Secrets:
+# - CI_PERF_ANTHROPIC_API_KEY: a key from a dedicated Anthropic Console
+#   workspace with a monthly spend cap, added as an org secret scoped to this
+#   repository. The key is in the agent's environment by necessity; the cap
+#   bounds what a leak costs. Until the secret exists the analysis step fails.
+# - MARVIN_TOKEN: used only in publish.
+#
+# Egress: harden-runner is the first step of analyze with egress-policy
+# audit. After one scheduled run, copy the observed endpoints from the
+# harden-runner summary into allowed-endpoints and switch to block. Expected:
+# github.com:443, api.github.com:443, objects.githubusercontent.com:443,
+# pypi.org:443, files.pythonhosted.org:443, api.anthropic.com:443, plus what
+# the action itself contacts. publish needs no allow-list: its only egress is
+# GitHub.
 name: Inspect AI CI Perf
 
 "on":
@@ -22,7 +55,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  ci-perf:
+  analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -35,8 +68,20 @@ jobs:
       CI_PERF_SCHEDULED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      source_sha: ${{ steps.source.outputs.commit }}
+      raw_sha: ${{ steps.data.outputs.raw_sha }}
+      measurements_sha: ${{ steps.data.outputs.measurements_sha }}
+      summary_sha: ${{ steps.data.outputs.summary_sha }}
+      analysis_conclusion: ${{ steps.analysis.outputs.conclusion }}
+      artifact_name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: audit
+
       - name: Initialize output directory
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
 
@@ -82,7 +127,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
           claude_args: |
             --allowedTools Bash,Read,Edit,Write,Grep,Glob
@@ -104,17 +149,70 @@ jobs:
             Missing observations are not zero. Do not retry known permission
             blockers. Do not run the collector again.
 
+      - name: Show report
+        if: always()
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          echo "Dry-run: $DRY_RUN" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          for file in report.md measurements.md; do
+            if test -f "$CI_PERF_OUTPUT_DIR/$file"; then
+              cat "$CI_PERF_OUTPUT_DIR/$file" >> "$GITHUB_STEP_SUMMARY"
+              echo >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Retain CI evidence outside Git
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-perf/
+          retention-days: 90
+          if-no-files-found: warn
+
+  publish:
+    needs: analyze
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CI_PERF_OUTPUT_DIR: ${{ github.workspace }}/ci-perf
+      CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Checkout the upstream source the analysis used
+        uses: actions/checkout@v7
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ needs.analyze.outputs.source_sha }}
+          path: inspect_ai
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Download CI evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.analyze.outputs.artifact_name }}
+          path: ${{ env.CI_PERF_OUTPUT_DIR }}
+
       - name: Validate proposed findings
         env:
-          ANALYSIS_OUTPUTS: ${{ toJSON(steps.analysis.outputs) }}
-          SOURCE_SHA: ${{ steps.source.outputs.commit }}
-          RAW_SHA: ${{ steps.data.outputs.raw_sha }}
-          MEASUREMENTS_SHA: ${{ steps.data.outputs.measurements_sha }}
-          SUMMARY_SHA: ${{ steps.data.outputs.summary_sha }}
+          ANALYSIS_CONCLUSION: ${{ needs.analyze.outputs.analysis_conclusion }}
+          RAW_SHA: ${{ needs.analyze.outputs.raw_sha }}
+          MEASUREMENTS_SHA: ${{ needs.analyze.outputs.measurements_sha }}
+          SUMMARY_SHA: ${{ needs.analyze.outputs.summary_sha }}
         run: |
-          python -c 'import json, os; assert json.loads(os.environ["ANALYSIS_OUTPUTS"]).get("conclusion") == "success", "Analysis did not succeed"'
-          test -z "$(git -C inspect_ai status --porcelain --untracked-files=all)"
-          test "$(git -C inspect_ai rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$ANALYSIS_CONCLUSION" = "success" || { echo "Analysis did not succeed"; exit 1; }
           echo "$RAW_SHA  $CI_PERF_OUTPUT_DIR/raw.json" | sha256sum --check
           echo "$MEASUREMENTS_SHA  $CI_PERF_OUTPUT_DIR/measurements.md" | sha256sum --check
           echo "$SUMMARY_SHA  $CI_PERF_OUTPUT_DIR/summary.json" | sha256sum --check
@@ -122,7 +220,6 @@ jobs:
             --directory "$CI_PERF_OUTPUT_DIR"
 
       - name: Publish fork issues and trend summary
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
         run: |
@@ -131,7 +228,6 @@ jobs:
             --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
 
       - name: Add published issues to Atlas and assign unowned ones to Eric
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
         env:
           GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
         run: |
@@ -166,28 +262,18 @@ jobs:
               ], input=json.dumps({"assignees": ["epatey"]}), text=True, check=True)
           PYTHON
 
-      - name: Show report
+      - name: Show published issues
         if: always()
-        env:
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
-          echo "Dry-run: $DRY_RUN" >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
-          for file in report.md measurements.md; do
-            if test -f "$CI_PERF_OUTPUT_DIR/$file"; then
-              cat "$CI_PERF_OUTPUT_DIR/$file" >> "$GITHUB_STEP_SUMMARY"
-              echo >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
           if test -f "$CI_PERF_OUTPUT_DIR/published.json"; then
             cat "$CI_PERF_OUTPUT_DIR/published.json" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Retain CI evidence outside Git
+      - name: Retain published issue URLs outside Git
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/ci-perf/
+          name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}-published
+          path: ${{ env.CI_PERF_OUTPUT_DIR }}/published.json
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: ignore
