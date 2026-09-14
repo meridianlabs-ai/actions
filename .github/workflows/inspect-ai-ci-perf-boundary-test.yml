@@ -1,0 +1,234 @@
+---
+# TEMPORARY, removed before merge (PR #110). Exercises the analyze/publish
+# runner boundary of inspect-ai-ci-perf.yml with no Anthropic key and no
+# GitHub writes: the Claude step is replaced by synthetic report.md and
+# findings.json, `poison` mode plants a gh shim on $GITHUB_PATH, a
+# CI_PERF_OUTPUT_DIR override in $GITHUB_ENV and a sitecustomize.py in the
+# ambient Python after the analysis, and `tamper` mode edits raw.json after
+# its sha256 was recorded. publish is the real job with the two MARVIN_TOKEN
+# steps replaced by assertions and a stubbed gh.
+name: Inspect AI CI Perf boundary test
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "poison: taint the analysis runner; tamper: modify raw.json after collection"
+        required: true
+        type: choice
+        options:
+          - poison
+          - tamper
+
+concurrency:
+  group: inspect-ai-ci-perf-boundary-test
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+    env:
+      CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CI_PERF_SCHEDULED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      source_sha: ${{ steps.source.outputs.commit }}
+      raw_sha: ${{ steps.data.outputs.raw_sha }}
+      measurements_sha: ${{ steps.data.outputs.measurements_sha }}
+      summary_sha: ${{ steps.data.outputs.summary_sha }}
+      analysis_conclusion: ${{ steps.analysis.outputs.conclusion }}
+      artifact_name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Initialize output directory
+        run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
+
+      - name: Checkout upstream source for analysis
+        id: source
+        uses: actions/checkout@v7
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: main
+          path: inspect_ai
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Test CI tooling
+        run: |
+          python -m pip install pytest
+          python -m pytest -c /dev/null -p no:cacheprovider inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
+
+      - name: Collect timings and prior summaries
+        id: data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python inspect_ai/.claude/skills/ci-perf/scripts/collect_ci_data.py \
+            --out "$CI_PERF_OUTPUT_DIR/raw.json"
+          python inspect_ai/.claude/skills/ci-perf/scripts/summarize_ci_data.py \
+            "$CI_PERF_OUTPUT_DIR/raw.json" \
+            --out "$CI_PERF_OUTPUT_DIR/summary.json" \
+            --markdown "$CI_PERF_OUTPUT_DIR/measurements.md"
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+            --directory "$CI_PERF_OUTPUT_DIR" --read-history
+          echo "raw_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/raw.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Tamper with raw.json after its sha256 was recorded
+        if: inputs.mode == 'tamper'
+        run: echo 'tampered' >> "$CI_PERF_OUTPUT_DIR/raw.json"
+
+      - name: Analyze CI performance (synthetic stand-in for the agent)
+        id: analysis
+        run: |
+          printf '# Boundary test report\n\nSynthetic analysis for %s. No findings.\n' "$CI_PERF_RUN_URL" > "$CI_PERF_OUTPUT_DIR/report.md"
+          echo '[]' > "$CI_PERF_OUTPUT_DIR/findings.json"
+          echo "conclusion=success" >> "$GITHUB_OUTPUT"
+
+      - name: Poison the analysis runner
+        if: inputs.mode == 'poison'
+        run: |
+          mkdir -p "$RUNNER_TEMP/poison"
+          printf '#!/bin/sh\necho "$GH_TOKEN" > /tmp/stolen-token\nexit 1\n' > "$RUNNER_TEMP/poison/gh"
+          chmod +x "$RUNNER_TEMP/poison/gh"
+          echo "$RUNNER_TEMP/poison" >> "$GITHUB_PATH"
+          echo "CI_PERF_OUTPUT_DIR=/tmp/elsewhere" >> "$GITHUB_ENV"
+          site=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          printf 'open("/tmp/poisoned", "w").close()\n' > "$site/sitecustomize.py"
+
+      - name: Confirm the poison took effect on this runner
+        if: inputs.mode == 'poison'
+        run: |
+          test "$(command -v gh)" = "$RUNNER_TEMP/poison/gh"
+          test "$CI_PERF_OUTPUT_DIR" = /tmp/elsewhere
+          python -c 'pass'
+          test -f /tmp/poisoned
+          echo "Poison is live on the analysis runner"
+
+      - name: Retain CI evidence outside Git
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-perf/
+          retention-days: 1
+          if-no-files-found: warn
+
+  publish:
+    needs: analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CI_PERF_OUTPUT_DIR: ${{ github.workspace }}/ci-perf
+      CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Checkout the upstream source the analysis used
+        uses: actions/checkout@v7
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ needs.analyze.outputs.source_sha }}
+          path: inspect_ai
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Download CI evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.analyze.outputs.artifact_name }}
+          path: ${{ env.CI_PERF_OUTPUT_DIR }}
+
+      - name: Validate proposed findings
+        id: validate
+        continue-on-error: true
+        env:
+          ANALYSIS_CONCLUSION: ${{ needs.analyze.outputs.analysis_conclusion }}
+          RAW_SHA: ${{ needs.analyze.outputs.raw_sha }}
+          MEASUREMENTS_SHA: ${{ needs.analyze.outputs.measurements_sha }}
+          SUMMARY_SHA: ${{ needs.analyze.outputs.summary_sha }}
+        run: |
+          test "$ANALYSIS_CONCLUSION" = "success" || { echo "Analysis did not succeed"; exit 1; }
+          echo "$RAW_SHA  $CI_PERF_OUTPUT_DIR/raw.json" | sha256sum --check
+          echo "$MEASUREMENTS_SHA  $CI_PERF_OUTPUT_DIR/measurements.md" | sha256sum --check
+          echo "$SUMMARY_SHA  $CI_PERF_OUTPUT_DIR/summary.json" | sha256sum --check
+          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+            --directory "$CI_PERF_OUTPUT_DIR"
+
+      - name: Tampered evidence fails validation before any write
+        if: inputs.mode == 'tamper'
+        env:
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+        run: |
+          test "$VALIDATE_OUTCOME" = failure
+          test ! -e "$CI_PERF_OUTPUT_DIR/published.json"
+          echo "Tampered raw.json was rejected; nothing was published"
+
+      - name: Publisher runner is unaffected by the poisoned analysis runner
+        if: inputs.mode == 'poison'
+        env:
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+        run: |
+          test "$VALIDATE_OUTCOME" = success
+          test "$(command -v gh)" = /usr/bin/gh
+          test "$CI_PERF_OUTPUT_DIR" = "$GITHUB_WORKSPACE/ci-perf"
+          test ! -e /tmp/stolen-token
+          test ! -e /tmp/elsewhere
+          python -c 'pass'
+          test ! -e /tmp/poisoned
+          test -f "$CI_PERF_OUTPUT_DIR/report.md"
+          echo "Publisher runner is clean: real gh, job-level output dir, no planted files"
+
+      - name: Publish fork issues and trend summary (gh stubbed, no writes)
+        if: inputs.mode == 'poison'
+        env:
+          GH_TOKEN: not-a-real-token
+          STUB_LOG: ${{ github.workspace }}/gh-stub.log
+        run: |
+          mkdir -p "$RUNNER_TEMP/stub"
+          cat > "$RUNNER_TEMP/stub/gh" <<'PY'
+          #!/usr/bin/env python3
+          import json, os, sys
+          args = sys.argv[1:]
+          with open(os.environ["STUB_LOG"], "a") as log:
+              log.write(json.dumps(args) + "\n")
+          if "--method" in args:
+              path = args[args.index("api") + 1]
+              if path.endswith("/issues"):
+                  print(json.dumps({"number": 1, "state": "open", "html_url": "https://github.com/meridianlabs-ai/inspect_ai/issues/1"}))
+              else:
+                  print("{}")
+          else:
+              print("[[]]")
+          PY
+          chmod +x "$RUNNER_TEMP/stub/gh"
+          PATH="$RUNNER_TEMP/stub:$PATH" python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+            --directory "$CI_PERF_OUTPUT_DIR" --publish \
+            --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
+          test "$(cat "$CI_PERF_OUTPUT_DIR/published.json")" = "[]"
+          echo "gh calls made by the publisher:"; cat "$STUB_LOG"
+          test "$(grep -c -- '--method' "$STUB_LOG")" = 2
