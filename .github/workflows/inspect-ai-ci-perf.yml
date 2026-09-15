@@ -26,12 +26,39 @@
 # - MARVIN_TOKEN: used only in publish.
 #
 # Egress: harden-runner is the first step of analyze with egress-policy
-# audit. After one scheduled run, copy the observed endpoints from the
-# harden-runner summary into allowed-endpoints and switch to block. Expected:
-# github.com:443, api.github.com:443, objects.githubusercontent.com:443,
-# pypi.org:443, files.pythonhosted.org:443, api.anthropic.com:443, plus what
-# the action itself contacts. publish needs no allow-list: its only egress is
-# GitHub.
+# block. allowed-endpoints is the egress observed in audit mode on run
+# https://github.com/meridianlabs-ai/actions/actions/runs/34880688791:
+# Anthropic (api.anthropic.com; claude.ai and downloads.claude.ai are the
+# action's Claude Code installer), GitHub (github.com and api.github.com,
+# listed explicitly in case the agent's meta-domain fetch fails;
+# release-assets.githubusercontent.com is the action downloading a release
+# asset) and the package indexes the action and the tooling test install
+# from (registry.npmjs.org, pypi.org, files.pythonhosted.org). The agent
+# allows GitHub Actions infrastructure without listing: the GitHub meta
+# domains (github.com, *.github.com, *.githubapp.com, ghcr.io),
+# *.actions.githubusercontent.com, codeload.github.com,
+# productionresultssa*.blob.core.windows.net, and the Azure wire and
+# metadata IPs. Claude Code's telemetry intake (datadoghq.com) is not
+# allowed; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC on the analysis step
+# stops Claude Code from attempting telemetry, error reporting and update
+# checks. A newly needed endpoint shows up as a blocked call in the
+# harden-runner step summary and as a job annotation; add it only if it is
+# clearly required, that is an Anthropic, GitHub or package-index host.
+# publish needs no allow-list: its only egress is GitHub. The same
+# harden-runner step sets disable-sudo-and-containers: the runner user has
+# passwordless sudo, and without it a process on the runner could alter the
+# iptables rules that enforce the allow-list. Nothing in analyze needs sudo
+# or Docker: pip, the collector, the tests and Claude all run as the runner
+# user.
+#
+# Published output: this repo is public, so the job summary and the artifact
+# are world-readable. The allow-list closes the network exfiltration path,
+# but the report the agent writes is itself published, so the step "Refuse
+# to publish evidence that contains a secret" fails the job if any file in
+# CI_PERF_OUTPUT_DIR contains the Anthropic key, its base64 encoding or the
+# sk-ant- prefix, if anything there is not a regular file (publication
+# follows symlinks), or if a file cannot be scanned. Show report and Retain
+# CI evidence outside Git run only if that step did not fail.
 name: Inspect AI CI Perf
 
 "on":
@@ -80,7 +107,18 @@ jobs:
       - name: Harden runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          disable-sudo-and-containers: true
+          allowed-endpoints: >
+            api.anthropic.com:443
+            api.github.com:443
+            github.com:443
+            claude.ai:443
+            downloads.claude.ai:443
+            registry.npmjs.org:443
+            release-assets.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
 
       - name: Initialize output directory
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
@@ -125,6 +163,7 @@ jobs:
         id: analysis
         env:
           GH_TOKEN: ${{ github.token }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
@@ -149,8 +188,70 @@ jobs:
             Missing observations are not zero. Do not retry known permission
             blockers. Do not run the collector again.
 
-      - name: Show report
+      - name: Refuse to publish evidence that contains a secret
+        id: secret_scan
         if: always()
+        env:
+          CI_PERF_ANTHROPIC_API_KEY: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
+        run: |
+          # Scan the directory the next two steps publish. Show report reads
+          # CI_PERF_OUTPUT_DIR, the upload reads runner.temp/ci-perf; the
+          # agent could have changed GITHUB_ENV, so they must still agree.
+          dir="$RUNNER_TEMP/ci-perf"
+          if test "$CI_PERF_OUTPUT_DIR" != "$dir"; then
+            echo "::error::CI_PERF_OUTPUT_DIR is $CI_PERF_OUTPUT_DIR, expected $dir; not publishing"
+            exit 1
+          fi
+          if test -L "$dir"; then
+            echo "::error::$dir is a symlink; not publishing"
+            exit 1
+          fi
+          if ! test -d "$dir"; then
+            echo "No output directory; nothing to scan"
+            exit 0
+          fi
+          # Publication follows symlinks, so only regular files and
+          # directories may be present. find and the listings fail the step
+          # on any error (bash -e, pipefail).
+          entries=$(mktemp)
+          find "$dir" -mindepth 1 ! -type f ! -type d -print > "$entries"
+          if test -s "$entries"; then
+            sed 's/^/::error::not a regular file, not publishing: /' "$entries"
+            exit 1
+          fi
+          files=$(mktemp)
+          find "$dir" -type f -print0 > "$files"
+          key_b64=""
+          if test -n "$CI_PERF_ANTHROPIC_API_KEY"; then
+            key_b64=$(printf '%s' "$CI_PERF_ANTHROPIC_API_KEY" | base64 -w0)
+          fi
+          # Patterns reach grep through a pipe, never argv or the log.
+          patterns() {
+            printf '%s\n' 'sk-ant-'
+            if test -n "$CI_PERF_ANTHROPIC_API_KEY"; then
+              printf '%s\n' "$CI_PERF_ANTHROPIC_API_KEY" "$key_b64"
+            fi
+          }
+          status=0
+          while IFS= read -r -d '' file; do
+            rc=0
+            grep -F -q -f <(patterns) -- "$file" || rc=$?
+            case "$rc" in
+              0)
+                echo "::error::$file contains an Anthropic key or key prefix; not publishing"
+                status=1
+                ;;
+              1) ;;
+              *)
+                echo "::error::could not scan $file (grep exit $rc); not publishing"
+                status=1
+                ;;
+            esac
+          done < "$files"
+          exit "$status"
+
+      - name: Show report
+        if: always() && steps.secret_scan.outcome != 'failure'
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
@@ -164,7 +265,7 @@ jobs:
           done
 
       - name: Retain CI evidence outside Git
-        if: always()
+        if: always() && steps.secret_scan.outcome != 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
