@@ -8,8 +8,9 @@
 # Independent of the dev agent (claude.yml) — different trigger, different
 # (lower) permissions.
 #
-# Caveat: PRs from forks — @review on a fork PR works only when the commenter
-# has write access; the reusable's trig check enforces it before checkout.
+# Caveat: @review needs write access. The job's `if` skips other commenters
+# cheaply (the author_association filter, below); the reusable's trig check
+# is the authority, before checkout.
 
 name: Review
 
@@ -41,13 +42,28 @@ jobs:
     # mentions like agents#20's; prompt-driven). Cost: a comment carrying
     # either alongside a genuine bare trigger is wrongly skipped — rare,
     # recoverable by re-commenting the bare token alone.
+    # author_association filter (OWNER/MEMBER/COLLABORATOR) on both arms: a
+    # COST filter, not the gate (same shape as the `@auto` filter in
+    # claude.yml, agents#93 / actions#108). On a public repo anyone can
+    # comment `@review`; without this every such comment spun a runner that
+    # receives MARVIN_TOKEN and a pull-requests: write token. It is not
+    # authoritative — CONTRIBUTOR is anyone with a merged commit, and whether
+    # org members show as MEMBER depends on org settings — so the reusable
+    # workflow's trig check (a fail-closed permission lookup on the actor,
+    # before checkout) remains the authority. A collaborator whose
+    # association is reported looser than expected is dropped here silently;
+    # the trig check would refuse them anyway. The loops' `@review` hand-back
+    # still passes: marvin is an org member (a User with write access), so
+    # it reports MEMBER (verified on its comments, 2026-09-15).
     if: >
       (github.event.issue.pull_request != null &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->')) ||
       (github.event.issue.pull_request == null &&
        contains(github.event.issue.labels.*.name, 'External') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
        contains(github.event.comment.body, '@review') &&
        !contains(github.event.comment.body, '`@review`') &&
        !contains(github.event.comment.body, '<!-- claude-review-comment -->'))
