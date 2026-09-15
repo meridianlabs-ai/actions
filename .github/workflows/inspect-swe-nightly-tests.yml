@@ -20,7 +20,7 @@ name: Inspect SWE Nightly Tests
         default: ""
         type: string
       pytest_args:
-        description: "Additional arguments to pass to pytest (as a single string)"
+        description: "Additional arguments to pass to pytest (space-separated; letters, digits and _./=:,- only, so no quoting)"
         required: false
         default: ""
         type: string
@@ -35,6 +35,18 @@ jobs:
       ref: ${{ steps.swe_commit.outputs.ref }}
 
     steps:
+      # Fail before the checkout so an invalid ref gets this message rather
+      # than a fetch error, and so the ref that later becomes a step output
+      # (and a Slack payload field) can hold nothing but ref characters.
+      - name: Validate inspect_swe_ref input
+        env:
+          INSPECT_SWE_REF: ${{ inputs.inspect_swe_ref }}
+        run: |
+          if [ -n "$INSPECT_SWE_REF" ] && { ! [[ "$INSPECT_SWE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$INSPECT_SWE_REF" == -* || "$INSPECT_SWE_REF" == *..* ]]; }; then
+            echo "::error::inspect_swe_ref must be a branch, tag or commit: letters, digits and ._/- only, no leading '-' and no '..'"
+            exit 1
+          fi
+
       - name: Checkout inspect_swe repository
         uses: actions/checkout@v6
         with:
@@ -43,10 +55,12 @@ jobs:
 
       - name: Get inspect_swe commit info
         id: swe_commit
+        env:
+          INSPECT_SWE_REF: ${{ inputs.inspect_swe_ref }}
         run: |
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "ref=${{ inputs.inspect_swe_ref || 'main' }}" >> $GITHUB_OUTPUT
+          echo "ref=${INSPECT_SWE_REF:-main}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -94,7 +108,19 @@ jobs:
           # progress bars in the CI log (they render as thousands of wrapped
           # junk lines when 20 tests dump captured output).
           INSPECT_DISPLAY: plain
+          PYTEST_ARGS: ${{ inputs.pytest_args }}
         run: |
+          # pytest_args reaches this step through env: and is split on
+          # spaces into an array, so bash never parses it as syntax in a
+          # step that holds the provider keys. The allowlist admits flags,
+          # node ids and -k names but no quotes, so a -k expression with
+          # spaces is not supported (use node ids or --deselect).
+          allowed='^[A-Za-z0-9 _./=:,-]*$'
+          if ! [[ "$PYTEST_ARGS" =~ $allowed ]]; then
+            echo "::error::pytest_args may only contain letters, digits, spaces and _./=:,-"
+            exit 1
+          fi
+          read -ra extra_args <<< "$PYTEST_ARGS"
           # --runslow also keeps the fast suite in the same invocation, so
           # this is "CI tests + slow tests" in one pass. k8s and
           # terminal-bench tests skip via their conftest guards; flaky tests
@@ -128,7 +154,7 @@ jobs:
           #
           # --durations=15 keeps that measurement coming, so the ceiling can
           # be re-tuned from data instead of guesswork.
-          pytest --runslow -n auto --timeout=900 --timeout-method=signal --durations=15 --tb=short -o log_level=warning ${{ inputs.pytest_args }}
+          pytest --runslow -n auto --timeout=900 --timeout-method=signal --durations=15 --tb=short -o log_level=warning "${extra_args[@]}"
 
       - name: Cleanup Docker resources
         if: always()

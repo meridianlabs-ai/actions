@@ -32,7 +32,7 @@ name: Inspect AI Scheduled Tests
         default: ""
         type: string
       pytest_args:
-        description: "Additional arguments to pass to pytest (as a single string)"
+        description: "Additional arguments to pass to pytest (space-separated; letters, digits and _./=:,- only, so no quoting)"
         required: false
         default: ""
         type: string
@@ -53,13 +53,18 @@ jobs:
       - name: Download last tested inspect_ai SHA artifact from previous run
         id: download_artifact
         run: |
-          # Find the most recent successful run that actually has the artifact
-          echo "Searching for a successful run with the 'last-inspect-ai-sha' artifact..."
+          # Only a scheduled run on the default branch is a trusted producer:
+          # the report job uploads the artifact only on `schedule`, while a
+          # push or dispatch run executes whatever copy of this workflow its
+          # branch carries. The query narrows the page to such runs; the jq
+          # filter enforces it on what comes back.
+          echo "Searching for a successful scheduled run on $DEFAULT_BRANCH with the 'last-inspect-ai-sha' artifact..."
 
-          # Get successful runs and check each one for the artifact
           RUN_ID=""
-          for run_id in $(gh api repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs \
-            --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -10); do
+          for run_id in $(gh api "repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs?event=schedule&branch=$DEFAULT_BRANCH&status=success" \
+            | jq -r --arg branch "$DEFAULT_BRANCH" \
+              '.workflow_runs[] | select(.conclusion == "success" and .event == "schedule" and .head_branch == $branch) | .id' \
+            | head -10); do
 
             echo "Checking run $run_id for artifacts..."
             artifact_count=$(gh api repos/${{ github.repository }}/actions/runs/$run_id/artifacts \
@@ -77,29 +82,51 @@ jobs:
             mkdir -p .last-inspect-ai-sha
 
             # Download the artifact from the actions repository (where this workflow runs)
-            if gh run download $RUN_ID --name last-inspect-ai-sha --dir .last-inspect-ai-sha --repo ${{ github.repository }}; then
+            if gh run download "$RUN_ID" --name last-inspect-ai-sha --dir .last-inspect-ai-sha --repo ${{ github.repository }}; then
               echo "Successfully downloaded artifact from run $RUN_ID"
 
-              # Read the SHA immediately and store it as output (before checkout wipes it)
+              # Read the SHA immediately and store it as output (before checkout wipes it).
+              # The content is only a step output if it is exactly a 40-hex SHA;
+              # anything else is dropped without being echoed, so a crafted file
+              # can neither add outputs nor reach a later shell.
               if [ -f ".last-inspect-ai-sha/last_sha.txt" ]; then
                 last_sha=$(cat ".last-inspect-ai-sha/last_sha.txt")
-                echo "last_sha=$last_sha" >> $GITHUB_OUTPUT
-                echo "Found previously tested commit: $last_sha (from run $RUN_ID)"
+                if [[ "$last_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                  echo "last_sha=$last_sha" >> "$GITHUB_OUTPUT"
+                  echo "Found previously tested commit: $last_sha (from run $RUN_ID)"
+                else
+                  echo "last_sha=" >> "$GITHUB_OUTPUT"
+                  echo "Ignoring artifact from run $RUN_ID: last_sha.txt is not a 40-character hex SHA"
+                fi
               else
-                echo "last_sha=" >> $GITHUB_OUTPUT
+                echo "last_sha=" >> "$GITHUB_OUTPUT"
                 echo "Downloaded artifact but could not find last_sha.txt file"
               fi
             else
-              echo "last_sha=" >> $GITHUB_OUTPUT
+              echo "last_sha=" >> "$GITHUB_OUTPUT"
               echo "Artifact download failed for run $RUN_ID"
             fi
           else
-            echo "last_sha=" >> $GITHUB_OUTPUT
-            echo "No previous successful runs with artifacts found"
+            echo "last_sha=" >> "$GITHUB_OUTPUT"
+            echo "No previous successful scheduled runs with artifacts found"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The schedule payload may not carry the repository object.
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         continue-on-error: true
+
+      # Fail before the checkout so an invalid ref gets this message rather
+      # than a fetch error, and so the ref that later becomes a step output
+      # (and a Slack payload field) can hold nothing but ref characters.
+      - name: Validate inspect_ai_ref input
+        env:
+          INSPECT_AI_REF: ${{ inputs.inspect_ai_ref }}
+        run: |
+          if [ -n "$INSPECT_AI_REF" ] && { ! [[ "$INSPECT_AI_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$INSPECT_AI_REF" == -* || "$INSPECT_AI_REF" == *..* ]]; }; then
+            echo "::error::inspect_ai_ref must be a branch, tag or commit: letters, digits and ._/- only, no leading '-' and no '..'"
+            exit 1
+          fi
 
       - name: Checkout inspect_ai repository
         uses: actions/checkout@v6
@@ -110,40 +137,44 @@ jobs:
 
       - name: Get inspect_ai commit info
         id: inspect_commit
+        env:
+          INSPECT_AI_REF: ${{ inputs.inspect_ai_ref }}
         run: |
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "ref=${{ inputs.inspect_ai_ref || 'main' }}" >> $GITHUB_OUTPUT
+          echo "ref=${INSPECT_AI_REF:-main}" >> "$GITHUB_OUTPUT"
 
       - name: Check if commit was already tested
         id: check_commit_artifact
+        env:
+          CURRENT_SHA: ${{ steps.inspect_commit.outputs.sha }}
+          LAST_SHA: ${{ steps.download_artifact.outputs.last_sha }}
         run: |
-          current_sha="${{ steps.inspect_commit.outputs.sha }}"
-          last_sha="${{ steps.download_artifact.outputs.last_sha }}"
+          echo "Current commit: $CURRENT_SHA"
 
-          echo "Current commit: $current_sha"
-
-          if [ -n "$last_sha" ]; then
-            echo "Found previously tested commit: $last_sha"
-            if [ "$current_sha" = "$last_sha" ]; then
-              echo "skip_tests=true" >> $GITHUB_OUTPUT
-              echo "Commit $current_sha was already tested successfully, skipping"
+          if [ -n "$LAST_SHA" ]; then
+            echo "Found previously tested commit: $LAST_SHA"
+            if [ "$CURRENT_SHA" = "$LAST_SHA" ]; then
+              echo "skip_tests=true" >> "$GITHUB_OUTPUT"
+              echo "Commit $CURRENT_SHA was already tested successfully, skipping"
               exit 0
             else
-              echo "Current commit $current_sha differs from last tested commit $last_sha"
+              echo "Current commit $CURRENT_SHA differs from last tested commit $LAST_SHA"
             fi
           else
             echo "No previous artifact found or could not read commit SHA"
           fi
-          echo "skip_tests=false" >> $GITHUB_OUTPUT
-          echo "Proceeding with tests for commit $current_sha"
+          echo "skip_tests=false" >> "$GITHUB_OUTPUT"
+          echo "Proceeding with tests for commit $CURRENT_SHA"
 
       - name: Skip notification
         if: github.event_name == 'schedule' && (steps.check_commit_artifact.outputs.skip_tests == 'true')
+        env:
+          SHA: ${{ steps.inspect_commit.outputs.sha }}
         run: |
           echo "🔄 Skipping tests - no changes detected in inspect_ai repository"
-          echo "Last tested commit: ${{ steps.inspect_commit.outputs.sha }}"
-          echo "Current commit: ${{ steps.inspect_commit.outputs.sha }}"
+          echo "Last tested commit: $SHA"
+          echo "Current commit: $SHA"
 
   # The asyncio and trio passes are independent pytest invocations, so run
   # them as parallel matrix legs (previously sequential steps in one job,
@@ -234,16 +265,28 @@ jobs:
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PYTEST_ARGS: ${{ inputs.pytest_args }}
 
         run: |
           echo "Running ${{ matrix.mode }} slow tests..."
+          # pytest_args reaches this step through env: and is split on
+          # spaces into an array, so bash never parses it as syntax in a
+          # step that holds the provider keys. The allowlist admits flags,
+          # node ids and -k names but no quotes, so a -k expression with
+          # spaces is not supported (use node ids or --deselect).
+          allowed='^[A-Za-z0-9 _./=:,-]*$'
+          if ! [[ "$PYTEST_ARGS" =~ $allowed ]]; then
+            echo "::error::pytest_args may only contain letters, digits, spaces and _./=:,-"
+            exit 1
+          fi
+          read -ra extra_args <<< "$PYTEST_ARGS"
           # --timeout-method=thread mirrors the main repo's CI test job
           # (build.yml). The suite is latency-bound (serial provider API
           # calls and docker container churn), not CPU-bound, so xdist
           # parallelism cuts wall-clock dramatically. -n logical (not auto):
           # with psutil installed, auto counts physical cores — 4 on this
           # hyperthreaded 8-vCPU runner — while logical uses all 8.
-          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread ${{ inputs.pytest_args }}
+          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread "${extra_args[@]}"
 
       - name: Cleanup Docker resources
         if: always()
@@ -327,9 +370,11 @@ jobs:
     steps:
       - name: Save tested inspect_ai SHA as artifact
         if: needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule'
+        env:
+          SHA: ${{ needs.check-commit.outputs.sha }}
         run: |
           mkdir -p .last-inspect-ai-sha
-          echo "${{ needs.check-commit.outputs.sha }}" > .last-inspect-ai-sha/last_sha.txt
+          echo "$SHA" > .last-inspect-ai-sha/last_sha.txt
 
       - name: Upload tested SHA artifact
         if: needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule'
@@ -411,16 +456,17 @@ jobs:
 
       - name: Upload Slack thread info for triage
         if: always() && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
+        env:
+          CHANNEL: ${{ steps.slack_notification.outputs.channel_id || secrets.SLACK_CHANNEL_ID }}
+          THREAD_TS: ${{ steps.slack_notification.outputs.ts }}
+          SHA: ${{ needs.check-commit.outputs.sha }}
+          REF: ${{ needs.check-commit.outputs.ref }}
         run: |
           mkdir -p .triage
-          cat > .triage/slack_thread.json <<EOF
-          {
-            "channel": "${{ steps.slack_notification.outputs.channel_id || secrets.SLACK_CHANNEL_ID }}",
-            "thread_ts": "${{ steps.slack_notification.outputs.ts }}",
-            "inspect_ai_sha": "${{ needs.check-commit.outputs.sha }}",
-            "inspect_ai_ref": "${{ needs.check-commit.outputs.ref }}"
-          }
-          EOF
+          # jq builds the JSON so every value is a string, whatever it contains.
+          jq -n --arg channel "$CHANNEL" --arg thread_ts "$THREAD_TS" --arg sha "$SHA" --arg ref "$REF" \
+            '{channel: $channel, thread_ts: $thread_ts, inspect_ai_sha: $sha, inspect_ai_ref: $ref}' \
+            > .triage/slack_thread.json
 
       - name: Upload triage artifact
         if: always() && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
