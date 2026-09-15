@@ -53,8 +53,8 @@ jobs:
     # before checkout) remains the authority. A collaborator whose
     # association is reported looser than expected is dropped here silently;
     # the trig check would refuse them anyway. The loops' `@review` hand-back
-    # still passes: marvin is a User with write access, so it reports
-    # COLLABORATOR.
+    # still passes: marvin is an org member (a User with write access), so
+    # it reports MEMBER (verified on its comments, 2026-09-15).
     if: >
       (github.event.issue.pull_request != null &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
