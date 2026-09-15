@@ -43,39 +43,7 @@ runs:
           echo "webhook not set — skipping Slack announcement"
           exit 0
         fi
-        payload=$(python3 <<'PY'
-        import os, re, json
-
-        # Convert GitHub-flavoured markdown release notes to Slack mrkdwn.
-        def convert(text):
-            out = []
-            for line in text.split("\n"):
-                line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", line)
-                heading = re.match(r"^#{1,6}\s+(.*)$", line)
-                if heading:
-                    line = f"*{heading.group(1)}*"
-                else:
-                    line = re.sub(r"^(\s*)[*-]\s+", r"\1• ", line)
-                out.append(line)
-            return out
-
-        # Slack section text caps ~3000 chars; keep headroom.
-        kept, total = [], 0
-        for line in convert(os.environ.get("RELEASE_BODY", "")):
-            if total + len(line) + 1 > 2900:
-                kept.append("… _(truncated — see full release below)_")
-                break
-            kept.append(line)
-            total += len(line) + 1
-        body = "\n".join(kept) or "_(no release notes)_"
-
-        payload = {"blocks": [
-            {"type": "header", "text": {"type": "plain_text", "text": os.environ["TITLE"], "emoji": True}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": body}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": f'<{os.environ["RELEASE_URL"]}|View the full release>'}},
-        ]}
-        print(json.dumps(payload))
-        PY
-        )
+        # convert.py (next to this file) turns the release notes into the Slack
+        # payload; it is a separate file so tests/ can exercise the conversion.
+        payload=$(python3 "$GITHUB_ACTION_PATH/convert.py")
         curl -sf -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK"

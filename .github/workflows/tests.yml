@@ -1,8 +1,8 @@
 ---
-# Unit tests for the triage workflow's agent-job scripts and permission rules
-# (tests/test_triage_workflow.py). The scripts are lifted from the workflow
-# YAML and run under bash, so a change to the workflow is tested here before
-# it runs against a real failed scheduled run.
+# Unit tests for the workflows' run: scripts and permission rules and for the
+# slack-release-announce converter (tests/). The scripts are lifted from the
+# workflow YAML and run under bash, so a change to a workflow is tested here
+# before it runs against a real scheduled run.
 name: tests
 
 "on":
@@ -10,12 +10,18 @@ name: tests
     branches: [main]
     paths:
       - ".github/workflows/triage-test-failures.yml"
+      - ".github/workflows/inspect-ai-scheduled-tests.yml"
+      - ".github/workflows/inspect-swe-nightly-tests.yml"
       - ".github/workflows/tests.yml"
+      - "slack-release-announce/**"
       - "tests/**"
   pull_request:
     paths:
       - ".github/workflows/triage-test-failures.yml"
+      - ".github/workflows/inspect-ai-scheduled-tests.yml"
+      - ".github/workflows/inspect-swe-nightly-tests.yml"
       - ".github/workflows/tests.yml"
+      - "slack-release-announce/**"
       - "tests/**"
 
 permissions:
