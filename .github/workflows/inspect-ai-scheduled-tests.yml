@@ -5,10 +5,15 @@ name: Inspect AI Scheduled Tests
   schedule:
     # Run every 2 hours
     - cron: "0 */2 * * *"
+  # A push runs the suite only when this workflow file itself changes, on any
+  # branch: the development cycle for this workflow keeps its per-push checks,
+  # while pushes to unrelated branches no longer attach slow-test results to
+  # their PRs. workflow_dispatch remains for running it on any branch by hand.
   push:
     branches:
-      - "**" # Run on all branches for testing
-    # This is valuable during action development cycle
+      - "**"
+    paths:
+      - ".github/workflows/inspect-ai-scheduled-tests.yml"
   workflow_dispatch:
     inputs:
       run_slow_tests:
