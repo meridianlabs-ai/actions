@@ -1,0 +1,36 @@
+---
+# Unit tests for the triage workflow's agent-job scripts and permission rules
+# (tests/test_triage_workflow.py). The scripts are lifted from the workflow
+# YAML and run under bash, so a change to the workflow is tested here before
+# it runs against a real failed scheduled run.
+name: tests
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/triage-test-failures.yml"
+      - ".github/workflows/tests.yml"
+      - "tests/**"
+  pull_request:
+    paths:
+      - ".github/workflows/triage-test-failures.yml"
+      - ".github/workflows/tests.yml"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pyyaml
+      - run: python3 -m pytest -q tests

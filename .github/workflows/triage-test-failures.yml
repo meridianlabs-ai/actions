@@ -1,4 +1,31 @@
 ---
+# Triage of a failed scheduled inspect_ai test run, in two jobs with a runner
+# boundary between them (the landing design in the agents repo,
+# design/architecture.md → "Landing job"; this repo's issue #106).
+#
+# agent downloads the failed run's logs and its triage-context artifact,
+# validates the artifact's fields before using any of them, checks out
+# UKGovernmentBEIS/inspect_ai at the tested commit and runs the Claude triage
+# agent. The agent's input is test output, which any code the tests exercise
+# can shape, so this job holds only the job token (read-only) and the
+# Anthropic key: no MARVIN_TOKEN, no Slack token. The agent's tools are reads
+# plus file writes under the landing directory, and instead of creating
+# issues, commenting or posting to Slack it describes those writes in a
+# landing manifest, which emit-landing uploads as an artifact.
+#
+# land runs on a fresh runner the agent never had, with no checkout. The
+# `land` composite validates the manifest and only then creates, comments
+# on, reopens and assigns the fork's tracking issues as marvin — putting
+# each issue it creates or adopts on Atlas at Todo by node ID — and posts
+# the Slack message to the channel and thread the agent job validated
+# (never to a destination the manifest names). secrets.MARVIN_TOKEN and
+# the SLACK_* secrets appear in `land` only.
+#
+# Blocked by meridianlabs-ai/agents#102: the manifest's `slack` field,
+# `issues[].assignees` / `issues[].reopen`, land's `slack-*` inputs and the
+# Atlas Todo status are that PR's extension of the landing pair; until it
+# lands at `@main` the validator refuses a manifest carrying `slack` or
+# those issue fields.
 name: Triage Test Failures
 
 "on":
@@ -12,8 +39,15 @@ name: Triage Test Failures
         required: true
         type: string
 
+env:
+  # Tracking issues are created in the meridianlabs-ai fork of inspect_ai,
+  # not in this repo. The agent job only reads them (public repo, job
+  # token); the land job writes them as marvin and refuses any other repo.
+  ISSUES_REPO: meridianlabs-ai/inspect_ai
+
 jobs:
-  triage:
+  # UNTRUSTED once the agent has run: job token and Anthropic key only.
+  agent:
     # Only triage failed scheduled runs (not push/dev runs, not successes).
     # workflow_dispatch lets humans re-run triage against a specific run_id.
     if: >
@@ -24,13 +58,13 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      # Validated in "Validate the triage context" below; the land job's
+      # Slack destination comes from here, never from the manifest.
+      channel: ${{ steps.context.outputs.channel }}
+      thread_ts: ${{ steps.context.outputs.thread_ts }}
 
     env:
-      # Tracking issues are created in the meridianlabs-ai fork of inspect_ai,
-      # not in this repo. The workflow GITHUB_TOKEN is scoped to this repo only,
-      # so issue writes use MARVIN_TOKEN (the marvin machine-account PAT; see
-      # the agents repo docs), which has write access on the fork.
-      ISSUES_REPO: meridianlabs-ai/inspect_ai
       UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
       UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url || format('https://github.com/{0}/actions/runs/{1}', github.repository, inputs.run_id) }}
 
@@ -59,87 +93,205 @@ jobs:
             fi
           fi
 
-      - name: Download Slack thread artifact
+      - name: Download triage-context artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh run download "$UPSTREAM_RUN_ID" \
             --repo "${{ github.repository }}" \
             --name triage-context \
-            --dir triage 2>/dev/null || echo "No Slack thread artifact (triage will post to channel root)"
+            --dir triage 2>/dev/null || echo "No triage-context artifact (triage will post to the channel root)"
 
-      - name: Determine inspect_ai SHA
-        id: sha
+      # Every field of the artifact is data until it matches its shape:
+      # inspect_ai_sha becomes a checkout ref, channel and thread_ts select
+      # the Slack destination, and all three become step outputs. A value
+      # that fails its check is dropped (the SHA falls back to main with
+      # exact=false). Outputs are written with heredoc delimiters, never
+      # `echo "key=$value"`, so a newline in a value cannot add an output.
+      - name: Validate the triage context
+        id: context
         run: |
+          set -uo pipefail
+          sha=""; channel=""; thread_ts=""
           # Only the slack_thread.json artifact carries the inspect_ai SHA.
-          # run.json.headSha is the *actions* repo SHA and must not be used here.
+          # run.json.headSha is the *actions* repo SHA and must not be used.
           if [ -f triage/slack_thread.json ]; then
-            sha=$(jq -r '.inspect_ai_sha // empty' triage/slack_thread.json)
-            ref=$(jq -r '.inspect_ai_ref // "main"' triage/slack_thread.json)
-          else
-            sha=""
-            ref="main"
+            field() {
+              jq -r --arg k "$1" 'if type == "object" and (.[$k] | type) == "string" then .[$k] else "" end' \
+                triage/slack_thread.json 2>/dev/null || true
+            }
+            sha=$(field inspect_ai_sha)
+            channel=$(field channel)
+            thread_ts=$(field thread_ts)
           fi
-          if [ -z "$sha" ]; then
-            echo "No tested inspect_ai SHA available; falling back to main"
+          if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            exact="true"
+          else
+            if [ -n "$sha" ]; then
+              echo "::warning::triage-context inspect_ai_sha is not a 40-hex SHA; ignoring it."
+            else
+              echo "No tested inspect_ai SHA available."
+            fi
+            echo "Falling back to main (not the exact tested commit)."
             sha="main"
             exact="false"
-          else
-            exact="true"
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "exact=$exact" >> "$GITHUB_OUTPUT"
-          echo "Triaging against inspect_ai@$sha (exact tested commit: $exact)"
+          if ! [[ "$channel" =~ ^[CG][A-Z0-9]{8,}$ ]]; then
+            [ -z "$channel" ] || echo "::warning::triage-context channel is not a Slack channel ID; ignoring it."
+            channel=""
+          fi
+          if ! [[ "$thread_ts" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            [ -z "$thread_ts" ] || echo "::warning::triage-context thread_ts is not a Slack timestamp; ignoring it."
+            thread_ts=""
+          fi
+          {
+            echo "sha<<EOF"; echo "$sha"; echo "EOF"
+            echo "exact<<EOF"; echo "$exact"; echo "EOF"
+            echo "channel<<EOF"; echo "$channel"; echo "EOF"
+            echo "thread_ts<<EOF"; echo "$thread_ts"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Triaging against inspect_ai@$sha (exact tested commit: $exact); Slack channel '${channel:-<default>}' thread '${thread_ts:-<root>}'"
 
       - name: Checkout inspect_ai at tested commit
         uses: actions/checkout@v6
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: ${{ steps.sha.outputs.sha }}
+          ref: ${{ steps.context.outputs.sha }}
           path: inspect_ai
           fetch-depth: 0
+          # The agent never fetches or pushes; leave no token in .git/config.
+          persist-credentials: false
 
+      # The commit the agent investigates — emit-landing's start-sha (the
+      # agent commits nothing, so head_sha equals it) — and the landing
+      # directory the agent writes its manifest and body files into, created
+      # here so it exists, runner-owned, before the agent starts.
+      - name: Record the checked-out SHA and prepare the landing directory
+        id: base
+        env:
+          LANDING_DIR: ${{ runner.temp }}/landing
+        run: |
+          set -euo pipefail
+          sha=$(git -C inspect_ai rev-parse HEAD)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not read the inspect_ai HEAD"; exit 1; }
+          { echo "sha<<EOF"; echo "$sha"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          mkdir -p "$LANDING_DIR"
+          echo "inspect_ai checkout is at $sha; landing directory $LANDING_DIR"
+
+      # No MARVIN_TOKEN, no Slack env: the agent needs only reads — fork
+      # issues (public) and this run's own data via the job token — and file
+      # writes under the landing directory. The job token is passed as
+      # github_token so the action skips its App-token exchange: the App
+      # token would carry contents/issues/pull-requests WRITE on this repo,
+      # the job token is contents:read + actions:read.
+      #
+      # Tools: the allow list is reads plus Edit (which governs Write too)
+      # under the landing directory, given as an absolute-path rule (`//`
+      # prefix). git runs as `git -C inspect_ai <verb>` (the clone is a
+      # subdirectory and `cd` is not granted; Bash rules match each
+      # subcommand of a compound command on its own). No `sed -n`: sed's `w`
+      # command writes a file and no pattern denies it without also denying
+      # `/warning/p`; the Read tool's offset/limit covers line ranges. The
+      # deny list closes the gh verbs and the gh-api flags that write, git's
+      # `--output` (log and show write a file with it), and curl/wget (the
+      # old Slack channel); deny beats allow. tests/test_triage_workflow.py
+      # checks these rules against the write vectors named here. Guard
+      # rails: the boundary is that nothing in this job can write as marvin
+      # or reach Slack — the land job does both, from the validated manifest.
       - name: Run Claude triage agent
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # The action replaces GH_TOKEN/GITHUB_TOKEN in Claude's environment
-          # with its own app installation token, which is read-only on
-          # $ISSUES_REPO ("Resource not accessible by integration" on issue
-          # comments). Passing MARVIN_TOKEN here skips that token exchange so
-          # gh inside the agent authenticates as marvin, which has write
-          # access on $ISSUES_REPO.
-          github_token: ${{ secrets.MARVIN_TOKEN }}
-          claude_args: |
-            --allowedTools Bash,Read,Edit,Write,Grep,Glob
+          github_token: ${{ github.token }}
+          settings: |
+            {
+              "permissions": {
+                "allow": [
+                  "Read", "Grep", "Glob",
+                  "Read(/${{ runner.temp }}/landing/**)",
+                  "Edit(/${{ runner.temp }}/landing/**)",
+                  "Bash(gh issue list *)", "Bash(gh issue view *)",
+                  "Bash(gh run view *)", "Bash(gh api repos/*)",
+                  "Bash(git -C inspect_ai log *)", "Bash(git -C inspect_ai show *)", "Bash(git -C inspect_ai blame *)",
+                  "Bash(grep *)"
+                ],
+                "deny": [
+                  "Bash(gh issue create *)", "Bash(gh issue comment *)",
+                  "Bash(gh issue edit *)", "Bash(gh issue reopen *)", "Bash(gh issue close *)",
+                  "Bash(gh api *-X*)", "Bash(gh api *--method*)", "Bash(gh api *--input*)",
+                  "Bash(gh api *-f *)", "Bash(gh api *-F *)", "Bash(gh api *--field*)", "Bash(gh api *--raw-field*)",
+                  "Bash(git *--output*)",
+                  "Bash(curl *)", "Bash(wget *)"
+                ]
+              }
+            }
           prompt: |
             You are triaging a failed scheduled test run for UKGovernmentBEIS/inspect_ai.
 
             # Available context (all paths relative to the workspace root)
             - `triage/failed.log` — output of failed pytest steps (may be truncated to last 2MB)
             - `triage/run.json` — metadata for the failed GitHub Actions run
-            - `triage/slack_thread.json` — Slack channel + thread_ts to reply in. May be absent;
-              if absent, post to channel `$SLACK_CHANNEL_ID` with no `thread_ts`.
             - `inspect_ai/` — read-only clone of UKGovernmentBEIS/inspect_ai at the exact
-              commit that was tested. Investigate here; do NOT push or open PRs.
+              commit that was tested. Investigate here; do NOT modify, push or open PRs.
 
             Upstream run: ${{ env.UPSTREAM_RUN_URL }}
-            inspect_ai checkout: ${{ steps.sha.outputs.sha }}
-            inspect_ai checkout is exact tested commit: ${{ steps.sha.outputs.exact }}
+            inspect_ai checkout: ${{ steps.base.outputs.sha }}
+            inspect_ai checkout is exact tested commit: ${{ steps.context.outputs.exact }}
             This (triage) repo: ${{ github.repository }}
             Issues repo (where all tracking issues live): ${{ env.ISSUES_REPO }}
+            Landing directory (the ONLY place you may write): ${{ runner.temp }}/landing
+
+            # How your actions reach GitHub and Slack
+            You hold no credential that can create or comment on issues or post to
+            Slack, and your tools are limited to reads plus files under the landing
+            directory: the Read, Grep and Glob tools, `gh issue list/view`, `gh run
+            view`, `gh api repos/...` (reads), `git -C inspect_ai log/show/blame`, and
+            `grep`. Nothing else runs (no `cd`, pipes into other commands, `head`,
+            `jq`, `sed`); use the Read tool for line ranges and JSON files. Do NOT try
+            `gh issue create`, `gh issue comment`, `gh issue edit`, `gh issue reopen`
+            or curl — they are denied. Instead, describe the
+            writes you want in a landing manifest; after your run ends, a separate job
+            validates it and performs exactly those writes as the machine account.
+
+            Write `${{ runner.temp }}/landing/manifest-extra.json`: ONE JSON object
+            with at most these two keys and nothing else:
+            - `issues`: an array with AT MOST ONE entry, either
+              - a new tracking issue: `{"title": "Triage: <short summary>",
+                "body_file": "issue.md", "labels": ["auto"]}` (`labels` only when the
+                bucket below says so; otherwise omit it). It is assigned to `ransomr`
+                and put on the Atlas board for you; do not add other assignees.
+              - a comment on an existing issue: `{"comment_on": <issue number>,
+                "body_file": "comment.md", "reopen": true, "assignees": ["ransomr"]}`
+                — `reopen` only when the issue is closed (a regression), `assignees`
+                only when the issue has no assignee (the landing job adds the owner
+                only to an unowned issue, and puts a reopened or newly owned issue on
+                the board); omit both otherwise.
+              Every entry targets ${{ env.ISSUES_REPO }}; the landing job refuses any
+              other repo, drops every label other than `auto` and every assignee other
+              than `ransomr`, and lands only the first entry.
+            - `slack`: `{"text_file": "slack.txt"}` — the reply to post in the Slack
+              thread of the failed run's notification (the landing job knows the
+              channel and thread; you do not choose them). Plain text with Slack
+              mrkdwn, one message. When the manifest also creates a tracking issue,
+              the landing job appends that issue's link to your text — do not invent
+              one.
+            Body files live in the landing directory next to the manifest and are
+            referenced by file name only (letters, digits, `.`, `_`, `-`; not starting
+            with a dot; under 64 KiB). Create the manifest with the Write tool and
+            rewrite it whole when you change it, so it is valid JSON when your turn
+            ends — an unparsable file lands nothing. Write nothing anywhere else.
 
             # Procedure overview
             1. Compute two pre-classification values: `EXISTING_ISSUE` and
                `ALREADY_FIXED_ON_MAIN`.
             2. Classify the failure into one bucket — A, B, C, or D — picking the first
                that applies.
-            3. Take the action for that bucket.
+            3. Write the manifest and body files for that bucket.
             4. Stop (take no further actions).
 
             You do NOT have write access to inspect_ai — a human will apply any fix from
-            the tracking issue you create.
+            the tracking issue you describe.
 
             # Think carefully
             This triage has real downstream consequences: issues on the tracking repo,
@@ -174,11 +326,12 @@ jobs:
                  gh issue list --repo ${{ env.ISSUES_REPO }} --state all \
                    --search "Triage <test-name-or-key-fragment> in:title,body" --limit 20
                Try the full node id, then the test name alone, then the module. Also scan
-               recent `Triage:` issues regardless of state.
+               recent `Triage:` issues regardless of state. `gh issue view` shows one.
             3. Set `EXISTING_ISSUE`:
-               - **Open issue matches** → record its URL.
+               - **Open issue matches** → record its number and URL.
                - **Closed issue matches, closed within the last 30 days** → record its
-                 URL; treat as a regression (you'll reopen when commenting).
+                 number and URL; treat as a regression (you'll set `reopen` when
+                 commenting).
                - **Closed >30 days ago, OR no match** → `EXISTING_ISSUE` is empty.
 
             ## ALREADY_FIXED_ON_MAIN — has main already moved past this bug?
@@ -188,17 +341,18 @@ jobs:
 
             Otherwise, check whether inspect_ai main has moved past the tested commit in
             a way that likely fixes the failure. The `inspect_ai/` clone has all history;
-            `origin/main` refs the current main.
+            `origin/main` refs the current main. Run git with `-C inspect_ai` (you cannot
+            `cd`):
 
-              cd inspect_ai
-              git log --oneline ${{ steps.sha.outputs.sha }}..origin/main | head -50
+              git -C inspect_ai log --oneline -50 ${{ steps.base.outputs.sha }}..origin/main
 
             If there are commits since the tested SHA:
               - Identify the files implicated in the failure (from `triage/failed.log`).
-              - Run `git log --oneline ${{ steps.sha.outputs.sha }}..origin/main -- <file>`
+              - Run `git -C inspect_ai log --oneline ${{ steps.base.outputs.sha }}..origin/main -- <file>`
                 for each to see whether those files have been modified on main.
               - Skim commit messages on main for keywords matching the failure (test name,
-                error message substring, module involved).
+                error message substring, module involved); `git -C inspect_ai show <sha>`
+                for a commit's diff.
 
             Set `ALREADY_FIXED_ON_MAIN = true` only with specific evidence: file + commit
             + plausible mechanism. If evidence is weak, set it to false and mention the
@@ -210,61 +364,56 @@ jobs:
             ## Bucket A — Already fixed on main
             Condition: `ALREADY_FIXED_ON_MAIN == true`.
             Action:
-              1. Post a reply in the Slack thread with:
+              1. Slack text with:
                  - The likely fixing commit (https://github.com/UKGovernmentBEIS/inspect_ai/commit/<sha>)
                  - A one-line explanation of why you believe it fixes the failure
                  - Note that the next scheduled run should pass
-              2. If `EXISTING_ISSUE` is set, add a comment to it noting that the failure
-                 appears to be fixed by the identified commit on main, and suggest it can
-                 be closed after the next scheduled run passes. Do not close it yourself.
-              3. Do not open a new issue.
+              2. If `EXISTING_ISSUE` is set, add a `comment_on` entry for it noting that
+                 the failure appears to be fixed by the identified commit on main, and
+                 suggest it can be closed after the next scheduled run passes.
+              3. Do not describe a new issue.
             Then stop.
 
             ## Bucket B — Provider outage / intermittent infrastructure failure
             Symptoms: HTTP 5xx from Anthropic / Google / OpenAI / Grok APIs, connection resets,
             DNS failures, provider-side rate limits, socket timeouts talking to external services.
             Action:
-              1. Post a reply in the Slack thread naming the provider and the specific symptom,
-                 noting that the failure appears intermittent and will likely clear on the
-                 next scheduled run.
-              2. If `EXISTING_ISSUE` is set, add a brief comment to it noting this new
-                 intermittent occurrence with a link to the failed run.
-              3. Do not open a new issue.
+              1. Slack text naming the provider and the specific symptom, noting that the
+                 failure appears intermittent and will likely clear on the next scheduled
+                 run.
+              2. If `EXISTING_ISSUE` is set, add a brief `comment_on` entry for it noting
+                 this new intermittent occurrence with a link to the failed run.
+              3. Do not describe a new issue.
             Then stop.
 
             ## Bucket C — Diagnosable bug with a clear, minimal fix
             You understand the root cause AND can describe a targeted fix (usually <30 lines).
             Action:
-              **If `EXISTING_ISSUE` is set**: do NOT open a new issue. Instead:
-                - If the existing issue is closed, reopen it (`gh issue reopen`).
-                - If the existing issue has no assignee, assign `ransomr`
-                  (`gh issue edit <n> --repo ${{ env.ISSUES_REPO }} --add-assignee ransomr`):
-                  an issue filed by another automation (e.g. the recurring ci-perf
-                  run) may be unowned, and the board's working views filter on
-                  assignee — unassigned means invisible to the maintainer
-                  (observed: inspect_ai#444).
-                - Add a comment containing: the new failed run link, a one-line "still
-                  failing on run <id>" note, and — if your analysis has refined or changed
-                  since the original issue was opened — an updated root cause and/or
-                  proposed fix. Otherwise keep the comment brief.
-                - Reply in the Slack thread with the existing-issue URL (not a new one).
+              **If `EXISTING_ISSUE` is set**: do NOT describe a new issue. Instead:
+                - Add a `comment_on` entry for it whose body contains: the new failed run
+                  link, a one-line "still failing on run <id>" note, and — if your
+                  analysis has refined or changed since the original issue was opened —
+                  an updated root cause and/or proposed fix. Otherwise keep the comment
+                  brief. If the issue is closed, set `reopen: true`; if it has no
+                  assignee, set `assignees: ["ransomr"]` — an issue filed by another
+                  automation (e.g. the recurring ci-perf run) may be unowned, and the
+                  board's working views filter on assignee, so unassigned means
+                  invisible to the maintainer (observed: inspect_ai#444).
+                - Slack text with the existing-issue URL (not a new one).
                 - Stop.
 
               **Otherwise** (no existing issue):
-              1. Open a tracking issue in the issues repo (${{ env.ISSUES_REPO }}) with:
+              1. Describe a new tracking issue in the issues repo (${{ env.ISSUES_REPO }}):
                  - Title: `Triage: <short summary>`
-                 - Assignee: `ransomr`
-                 - Labels: none at creation. AFTER the issue is created (body
-                   complete), add the `auto` label as a separate step:
-                   `gh issue edit <n> --repo ${{ env.ISSUES_REPO }} --add-label auto`
-                   The label hands the issue to the autonomous pipeline: the
-                   fork's agent implements your Proposed fix and opens a PR
-                   into the automated review loop, so write the Proposed fix
+                 - Assignee: `ransomr` (the landing job adds it)
+                 - Labels: `["auto"]`. The label hands the issue to the autonomous
+                   pipeline: the fork's agent implements your Proposed fix and opens a
+                   PR into the automated review loop, so write the Proposed fix
                    section as a brief the implementer can follow verbatim.
                    Bucket C ONLY — this is the well-understood-fix bucket; if
                    your confidence wavers while writing the issue, drop back
-                   to bucket D (unlabeled) instead.
-                 - Body structured as:
+                   to bucket D (no labels) instead.
+                 - Body (`issue.md`) structured as:
                    ## Summary
                    <one-line description>
 
@@ -287,7 +436,7 @@ jobs:
                    ```
                    cd <path-to-inspect_ai-clone>
                    git checkout -b claude/triage-<UPSTREAM_RUN_ID>
-                   claude "Read issue #<this-issue-number> in ${{ env.ISSUES_REPO }} and open a PR
+                   claude "Read this issue in ${{ env.ISSUES_REPO }} and open a PR
                            against UKGovernmentBEIS/inspect_ai main that implements the
                            proposed fix."
                    ```
@@ -295,15 +444,17 @@ jobs:
                    ## Links
                    - Failed run: ${{ env.UPSTREAM_RUN_URL }}
                    - Triage run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-              2. Reply in the Slack thread with the tracking-issue link.
+              2. Slack text summarizing the failure and the fix (the landing job appends
+                 the tracking-issue link).
 
             ## Bucket D — Unclear, non-obvious, or risky
             You cannot confidently diagnose, OR the fix would be speculative, OR it touches
             more than ~30 lines, OR multiple tests failed for different reasons.
-            Action: same dedup logic as bucket C (if `EXISTING_ISSUE` is set, reopen if
-            needed and comment; otherwise open a new issue) — but NEVER add the `auto`
+            Action: same dedup logic as bucket C (if `EXISTING_ISSUE` is set, a
+            `comment_on` entry with `reopen` / `assignees` as needed; otherwise a new
+            issue) — but NEVER give the `auto`
             label here: bucket D means the fix is not well understood, and the label
-            would hand a speculative brief to the autonomous pipeline. If opening a
+            would hand a speculative brief to the autonomous pipeline. If describing a
             new issue, body has:
               ## Root cause
               <"not yet determined" + what you examined>
@@ -321,103 +472,177 @@ jobs:
             **When in doubt between C and D, pick D.** An unconfident fix proposal wastes
             more time than "here's what I found, please advise."
 
-            # How to post to Slack
-            Read `triage/slack_thread.json` if it exists:
-              channel=$(jq -r .channel triage/slack_thread.json)
-              thread_ts=$(jq -r .thread_ts triage/slack_thread.json)
-            Otherwise post to $SLACK_CHANNEL_ID with no thread_ts.
-
-            Post with:
-              curl -sS -X POST https://slack.com/api/chat.postMessage \
-                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-                -H "Content-Type: application/json; charset=utf-8" \
-                --data @- <<'JSON'
-              {"channel":"...","thread_ts":"...","text":"..."}
-              JSON
-            Check the response — Slack returns `{"ok": false, ...}` on errors.
-
             # Guardrails
-            - All `gh issue` commands (list, create, comment, reopen) must pass
-              `--repo ${{ env.ISSUES_REPO }}` — never operate on issues in this
-              (triage) repo or in UKGovernmentBEIS/inspect_ai.
-            - At most one issue-related action per run: either open one new issue
-              (bucket C's follow-up `auto` label add, and the assign-if-unassigned on an
-              adopted existing issue, are part of that single action)
-              OR comment on (and optionally reopen) one existing issue. Never both.
-            - Never open a new issue if `EXISTING_ISSUE` is set.
+            - Issues live in ${{ env.ISSUES_REPO }} only — never in this (triage) repo
+              or in UKGovernmentBEIS/inspect_ai. The landing job enforces this; every
+              `gh issue list/view` you run passes `--repo ${{ env.ISSUES_REPO }}`.
+            - At most one issue-related action per run: either one new issue OR one
+              comment on one existing issue (its `reopen` and `assignees` are part of
+              that single action). Never both, and never a new issue when
+              `EXISTING_ISSUE` is set.
             - Never modify files in `inspect_ai/` — treat it as read-only reference.
+            - Every run ends with Slack text; the manifest is how it gets posted.
             - If you hit any error you cannot resolve, still follow bucket-D behavior
-              (comment on EXISTING_ISSUE if set, otherwise open a new D issue) and
-              include the error in the body/comment so a human can follow up.
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          # Belt-and-braces: the action overrides this in Claude's environment
-          # with the github_token passed above (also MARVIN_TOKEN), but keep it
-          # so gh still authenticates as marvin if that behavior ever changes.
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+              (a comment on EXISTING_ISSUE if set, otherwise a new D issue) and
+              include the error in the body so a human can follow up.
 
-      # Issues the agent just created belong on the Atlas board (project 1 in
-      # meridianlabs-ai) like every other tracked work item — without this
-      # they are invisible to the board's flows (observed: inspect_ai#198).
-      # Detection is deterministic: a created issue's Links section carries
-      # THIS run's URL (the prompt template guarantees it), so search the
-      # issues repo for this run id. `gh search issues` matches title, body
-      # AND comments, so an existing issue this run commented on (with its
-      # run link) is picked up too — desirable: it gets owned and boarded
-      # like a created one, and adding is idempotent (that is exactly how
-      # inspect_ai#444, filed unowned by the ci-perf run, reached the board).
-      # Search indexing lags issue creation — retry briefly. MARVIN_TOKEN has
-      # the `project` scope (same token the Atlas sync uses). Assignee and
-      # Status are set explicitly below: the board's built-in "item added ->
-      # Todo" flow is not reliable (#444 landed at Done), and the views
-      # filter on assignee.
-      - name: Add created triage issues to Atlas
+      # The agent's `manifest-extra.json` supplies `issues` and `slack` — those
+      # two keys and nothing else: every other manifest field is the
+      # workflow's, so unknown keys are dropped, not merged. Values are
+      # normalized rather than passed through: a mistyped entry would make the
+      # validator refuse the WHOLE manifest, so dropping it with a warning is
+      # the proportionate failure. Every issue entry is pinned to ISSUES_REPO
+      # (the agent's `repo`, if any, is ignored), its labels are reduced to
+      # `auto`, its assignees to ASSIGNEE (a new issue is always assigned; an
+      # existing one only when the agent asks and the land job finds it
+      # unowned), `reopen` is kept only on a comment, and only the first
+      # entry survives — one issue action per run, the prompt's rule,
+      # enforced here. What is valid still lands, but a failed agent step,
+      # an unparsable manifest, any entry or key that was dropped, or a run
+      # without Slack text (every triage owes the thread a reply) becomes
+      # the manifest's `error` (fail_run), so the land job fails loudly
+      # instead of ending a triage green with part of it missing.
+      - name: Compose landing manifest
+        id: landing
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
-          PROJECT_ID: PVT_kwDOC7YMCM4BU68p
-          STATUS_FIELD: PVTSSF_lADOC7YMCM4BU68pzhKizZM
-          TODO_OPTION: f75ad846
+          DIR: ${{ runner.temp }}/landing
+          EXTRA: ${{ runner.temp }}/landing-extra.json
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Owner of every tracking issue: the board's working views filter
+          # on assignee, so an unassigned issue is invisible (inspect_ai#444).
           ASSIGNEE: ransomr
         run: |
           set -uo pipefail
-          nums=""
-          for attempt in 1 2 3 4; do
-            nums=$(gh search issues --repo "$ISSUES_REPO" \
-                     "actions/runs/${{ github.run_id }}" \
-                     --json number --jq '.[].number' 2>/dev/null || true)
-            [ -n "$nums" ] && break
-            sleep 20
-          done
-          if [ -z "$nums" ]; then
-            echo "No issues created by this run (or search index lagged; the"
-            echo "hourly board flows do not cover these — add manually if the"
-            echo "agent's summary shows a new issue)."
-            exit 0
+          mkdir -p "$DIR"
+          extra='{}'
+          agent='{}'
+          problem=""
+          if [ -f "$DIR/manifest-extra.json" ]; then
+            if ! agent=$(jq -c 'if type=="object" then . else error("not an object") end' "$DIR/manifest-extra.json" 2>&1); then
+              echo "::error::landing: the agent's manifest-extra.json is not a JSON object ($agent); nothing it described lands."
+              problem="the agent's manifest-extra.json is not valid JSON (an object), so nothing it described was landed"
+              agent='{}'
+            fi
           fi
-          for n in $nums; do
-            # Ownership first: the board's working views filter on
-            # assignee:@me, so an unassigned issue is on the board yet
-            # invisible to the maintainer.
-            if [ "$(gh issue view "$n" --repo "$ISSUES_REPO" --json assignees --jq '.assignees | length')" = "0" ]; then
-              gh issue edit "$n" --repo "$ISSUES_REPO" --add-assignee "$ASSIGNEE" >/dev/null \
-                && echo "assigned $ISSUES_REPO#$n to $ASSIGNEE"
-            fi
-            node=$(gh api "repos/$ISSUES_REPO/issues/$n" --jq .node_id)
-            item=$(gh api graphql \
-              -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
-              -f p="$PROJECT_ID" -f c="$node" --jq '.data.addProjectV2ItemById.item.id') \
-              && echo "added $ISSUES_REPO#$n to Atlas ($item)"
-            # Status explicitly, not via the board's built-in "item added ->
-            # Todo" flow: that flow left inspect_ai#444 at Done on add.
-            # Only when unset — never clobber a status a human already moved.
-            cur=$(gh api graphql -f query='query($i:ID!){node(id:$i){... on ProjectV2Item{s: fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}' \
-                    -f i="$item" --jq '.data.node.s.name // ""')
-            if [ -z "$cur" ] || [ "$cur" = "Done" ]; then
-              gh api graphql \
-                -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
-                -f p="$PROJECT_ID" -f i="$item" -f f="$STATUS_FIELD" -f o="$TODO_OPTION" --silent \
-                && echo "set $ISSUES_REPO#$n Status=Todo (was '${cur:-unset}')"
-            fi
-          done
+          norm=$(jq -c --arg repo "$ISSUES_REPO" --arg owner "$ASSIGNEE" '{
+              issues: [((.issues // []) | if type == "array" then . else [] end)[] | select(type == "object"
+                          and (.body_file | type) == "string" and (.body_file | test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$"))
+                          and ((.comment_on == null)
+                               or ((.comment_on | type) == "number" and .comment_on == (.comment_on | floor) and .comment_on > 0))
+                          and (.comment_on != null or ((.title | type) == "string" and .title != "")))
+                        | {repo: $repo,
+                           title: (if (.title | type) == "string" and .title != "" then .title[0:256] else "Comment on #\(.comment_on)" end),
+                           body_file,
+                           labels: (if .comment_on == null then [(.labels // [])[]? | strings | select(. == "auto")] else [] end),
+                           assignees: (if .comment_on == null then [$owner]
+                                       else [(.assignees // [])[]? | strings | select(. == $owner)] | unique end),
+                           reopen: (.comment_on != null and .reopen == true),
+                           comment_on}
+                        | if .comment_on == null then del(.comment_on) else . end
+                        | if .labels == [] then del(.labels) else . end
+                        | if .assignees == [] then del(.assignees) else . end
+                        | if .reopen then . else del(.reopen) end],
+              slack: ((.slack.text_file? // "") | if type == "string" and test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$") then . else "" end),
+              had_slack: (has("slack")),
+              bad_issues: (has("issues") and .issues != null and (.issues | type) != "array"),
+              dropped_issues: ((.issues // []) | if type == "array" then length else 0 end),
+              unknown: [keys[] | select(. != "issues" and . != "slack")]
+            } | .dropped_issues -= (.issues | length)' <<<"$agent" 2>/dev/null) \
+            || norm='{"issues":[],"slack":"","had_slack":false,"bad_issues":false,"dropped_issues":0,"unknown":[]}'
+          n=$(jq -r '.issues | length' <<<"$norm")
+          if [ "$(jq -r '.bad_issues' <<<"$norm")" = "true" ]; then
+            echo "::error::landing: the agent's manifest has an \`issues\` value that is not an array; no issue action lands."
+            problem="${problem:+$problem; and }its \`issues\` value is not an array, so no issue action was landed"
+          fi
+          dropped=$(jq -r '.dropped_issues' <<<"$norm")
+          if [ "$dropped" != "0" ]; then
+            echo "::error::landing: dropped $dropped malformed issues entr(ies) from the agent's manifest (need a body_file name and either a non-empty title or a positive integer comment_on)."
+            problem="${problem:+$problem; and }$dropped malformed issue entr(ies) in its manifest were dropped"
+          fi
+          if [ "$(jq -r '.unknown | length' <<<"$norm")" != "0" ]; then
+            echo "::error::landing: ignored keys the agent may not set in its manifest: $(jq -r '.unknown | join(", ")' <<<"$norm")."
+            problem="${problem:+$problem; and }its manifest carried keys it may not set ($(jq -r '.unknown | join(", ")' <<<"$norm")), which were ignored"
+          fi
+          if [ "$n" -gt 1 ]; then
+            echo "::error::landing: the agent described $n issue actions; only the first lands (one issue action per run)."
+            problem="${problem:+$problem; and }it described $n issue actions where one is allowed; only the first was landed"
+            norm=$(jq -c '.issues |= .[0:1]' <<<"$norm")
+            n=1
+          fi
+          [ "$n" = "0" ] || extra=$(jq -c --argjson i "$(jq -c '.issues' <<<"$norm")" '.issues = $i' <<<"$extra")
+          slack=$(jq -r '.slack' <<<"$norm")
+          if [ -n "$slack" ]; then
+            extra=$(jq -c --arg f "$slack" '.slack = {text_file: $f}' <<<"$extra")
+          elif [ "$(jq -r '.had_slack' <<<"$norm")" = "true" ]; then
+            echo "::error::landing: the agent's slack entry has no valid text_file name; no Slack message lands."
+            problem="${problem:+$problem; and }its slack entry names no valid text_file, so no Slack reply was posted"
+          elif [ "${CLAUDE_OUTCOME:-}" = "success" ]; then
+            echo "::error::landing: the agent described no Slack message; every triage owes the thread a reply."
+            problem="${problem:+$problem; and }it described no Slack reply"
+          fi
+          if [ "${CLAUDE_OUTCOME:-}" != "success" ]; then
+            problem="${problem:+$problem; and }the triage agent step ended with outcome '${CLAUDE_OUTCOME:-unknown}'"
+          fi
+          if [ -n "$problem" ]; then
+            echo "::error::landing: $problem."
+            extra=$(jq -c --arg m "⚠️ Triage of the failed run did not complete: $problem. See the run log: $RUN_URL" \
+              '.error = {message: $m, fail_run: true}' <<<"$extra")
+          fi
+          printf '%s\n' "$extra" >"$EXTRA"
+          echo "landing: issues=$n slack=${slack:-none} $(jq -c 'if .error then .error.message = "<\(.error.message | length) chars>" else . end' <<<"$extra")"
+
+      # Last, always: package the manifest for the land job. read-only: the
+      # agent commits nothing (there is no repo at the workspace root), so no
+      # git runs and head_sha is the start SHA — the inspect_ai commit the
+      # agent investigated (github.sha, always 40 hex, when the checkout
+      # failed). `branch` is a fixed name the land job's branch-prefix pins
+      # to; under refuse-bundle it is never pushed to.
+      - name: Emit landing manifest
+        if: always()
+        uses: meridianlabs-ai/agents/.github/actions/emit-landing@main
+        with:
+          start-sha: ${{ steps.base.outputs.sha || github.sha }}
+          branch: triage
+          manifest-extra: ${{ runner.temp }}/landing-extra.json
+          read-only: "true"
+
+  # TRUSTED, last: a fresh runner that checks out nothing and installs
+  # nothing. The `land` composite is the whole landing — download, validate
+  # (refusing any manifest that carries commits: nothing here may push),
+  # create, comment on, reopen and assign the fork's tracking issues as
+  # marvin (created and adopted issues go on Atlas at Todo by node ID; the
+  # assignee is added only to an unowned issue), post the Slack message to the
+  # destination the agent job validated, report the manifest's error and
+  # fail the run when it says so. Skipped when the agent job was skipped
+  # (trigger not met: no artifact) or cancelled.
+  land:
+    needs: agent
+    if: always() && needs.agent.result != 'skipped' && needs.agent.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read           # artifact download
+    steps:
+      - name: Land
+        uses: meridianlabs-ai/agents/.github/actions/land@main
+        with:
+          # The machine account: writes on $ISSUES_REPO and the `project`
+          # scope for Atlas. The only job that names it.
+          token: ${{ secrets.MARVIN_TOKEN }}
+          refuse-bundle: "true"
+          # The one repo the manifest's issues[] may name; the validator
+          # refuses every other.
+          allowed-issue-repos: ${{ env.ISSUES_REPO }}
+          # The run names no PR; pin the manifest's (never pushed) branch to
+          # the fixed name the agent job's emit-landing used.
+          branch-prefix: triage
+          # Slack destination from the agent job's VALIDATED outputs (the
+          # channel the scheduled run's notification went to, else the
+          # default channel; the thread of that notification, else the
+          # channel root) — never from the manifest, which only supplies
+          # the text.
+          slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack-channel: ${{ needs.agent.outputs.channel || secrets.SLACK_CHANNEL_ID }}
+          slack-thread-ts: ${{ needs.agent.outputs.thread_ts }}
