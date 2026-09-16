@@ -102,6 +102,79 @@ jobs:
             --name triage-context \
             --dir triage 2>/dev/null || echo "No triage-context artifact (triage will post to the channel root)"
 
+      # Dependency versions float in the scheduled tests (`pip install -e
+      # ".[dev]"` resolves against PyPI on the day, not inspect_ai's uv.lock),
+      # so a failure with no relevant inspect_ai commit is often a package
+      # release (inspect_ai#499: openai 3.14.0 -> 3.14.1). `--log-failed`
+      # holds only the failed steps, so the install step's `Successfully
+      # installed ...` line is not in failed.log: take it from the full log of
+      # the failed run and of the last scheduled run before it that passed and
+      # installed (a run that skipped an already-tested commit is green with
+      # no install; a real pass uploads `last-inspect-ai-sha`), record that
+      # run's tested inspect_ai SHA, and diff the two package sets so the
+      # agent reads a table rather than comparing two 300-package lines. Log
+      # text is data: grepped and written to files, never evaluated; the SHA
+      # is kept only when it is 40 hex.
+      - name: Collect installed package versions (failed run and last passing run)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TESTS_WORKFLOW: Inspect AI Scheduled Tests
+        run: |
+          set -uo pipefail
+          export LC_ALL=C
+          dir=triage/versions
+          mkdir -p "$dir"
+          # The `Successfully installed ...` lines of a run's full log (job name first), into $2.
+          installed() {
+            gh run view "$1" --repo "$REPO" --log 2>/dev/null | grep -F "Successfully installed" > "$2" || true
+            [ -s "$2" ]
+          }
+          # name<TAB>version per package named on those lines (the version follows the last `-`).
+          packages() {
+            sed 's/.*Successfully installed //' "$1" | tr ' ' '\n' | sed -E 's/^(.+)-([^-]+)$/\1\t\2/' | sort -u
+          }
+          installed "$UPSTREAM_RUN_ID" "$dir/failing.txt" \
+            || echo "No install log found for the failed run $UPSTREAM_RUN_ID" > "$dir/failing.txt"
+          created=$(jq -r 'if type == "object" and (.createdAt | type) == "string" then .createdAt else "" end' triage/run.json 2>/dev/null || true)
+          passing=""; passing_at=""; passing_sha=""
+          # Newest first by our own sort: the runs API has returned pages out of order.
+          candidates=$(gh run list --repo "$REPO" --workflow "$TESTS_WORKFLOW" --event schedule --status success --limit 40 \
+                         --json databaseId,createdAt 2>/dev/null \
+                       | jq -r --arg t "$created" '[.[] | select((.databaseId | type) == "number" and (.createdAt | type) == "string" and .createdAt < $t)]
+                                                   | sort_by(.createdAt) | reverse | .[0:20][] | "\(.databaseId) \(.createdAt)"' 2>/dev/null || true)
+          while read -r id at; do
+            [ -n "$id" ] || continue
+            rm -rf "$dir/artifact"
+            gh run download "$id" --repo "$REPO" --name last-inspect-ai-sha --dir "$dir/artifact" 2>/dev/null || continue
+            installed "$id" "$dir/passing.txt" || continue
+            passing="$id"; passing_at="$at"
+            sha=$(tr -d '[:space:]' < "$dir/artifact/last_sha.txt" 2>/dev/null || true)
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && passing_sha="$sha"
+            break
+          done <<<"$candidates"
+          rm -rf "$dir/artifact"
+          if [ -n "$passing" ]; then
+            jq -n --arg id "$passing" --arg at "$passing_at" --arg repo "$REPO" --arg sha "$passing_sha" \
+              '{run_id: ($id | tonumber), url: "https://github.com/\($repo)/actions/runs/\($id)", created_at: $at, inspect_ai_sha: $sha}' \
+              > "$dir/passing-run.json"
+            if grep -qF "Successfully installed" "$dir/failing.txt"; then
+              {
+                printf 'package\tpassing run %s\tfailing run %s\n' "$passing" "$UPSTREAM_RUN_ID"
+                awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = $2; next } { f[$1] = $2 }
+                  END { for (k in p) if (!(k in f)) print k "\t" p[k] "\t(absent)"
+                        for (k in f) if (!(k in p)) print k "\t(absent)\t" f[k]; else if (p[k] != f[k]) print k "\t" p[k] "\t" f[k] }' \
+                  <(packages "$dir/passing.txt") <(packages "$dir/failing.txt") | sort
+              } > "$dir/diff.txt"
+              echo "Installed-version diff against passing run $passing: $(($(wc -l < "$dir/diff.txt") - 1)) package(s) differ"
+            else
+              echo "No install log for the failed run, so no version diff" > "$dir/diff.txt"
+            fi
+          else
+            echo "No passing scheduled run with an install log found before this one" | tee "$dir/passing.txt" > "$dir/diff.txt"
+            echo '{}' > "$dir/passing-run.json"
+          fi
+
       # Every field of the artifact is data until it matches its shape:
       # inspect_ai_sha becomes a checkout ref, channel and thread_ts select
       # the Slack destination, and all three become step outputs. A value
@@ -204,6 +277,15 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
+          # `fable` is the Claude Code alias for the best current Claude
+          # family; Claude Code resolves it to that family's latest release,
+          # so triage follows new models without a PR per release, where a
+          # dated id would freeze it on one (the action's own default was
+          # still Opus 5 on 2026-09-16). The action's `model:` input is
+          # deprecated in v1 in favour of `--model` in claude_args. Default
+          # reasoning effort on purpose: no effort flag.
+          claude_args: |
+            --model fable
           settings: |
             {
               "permissions": {
@@ -232,6 +314,16 @@ jobs:
             # Available context (all paths relative to the workspace root)
             - `triage/failed.log` — output of failed pytest steps (may be truncated to last 2MB)
             - `triage/run.json` — metadata for the failed GitHub Actions run
+            - `triage/versions/failing.txt` — the `Successfully installed ...` lines from
+              the failed run's install steps (one per job; the job name comes first)
+            - `triage/versions/passing.txt` and `triage/versions/passing-run.json` — the
+              same lines from the last scheduled run before this one that passed, and
+              that run's id, URL, `created_at` and tested inspect_ai SHA (`inspect_ai_sha`,
+              empty when unknown; `{}` and a one-line note when no passing run was found)
+            - `triage/versions/diff.txt` — the packages whose installed version differs
+              between those two runs (tab-separated: package, passing run, failing run,
+              `(absent)` when a package is in only one), or a one-line note when a
+              side is missing
             - `inspect_ai/` — read-only clone of UKGovernmentBEIS/inspect_ai at the exact
               commit that was tested. Investigate here; do NOT modify, push or open PRs.
 
@@ -283,8 +375,8 @@ jobs:
             ends — an unparsable file lands nothing. Write nothing anywhere else.
 
             # Procedure overview
-            1. Compute two pre-classification values: `EXISTING_ISSUE` and
-               `ALREADY_FIXED_ON_MAIN`.
+            1. Compute three pre-classification values: `EXISTING_ISSUE`,
+               `ALREADY_FIXED_ON_MAIN` and `DEPENDENCY_CHANGES`.
             2. Classify the failure into one bucket — A, B, C, or D — picking the first
                that applies.
             3. Write the manifest and body files for that bucket.
@@ -358,6 +450,65 @@ jobs:
             + plausible mechanism. If evidence is weak, set it to false and mention the
             uncertainty in the issue body (if one is created).
 
+            ## DEPENDENCY_CHANGES — did a package release land, not an inspect_ai commit?
+            Dependency versions float in the tested job: it installs inspect_ai with
+            `pip install -e ".[dev]"`, so every third-party package is whatever PyPI
+            served that day, NOT the version pinned in `inspect_ai/uv.lock`. A failure
+            that appears with no relevant inspect_ai commit is therefore often a
+            dependency release: inspect_ai#499 spent five comments on a correct
+            mechanism analysis and never noticed that the only difference between the
+            last passing run and the first failing run was openai 3.14.0 -> 3.14.1,
+            a release that stopped wrapping non-httpx exceptions and unmasked a latent
+            bug. Do this lookup before concluding that the cause is in inspect_ai.
+
+            1. From the traceback in `triage/failed.log`, list the third-party packages
+               implicated (every non-inspect_ai module in the stack, plus the package
+               whose exception type or API is involved).
+            2. Read `triage/versions/failing.txt` for the versions the failed run
+               installed (the job that failed matters most; the jobs normally agree).
+               For each implicated package, find the locked version in
+               `inspect_ai/uv.lock` — for example
+                 grep -n -A1 '^name = "openai"$' inspect_ai/uv.lock
+               (the `version = "..."` line follows) — and note where installed and
+               locked differ.
+            3. Read `triage/versions/diff.txt`: it is the diff of installed versions
+               between the last passing scheduled run and this one (or a note saying
+               why there is none). Read `triage/versions/passing-run.json` for that
+               run's id, URL, time and tested inspect_ai SHA (a passing run days
+               older than this one makes the diff long; weigh it accordingly); when
+               the SHA is set,
+                 git -C inspect_ai log --oneline <inspect_ai_sha>..${{ steps.base.outputs.sha }}
+               shows what changed in inspect_ai between the two runs (nothing, or
+               nothing near the failure, points at a dependency). When
+               `triage/versions/passing.txt` holds no install log, say so and compare
+               installed against locked only.
+            4. For every implicated package that changed between the two runs (or
+               that is ahead of uv.lock when there is no passing run), check its
+               release notes for a plausible trigger before blaming inspect_ai:
+               `gh api repos/<owner>/<repo>/releases?per_page=10` on the package's
+               GitHub repository (for example `openai/openai-python`), and
+               `gh api repos/<owner>/<repo>/compare/v<old>...v<new>` for the commits
+               (tag names vary; check the releases list first). You have no other
+               network access; if you cannot find the repository, say so.
+
+            Set `DEPENDENCY_CHANGES` to the list of implicated packages whose version
+            differs (package, locked, installed in the passing run, installed in the
+            failing run, and what its release notes say), or to "none". When you
+            describe a new issue (bucket C or D), put this in its `## Dependency
+            versions` section as a small table:
+
+              | package | locked (uv.lock) | last passing run | failing run |
+              |---------|------------------|------------------|-------------|
+
+            with a line per implicated package (differing or not), a link to the
+            passing run, and the release-notes finding under the table; write
+            "no version differences among the implicated packages" when there are
+            none. When a release is the plausible trigger, say so in `## Root cause`
+            and in the Slack text, and let it steer the bucket: a fix that pins or
+            adapts to the new version in inspect_ai is bucket C only when it is
+            small and you are sure; a release that unmasked a latent bug you do not
+            fully understand is bucket D.
+
             # Buckets
             Pick the first bucket that applies.
 
@@ -423,6 +574,10 @@ jobs:
                    ## Root cause
                    <analysis, referencing specific files and lines in inspect_ai>
 
+                   ## Dependency versions
+                   <the table from DEPENDENCY_CHANGES, or "no version differences among
+                    the implicated packages">
+
                    ## Proposed fix
                    <concrete description of the change, including a unified diff in a
                     ```diff fenced block if small enough, or per-file pseudocode if larger.
@@ -461,6 +616,10 @@ jobs:
 
               ## Hypotheses considered
               <list, with evidence for/against each>
+
+              ## Dependency versions
+              <the table from DEPENDENCY_CHANGES, or "no version differences among the
+               implicated packages">
 
               ## Suggested follow-up
               Needs human investigation before any fix. Once a direction is chosen, the
