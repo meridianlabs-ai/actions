@@ -18,8 +18,10 @@
 # on, reopens and assigns the fork's tracking issues as marvin — putting
 # each issue it creates or adopts on Atlas at Todo by node ID — and posts
 # the Slack message to the channel and thread the agent job validated
-# (never to a destination the manifest names). secrets.MARVIN_TOKEN and
-# the SLACK_* secrets appear in `land` only.
+# (never to a destination the manifest names). The marvin identity (the
+# app secrets MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY, the token they
+# mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
+# `land` only.
 #
 # Blocked by meridianlabs-ai/agents#102: the manifest's `slack` field,
 # `issues[].assignees` / `issues[].reopen`, land's `slack-*` inputs and the
@@ -42,7 +44,8 @@ name: Triage Test Failures
 env:
   # Tracking issues are created in the meridianlabs-ai fork of inspect_ai,
   # not in this repo. The agent job only reads them (public repo, job
-  # token); the land job writes them as marvin and refuses any other repo.
+  # token); the land job writes them as marvin, with a token minted for
+  # that one repository, and refuses any other repo.
   ISSUES_REPO: meridianlabs-ai/inspect_ai
 
 jobs:
@@ -789,13 +792,40 @@ jobs:
     permissions:
       contents: read
       actions: read           # artifact download
+    env:
+      # A step-level `if` cannot read secrets; this carries the one fact the
+      # mint step needs: whether both app secrets are configured.
+      MARVIN_APP_CONFIGURED: ${{ secrets.MARVIN_APP_CLIENT_ID != '' && secrets.MARVIN_APP_PRIVATE_KEY != '' }}
     steps:
+      # The marvin identity for this job's writes: a one-hour installation
+      # token of the meridian-marvin GitHub App (Phase 2 of the credential
+      # separation), minted for the one repository the job writes to and
+      # only the permissions it uses, revoked by the action's post step at
+      # job end. Falls back to the MARVIN_TOKEN PAT until the app secrets
+      # reach every caller; the PAT read goes with the retirement item. Only
+      # this job may mint: the private key and the minted token never reach
+      # a job that runs the agent.
+      - name: Mint a fork-scoped marvin token
+        id: mint
+        if: env.MARVIN_APP_CONFIGURED == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: inspect_ai
+          permission-issues: write
+          permission-organization-projects: write
+
       - name: Land
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
-          # The machine account: writes on $ISSUES_REPO and the `project`
-          # scope for Atlas. The only job that names it.
-          token: ${{ secrets.MARVIN_TOKEN }}
+          # The machine account: writes on $ISSUES_REPO (create, comment,
+          # reopen, assign) and Atlas (organization projects). Under
+          # refuse-bundle nothing is pushed and no PR is touched, so the
+          # token needs neither contents nor pull-requests. The only job
+          # that names it.
+          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           refuse-bundle: "true"
           # The one repo the manifest's issues[] may name; the validator
           # refuses every other.

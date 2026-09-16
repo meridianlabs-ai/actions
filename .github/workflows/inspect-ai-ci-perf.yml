@@ -13,17 +13,23 @@
 # publish runs on a fresh runner the agent never had. It downloads that
 # artifact, checks the collected data against the sha256 values recorded
 # before the agent ran, validates report.md and findings.json, and only then
-# writes fork issues and Atlas cards with MARVIN_TOKEN. The publisher never
-# shares a runner with the agent, and secrets.MARVIN_TOKEN must not appear in
-# analyze. A compromised analysis can produce a bad report.md and
-# findings.json, which the publisher validates, and nothing else.
+# writes fork issues and Atlas cards as marvin. The publisher never shares a
+# runner with the agent, and no marvin identity (MARVIN_TOKEN, the app
+# secrets, the minted token) may appear in analyze. A compromised analysis
+# can produce a bad report.md and findings.json, which the publisher
+# validates, and nothing else.
 #
 # Secrets:
 # - CI_PERF_ANTHROPIC_API_KEY: a key from a dedicated Anthropic Console
 #   workspace with a monthly spend cap, added as an org secret scoped to this
 #   repository. The key is in the agent's environment by necessity; the cap
 #   bounds what a leak costs. Until the secret exists the analysis step fails.
-# - MARVIN_TOKEN: used only in publish.
+# - MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY: the meridian-marvin
+#   GitHub App, used only in publish, which mints a token scoped to the
+#   inspect_ai fork with issues and organization-projects write (its only
+#   writes: fork issues and comments, assignees, Atlas items).
+# - MARVIN_TOKEN: the PAT the publish job falls back to while the app
+#   secrets roll out; used only in publish.
 #
 # Egress: harden-runner is the first step of analyze with egress-policy
 # block. allowed-endpoints is the egress observed in audit mode on run
@@ -285,8 +291,31 @@ jobs:
       CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
       PYTHONDONTWRITEBYTECODE: "1"
       CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # A step-level `if` cannot read secrets; this carries the one fact the
+      # mint step needs: whether both app secrets are configured.
+      MARVIN_APP_CONFIGURED: ${{ secrets.MARVIN_APP_CLIENT_ID != '' && secrets.MARVIN_APP_PRIVATE_KEY != '' }}
 
     steps:
+      # The marvin identity for this job's writes: a one-hour installation
+      # token of the meridian-marvin GitHub App (Phase 2 of the credential
+      # separation), minted for the one repository the job writes to and
+      # only the permissions it uses, revoked by the action's post step at
+      # job end. Falls back to the MARVIN_TOKEN PAT until the app secrets
+      # reach every caller; the PAT read goes with the retirement item. Only
+      # this job may mint: the private key and the minted token never reach
+      # a job that runs the agent.
+      - name: Mint a fork-scoped marvin token
+        id: mint
+        if: env.MARVIN_APP_CONFIGURED == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
+          owner: meridianlabs-ai
+          repositories: inspect_ai
+          permission-issues: write
+          permission-organization-projects: write
+
       - name: Checkout the upstream source the analysis used
         uses: actions/checkout@v7
         with:
@@ -322,7 +351,7 @@ jobs:
 
       - name: Publish fork issues and trend summary
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
         run: |
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --publish \
@@ -330,7 +359,7 @@ jobs:
 
       - name: Add published issues to Atlas and assign unowned ones to Eric
         env:
-          GH_TOKEN: ${{ secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
         run: |
           python - <<'PYTHON'
           import json
