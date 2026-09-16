@@ -304,12 +304,14 @@ jobs:
       # reach every caller; the PAT read goes with the retirement item. Only
       # this job may mint: the private key and the minted token never reach
       # a job that runs the agent.
+      # The action's `app-id` input takes the App ID or the Client ID; v2 has
+      # no `client-id` input.
       - name: Mint a fork-scoped marvin token
         id: mint
         if: env.MARVIN_APP_CONFIGURED == 'true'
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v2
         with:
-          client-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
+          app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
           private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
           owner: meridianlabs-ai
           repositories: inspect_ai

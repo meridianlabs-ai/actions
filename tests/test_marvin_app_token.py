@@ -66,9 +66,10 @@ def test_the_marvin_identity_appears_in_the_trusted_job_only(workflow, trusted):
 def test_the_mint_step_is_scoped_to_fork_issues_and_atlas(workflow, trusted):
     job = load(workflow)["jobs"][trusted]
     mint = job["steps"][mint_index(job["steps"])]
-    assert mint["uses"] == "actions/create-github-app-token@v3"
+    assert mint["uses"] == "actions/create-github-app-token@v2"
     assert mint["with"] == {
-        "client-id": "${{ secrets.MARVIN_APP_CLIENT_ID }}",
+        # v2 has no `client-id` input; `app-id` takes the App ID or the Client ID.
+        "app-id": "${{ secrets.MARVIN_APP_CLIENT_ID }}",
         "private-key": "${{ secrets.MARVIN_APP_PRIVATE_KEY }}",
         "owner": "meridianlabs-ai",
         "repositories": "inspect_ai",
