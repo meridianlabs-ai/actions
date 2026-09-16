@@ -138,9 +138,12 @@ jobs:
             || echo "No install log found for the failed run $UPSTREAM_RUN_ID" > "$dir/failing.txt"
           created=$(jq -r 'if type == "object" and (.createdAt | type) == "string" then .createdAt else "" end' triage/run.json 2>/dev/null || true)
           passing=""; passing_at=""; passing_sha=""
-          # Newest first by our own sort: the runs API has returned pages out of order.
-          candidates=$(gh run list --repo "$REPO" --workflow "$TESTS_WORKFLOW" --event schedule --status success --limit 40 \
-                         --json databaseId,createdAt 2>/dev/null \
+          # Only runs before the failed one (`--created` puts the cutoff in the query,
+          # so a re-triage of an old failure is not crowded out by newer successes;
+          # the jq check repeats it), newest first by our own sort: the runs API has
+          # returned pages out of order.
+          candidates=$(gh run list --repo "$REPO" --workflow "$TESTS_WORKFLOW" --event schedule --status success \
+                         --created "<${created:-1970-01-01T00:00:00Z}" --limit 40 --json databaseId,createdAt 2>/dev/null \
                        | jq -r --arg t "$created" '[.[] | select((.databaseId | type) == "number" and (.createdAt | type) == "string" and .createdAt < $t)]
                                                    | sort_by(.createdAt) | reverse | .[0:20][] | "\(.databaseId) \(.createdAt)"' 2>/dev/null || true)
           while read -r id at; do
@@ -161,7 +164,9 @@ jobs:
             if grep -qF "Successfully installed" "$dir/failing.txt"; then
               {
                 printf 'package\tpassing run %s\tfailing run %s\n' "$passing" "$UPSTREAM_RUN_ID"
-                awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = $2; next } { f[$1] = $2 }
+                # Every distinct version a run installed is kept: jobs that disagree
+                # show as `a|b`, never as whichever job happened to sort last.
+                awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = ($1 in p) ? p[$1] "|" $2 : $2; next } { f[$1] = ($1 in f) ? f[$1] "|" $2 : $2 }
                   END { for (k in p) if (!(k in f)) print k "\t" p[k] "\t(absent)"
                         for (k in f) if (!(k in p)) print k "\t(absent)\t" f[k]; else if (p[k] != f[k]) print k "\t" p[k] "\t" f[k] }' \
                   <(packages "$dir/passing.txt") <(packages "$dir/failing.txt") | sort
@@ -321,9 +326,10 @@ jobs:
               that run's id, URL, `created_at` and tested inspect_ai SHA (`inspect_ai_sha`,
               empty when unknown; `{}` and a one-line note when no passing run was found)
             - `triage/versions/diff.txt` — the packages whose installed version differs
-              between those two runs (tab-separated: package, passing run, failing run,
-              `(absent)` when a package is in only one), or a one-line note when a
-              side is missing
+              between those two runs (tab-separated: package, passing run, failing run;
+              `(absent)` when a package is in only one; `a|b` when a run's jobs
+              installed different versions — then read `failing.txt` for the failed
+              job's own line), or a one-line note when a side is missing
             - `inspect_ai/` — read-only clone of UKGovernmentBEIS/inspect_ai at the exact
               commit that was tested. Investigate here; do NOT modify, push or open PRs.
 

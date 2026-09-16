@@ -256,8 +256,11 @@ def test_collect_diffs_the_failed_run_against_the_last_passing_run(tmp_path):
         "trustme\t(absent)\t1.2.1",
     ]
     assert f"passing run {PASSING_RUN}: 5 package(s) differ" in r.stdout
-    # Only the scheduled successes of the tests workflow are asked for.
-    assert "--workflow Inspect AI Scheduled Tests --event schedule --status success" in (tmp_path / "fake-gh" / "list-calls.txt").read_text()
+    # Only the scheduled successes of the tests workflow from before the failed
+    # run are asked for: the cutoff is in the query, so a re-triage of an old
+    # failure is not crowded out of the page by newer successes.
+    assert ("--workflow Inspect AI Scheduled Tests --event schedule --status success --created <2026-09-15T22:13:02Z"
+            in (tmp_path / "fake-gh" / "list-calls.txt").read_text())
     assert not (versions / "artifact").exists()
 
 
@@ -276,6 +279,23 @@ def test_collect_orders_candidates_itself_and_drops_a_malformed_sha(tmp_path):
     info = json.loads((versions / "passing-run.json").read_text())
     assert info["run_id"] == int(PASSING_RUN) and info["inspect_ai_sha"] == ""
     assert "openai\t3.14.0\t3.14.1" in (versions / "diff.txt").read_text()
+
+
+def test_collect_keeps_every_version_when_a_runs_jobs_disagree(tmp_path):
+    # Blocking finding, review round 1: passing jobs on openai 3.9.9, the
+    # failing asyncio job on 3.10.0 and static-analysis still on 3.9.9 must
+    # not collapse to one version per package and read as "nothing differs".
+    versions, r = collect(
+        tmp_path,
+        logs={FAILED_RUN: install_log("static-analysis", "openai-3.9.9 anyio-4.15.1")
+                          + install_log("slow-tests (asyncio, 900)", "openai-3.10.0 anyio-4.15.1"),
+              PASSING_RUN: install_log("static-analysis", "openai-3.9.9 anyio-4.15.1")
+                           + install_log("slow-tests (asyncio, 900)", "openai-3.9.9 anyio-4.15.1")},
+        runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
+        artifacts={PASSING_RUN: PASSING_SHA},
+    )
+    assert (versions / "diff.txt").read_text().splitlines()[1:] == ["openai\t3.9.9\t3.10.0|3.9.9"]
+    assert "1 package(s) differ" in r.stdout
 
 
 def test_collect_without_a_passing_run_leaves_notes_not_a_diff(tmp_path):
