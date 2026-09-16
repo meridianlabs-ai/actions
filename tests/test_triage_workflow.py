@@ -705,6 +705,10 @@ def test_agent_job_holds_no_secret_but_the_anthropic_key():
     agent = yaml.safe_dump(wf["jobs"]["agent"])
     secrets = set(re.findall(r"secrets\.([A-Z_]+)", agent))
     assert secrets == {"ANTHROPIC_API_KEY", "GITHUB_TOKEN"}, secrets
+    # No marvin identity of any kind: not the PAT, not the app secrets that
+    # mint one (already excluded above), not a minted token.
+    assert "steps.mint" not in agent and "create-github-app-token" not in agent
     land = yaml.safe_dump(wf["jobs"]["land"])
     assert "MARVIN_TOKEN" in land and "SLACK_BOT_TOKEN" in land
+    assert "MARVIN_APP_CLIENT_ID" in land and "MARVIN_APP_PRIVATE_KEY" in land
     assert "checkout" not in land
