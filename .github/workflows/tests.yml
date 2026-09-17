@@ -10,6 +10,9 @@ name: tests
   push:
     branches: [main]
     paths:
+      - ".github/workflows/claude.yml"
+      - ".github/workflows/claude-review.yml"
+      - ".github/workflows/claude-auto.yml"
       - ".github/workflows/inspect-ai-ci-perf.yml"
       - ".github/workflows/triage-test-failures.yml"
       - ".github/workflows/inspect-ai-scheduled-tests.yml"
@@ -19,6 +22,9 @@ name: tests
       - "tests/**"
   pull_request:
     paths:
+      - ".github/workflows/claude.yml"
+      - ".github/workflows/claude-review.yml"
+      - ".github/workflows/claude-auto.yml"
       - ".github/workflows/inspect-ai-ci-perf.yml"
       - ".github/workflows/triage-test-failures.yml"
       - ".github/workflows/inspect-ai-scheduled-tests.yml"
