@@ -41,15 +41,20 @@ and its satellites, and nothing that serves end users:
   shape the logs, timings and run metadata the agents read. Once an agent
   has read them, its runner is untrusted: a shim on `$GITHUB_PATH`, a line
   in `$GITHUB_ENV` or a `.pth` file can outlive the agent step.
-- **`workflow_dispatch` inputs are text, never syntax.** Only people with
-  write access can dispatch, but a ref or a pytest argument is still
-  validated against a shape before it becomes a checkout ref, a command
-  argument or a Slack field.
-- **Prior-run artifacts are trusted only from scheduled runs on the default
-  branch.** A push or dispatch run executes whatever copy of a workflow its
-  branch carries, so the artifacts it uploads do not count. Content is
-  validated on top of that: a recorded SHA must be 40 hex characters, a
-  Slack channel or thread must look like one.
+- **`workflow_dispatch` inputs are data, never syntax.** Only people with
+  write access can dispatch, and no input reaches a shell script as
+  syntax. Shape validation is per workflow: the scheduled suites validate
+  their ref characters and pytest arguments, ci-perf passes its
+  unrestricted ref directly to checkout, and triage passes the selected run
+  ID to `gh` as a quoted argument.
+- **Prior-run artifacts are trusted by provenance where a workflow checks
+  it.** A push or dispatch run executes whatever copy of a workflow its
+  branch carries, so the scheduled-test skip cache accepts a last-tested
+  SHA only from a successful scheduled run on the default branch. Automatic
+  triage is gated on a failed scheduled test run; manual triage trusts the
+  run the dispatcher selects and validates its context fields (a 40-hex
+  SHA, a Slack channel ID, a Slack timestamp) without independently
+  checking that run's event or branch.
 - **Release notes are contributor text.** The announce action reads notes
   assembled from merged commit subjects in the calling repo and treats them
   as untrusted when it builds Slack mrkdwn.
@@ -68,19 +73,25 @@ and its satellites, and nothing that serves end users:
   cap). The triage agent's tools are reads plus file writes under the
   landing directory; the writes it wants are a manifest that the `land`
   job validates and performs.
-- Fork issues, Atlas cards and Slack messages are written by separate jobs
-  on fresh runners that check out no third-party tree, from artifacts they
-  validate first, under a GitHub App token minted for that job and scoped to
-  the `inspect_ai` fork with only the permissions the job uses (a PAT
-  fallback stays in the expression while the app secrets roll out).
+- The two agent workflows perform their GitHub and Atlas writes in separate
+  jobs on fresh runners, from artifacts those jobs validate first, under a
+  GitHub App token minted for that job and scoped to the `inspect_ai` fork
+  with only the permissions the job uses (a PAT fallback stays in the
+  expression while the app secrets roll out). Triage's `land` job checks
+  out nothing and posts its Slack reply with a separate Slack token held
+  only there; ci-perf's `publish` job checks out upstream `inspect_ai` at
+  the SHA the analysis used, to run the publisher's own validator.
 - No `workflow_dispatch` input, step output or event field is expanded
   inside a `run:` script; they reach bash through `env:` and are quoted.
-- Artifact producers are checked by event and branch, and their content is
-  validated against a shape before it becomes a ref, an output or a
-  destination; a value that fails its check is dropped, not passed on.
+- Artifact content is validated against a shape before it becomes a ref, an
+  output or a destination, and a value that fails its check is dropped, not
+  passed on; the scheduled-test skip cache also checks its producer's event
+  and branch (see the trust boundaries above for where that check stops).
 - The Slack destination of a triage reply comes from the validated context
-  of the failed run, never from the agent's manifest, and the release
-  announcer's mrkdwn can contain no `<...>` other than an `http(s)` link.
+  of the failed run, never from the agent's manifest. The release-note
+  converter escapes Slack control syntax and emits only `http(s)` links;
+  callers must supply a trusted release URL for the separate full-release
+  link, which is not converted.
 - The `analyze` job runs under an egress allow-list with sudo disabled and
   refuses to publish evidence that contains the Anthropic key.
 - The stubs pass the shared workflows exactly the secrets they name, never
@@ -98,9 +109,12 @@ and its satellites, and nothing that serves end users:
 ## Adding or changing a workflow here
 
 1. Inputs, artifact fields and event text reach bash through `env:` or
-   files, are validated against a shape, and are used as quoted variables.
-2. Secrets other than the model key appear only in `publish` and `land`
-   jobs; a job that runs an agent gets the job token and nothing else.
+   files, are validated against a shape where one exists, and are used as
+   quoted variables.
+2. Write credentials (app secrets, tokens, webhooks) stay out of any job
+   that runs an agent or third-party code; such a job gets the job token
+   and its model key and nothing else, and its writes land in a separate
+   job from what it produced.
 3. Mint the narrowest token for a write: one repository, only the
    permissions the job uses, in the job that writes.
 4. `tests/` parses the workflows and runs their scripts; extend the matching
