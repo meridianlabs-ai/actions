@@ -1,5 +1,5 @@
 # actions
-Global GitHub actions
+Global GitHub actions. To report a vulnerability, or to see what these workflows trust and guarantee, read [SECURITY.md](SECURITY.md).
 
 ## Reusable release workflows
 
