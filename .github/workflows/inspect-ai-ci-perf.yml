@@ -65,6 +65,15 @@
 # sk-ant- prefix, if anything there is not a regular file (publication
 # follows symlinks), or if a file cannot be scanned. Show report and Retain
 # CI evidence outside Git run only if that step did not fail.
+#
+# Publication result: the downloaded artifact is agent-written and may carry
+# a published.json of its own. The Publish step deletes that path before it
+# runs the publisher, so published.json exists afterwards only if this run's
+# publisher wrote it, and Show published issues and Retain published issue
+# URLs outside Git run only when that step succeeded. What they show and
+# retain is therefore the publisher's result (the fork issues it created or
+# reused, [] when none), also when the Atlas step fails after it; a failed
+# validation or publisher reports nothing.
 name: Inspect AI CI Perf
 
 "on":
@@ -357,19 +366,26 @@ jobs:
       # summary.json and report.md, never previous-summaries.json or an existing
       # published.json. Success overwrites published.json with the active issue
       # URLs, including [] when none remain. Preserve this contract when changing
-      # the tooling; the downloaded directory can contain an agent-written result.
+      # the tooling; the downloaded directory can contain an agent-written result,
+      # which this step deletes first (a file, a directory or a link, whatever
+      # the artifact carried) so that a published.json after this step is this
+      # run's publisher result and nothing else.
       - name: Publish fork issues and trend summary
+        id: publish
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
         run: |
+          rm -rf -- "$CI_PERF_OUTPUT_DIR/published.json"
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --publish \
             --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
 
-      # Keep the default success() gate: a publisher error can leave a downloaded
-      # published.json untouched. Only a successful publisher's freshly written
-      # result may drive these issue and project writes.
+      # Keep the default success() gate: a failed validation skips the publisher
+      # and leaves a downloaded published.json on disk. Only a successful
+      # publisher's freshly written result may drive these issue and project
+      # writes.
       - name: Add published issues to Atlas and assign unowned ones to Eric
+        id: atlas
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
         run: |
@@ -404,18 +420,31 @@ jobs:
               ], input=json.dumps({"assignees": ["epatey"]}), text=True, check=True)
           PYTHON
 
+      # The two reporting steps run only when the publisher succeeded (and so
+      # wrote published.json), whatever the Atlas step did after it; a skipped
+      # or failed publisher reports nothing, so a result the artifact carried
+      # is never shown or retained as this run's publication.
       - name: Show published issues
-        if: always()
+        if: always() && steps.publish.outcome == 'success'
+        env:
+          ATLAS_OUTCOME: ${{ steps.atlas.outcome }}
         run: |
-          if test -f "$CI_PERF_OUTPUT_DIR/published.json"; then
-            cat "$CI_PERF_OUTPUT_DIR/published.json" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "Published fork issues (the publisher's result for this run):"
+            echo
+            cat "$CI_PERF_OUTPUT_DIR/published.json"
+            echo
+            if test "$ATLAS_OUTCOME" != "success"; then
+              echo
+              echo "Atlas step outcome: $ATLAS_OUTCOME. The list is what the publisher created or reused, not proof that every issue reached Atlas or was assigned."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Retain published issue URLs outside Git
-        if: always()
+        if: always() && steps.publish.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}-published
           path: ${{ env.CI_PERF_OUTPUT_DIR }}/published.json
           retention-days: 90
-          if-no-files-found: ignore
+          if-no-files-found: error
