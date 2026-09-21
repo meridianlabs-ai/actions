@@ -1,0 +1,211 @@
+name: isolated-agent
+description: >-
+  Run a headless Claude Code agent as a dedicated unprivileged Unix user,
+  separate from both the GitHub runner user and the model-broker user, so the
+  reusable Anthropic key is out of the agent's reach through every channel:
+  process environment, files, other processes' memory and the .NET diagnostic
+  socket of the runner's Runner.Worker (which holds the job's secrets for
+  masking). This is the whole-agent isolation of review round 1's option 2:
+  the entire `claude` process and every tool it spawns run as the agent user,
+  not just its Bash tool.
+
+  Ordering (all internal so it fails closed): (1) SETUP, as the runner user
+  with sudo still available — create the agent user (no sudo, no docker
+  group), install Claude Code globally as root so the agent can execute but
+  not modify it, add the checkout to the agent's git safe.directory, write the
+  prompt and settings to runner-owned files the agent can read but not write,
+  and hand the agent write access to exactly the one output/landing
+  directory. (2) CHECK — check_isolation.sh runs AS THE AGENT and fails the
+  job unless the whole boundary holds (no sudo/Docker, Yama scope 1+, the
+  broker's and every other user's process and files closed, no .NET
+  diagnostic socket reachable, the runner command files unwritable). (3) RUN —
+  the agent runs `claude` as the agent user under `env -i`: its environment
+  carries only the broker base URL and per-run token, the job's GitHub token,
+  the model flags and an explicit allow-list of non-secret variables the
+  prompt needs — never a runner secret, never $GITHUB_ENV/$GITHUB_PATH/
+  $GITHUB_OUTPUT (so it cannot rewrite a later trusted step), never the OIDC
+  request variables (so it cannot mint tokens).
+
+  Fixing B1: this action needs sudo, so the caller must NOT ask harden-runner
+  to disable sudo (its pre hook runs before every step and would take sudo
+  away before this action). harden-runner keeps its egress allow-list; the
+  agent, being an unprivileged user, cannot alter the firewall, so dropping
+  disable-sudo-and-containers does not reopen the network. Referenced
+  fully-qualified from the caller's checkout of this repo.
+
+inputs:
+  prompt:
+    description: The agent's prompt (headless, single turn). Passed to `claude -p`.
+    required: true
+  settings:
+    description: Optional Claude Code settings JSON (permissions allow/deny). Written to a file the agent cannot modify.
+    required: false
+    default: ""
+  claude-args:
+    description: 'Extra `claude` flags, space-separated (e.g. "--model fable --allowedTools Bash,Read,Edit,Write,Grep,Glob").'
+    required: false
+    default: ""
+  base-url:
+    description: ANTHROPIC_BASE_URL for the agent (the model broker's loopback URL).
+    required: true
+  token:
+    description: The broker's per-run token, given to the agent as ANTHROPIC_API_KEY.
+    required: true
+  github-token:
+    description: The job token, given to the agent as GH_TOKEN for read-only gh.
+    required: true
+  agent-user:
+    description: The dedicated unprivileged user to run the agent as.
+    required: false
+    default: agent
+  workdir:
+    description: Directory the agent runs in (must be traversable by the agent user).
+    required: false
+    default: ${{ github.workspace }}
+  write-dir:
+    description: The one directory the agent may write (its output/landing dir); handed to the agent user.
+    required: true
+  forward-env:
+    description: >-
+      Newline-separated NAME=VALUE pairs of NON-SECRET variables the prompt
+      needs (e.g. CI_PERF_OUTPUT_DIR). Forwarded verbatim into the agent's
+      otherwise-empty environment; never put a secret here.
+    required: false
+    default: ""
+  broker-home:
+    description: The model broker's home directory (for the isolation check).
+    required: false
+    default: /var/lib/model-broker
+
+outputs:
+  conclusion:
+    description: '"success" if the agent exited 0, else "failure".'
+    value: ${{ steps.run.outputs.conclusion }}
+
+runs:
+  using: composite
+  steps:
+    # (1) SETUP — trusted, as the runner user with sudo.
+    - name: Set up the isolated agent user
+      shell: bash
+      env:
+        AGENT_USER: ${{ inputs.agent-user }}
+        WRITE_DIR: ${{ inputs.write-dir }}
+        AGENT_PROMPT: ${{ inputs.prompt }}
+        AGENT_SETTINGS: ${{ inputs.settings }}
+        WORK_DIR: ${{ inputs.workdir }}
+      run: |
+        set -euo pipefail
+        if ! sudo -n true 2>/dev/null; then
+          echo "::error::isolated-agent: sudo is unavailable; run this before privileges are dropped and do not set harden-runner disable-sudo-and-containers"
+          exit 1
+        fi
+        [[ "$AGENT_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "::error::isolated-agent: bad agent-user"; exit 1; }
+        home="/home/$AGENT_USER"
+        if ! id -u "$AGENT_USER" >/dev/null 2>&1; then
+          sudo -n useradd --system --user-group --create-home --home-dir "$home" --shell /usr/sbin/nologin "$AGENT_USER"
+        fi
+        # Unprivileged by construction: never in sudo/docker, even if the
+        # image seeds them.
+        sudo -n gpasswd -d "$AGENT_USER" sudo 2>/dev/null || true
+        sudo -n gpasswd -d "$AGENT_USER" docker 2>/dev/null || true
+        sudo -n install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0700 "$home"
+        # git run as the agent over the runner-owned checkout would hit the
+        # dubious-ownership refusal; the agent cannot add this exemption itself.
+        sudo -n -u "$AGENT_USER" -H git config --global --add safe.directory '*'
+        # Claude Code installed as root, globally: the agent executes it, it
+        # cannot modify it.
+        if ! command -v claude >/dev/null 2>&1; then
+          sudo -n env "PATH=$PATH" npm install -g @anthropic-ai/claude-code >/dev/null
+        fi
+        # The one directory the agent may write.
+        sudo -n install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0755 "$WRITE_DIR"
+        # Prompt and settings: runner-owned, world-readable, agent cannot
+        # rewrite them (so it cannot change its own permissions). Under a
+        # runner-only directory.
+        stage="$RUNNER_TEMP/isolated-agent"
+        rm -rf "$stage"; mkdir -p "$stage"; chmod 755 "$stage"
+        printf '%s' "$AGENT_PROMPT" > "$stage/prompt.txt"
+        chmod 644 "$stage/prompt.txt"
+        if [ -n "$AGENT_SETTINGS" ]; then
+          printf '%s' "$AGENT_SETTINGS" > "$stage/settings.json"
+          chmod 644 "$stage/settings.json"
+          python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$stage/settings.json" \
+            || { echo "::error::isolated-agent: settings is not valid JSON"; exit 1; }
+        fi
+        echo "isolated agent user '$AGENT_USER' ready ($(id "$AGENT_USER")); claude at $(command -v claude)"
+
+    # (2) CHECK — as the agent, fail closed.
+    - name: Check the agent is isolated from the key
+      shell: bash
+      env:
+        AGENT_USER: ${{ inputs.agent-user }}
+        BROKER_HOME: ${{ inputs.broker-home }}
+      run: |
+        set -euo pipefail
+        sudo -n -u "$AGENT_USER" -H -- env -i \
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+          EXPECT_AGENT_USER="$AGENT_USER" \
+          BROKER_HOME="$BROKER_HOME" \
+          TMPDIR="${TMPDIR:-/tmp}" \
+          RUNNER_COMMAND_FILES="${GITHUB_ENV:-} ${GITHUB_PATH:-} ${GITHUB_OUTPUT:-}" \
+          bash "$GITHUB_ACTION_PATH/check_isolation.sh"
+
+    # (3) RUN — the whole claude process as the agent, under env -i.
+    - name: Run the agent
+      id: run
+      shell: bash
+      env:
+        AGENT_USER: ${{ inputs.agent-user }}
+        WORK_DIR: ${{ inputs.workdir }}
+        BASE_URL: ${{ inputs.base-url }}
+        TOKEN: ${{ inputs.token }}
+        GH_TOKEN_IN: ${{ inputs.github-token }}
+        CLAUDE_ARGS: ${{ inputs.claude-args }}
+        FORWARD_ENV: ${{ inputs.forward-env }}
+      run: |
+        set -uo pipefail
+        claude_bin="$(command -v claude || true)"
+        [ -n "$claude_bin" ] || { echo "::error::isolated-agent: claude is not installed"; exit 1; }
+        node_bin="$(command -v node || true)"
+        stage="$RUNNER_TEMP/isolated-agent"
+        prompt="$(cat "$stage/prompt.txt")"
+        # Build the agent's entire environment explicitly (env -i): only these
+        # names reach the agent. No runner secret, no $GITHUB_ENV/_PATH/_OUTPUT
+        # (so it cannot rewrite a later trusted step), no ACTIONS_ID_TOKEN_*
+        # (so it cannot mint OIDC tokens).
+        path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        [ -n "$node_bin" ] && path="$(dirname "$node_bin"):$path"
+        path="$(dirname "$claude_bin"):$path"
+        declare -a envv=(
+          "HOME=/home/$AGENT_USER"
+          "PATH=$path"
+          "ANTHROPIC_BASE_URL=$BASE_URL"
+          "ANTHROPIC_API_KEY=$TOKEN"
+          "GH_TOKEN=$GH_TOKEN_IN"
+          "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+        )
+        # Forward only the explicitly named non-secret variables the prompt
+        # needs (their values are set in THIS step's env by the caller).
+        while IFS= read -r line; do
+          [ -n "$line" ] || continue
+          case "$line" in
+            *=*) envv+=("$line") ;;
+            *) echo "::error::isolated-agent: forward-env entry '$line' is not NAME=VALUE"; exit 1 ;;
+          esac
+        done <<< "$FORWARD_ENV"
+        declare -a args=(-p "$prompt")
+        [ -f "$stage/settings.json" ] && args+=(--settings "$stage/settings.json")
+        # shellcheck disable=SC2206
+        declare -a extra=($CLAUDE_ARGS)
+        cd "$WORK_DIR"
+        set +e
+        sudo -n -u "$AGENT_USER" -H -- env -i "${envv[@]}" "$claude_bin" "${args[@]}" "${extra[@]}"
+        rc=$?
+        set -e
+        if [ "$rc" = 0 ]; then conclusion=success; else conclusion=failure; fi
+        echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+        echo "isolated agent finished as '$AGENT_USER': conclusion=$conclusion (claude exit $rc)"
+        # A non-zero agent run is reported through `conclusion`, not by failing
+        # this step: the caller gates on it (ci-perf's publish, triage's
+        # compose), and the always() teardown/report steps must still run.

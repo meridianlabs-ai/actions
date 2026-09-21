@@ -765,13 +765,15 @@ def test_triage_shares_no_secret_with_the_test_suites():
     assert shared == {"GITHUB_TOKEN"}, shared
 
 
-def test_the_key_reaches_only_the_broker_which_starts_before_harden_runner():
+def test_the_key_reaches_only_the_broker_and_the_whole_agent_is_isolated():
     steps = load_workflow()["jobs"]["agent"]["steps"]
     names = [s.get("name") for s in steps]
-    order = ["Check out the model broker", "Start the model broker", "Harden runner",
-             "Check the model key is out of the agent's reach", "Download failed logs from upstream run",
-             "Run Claude triage agent", "Stop the model broker", "Compose landing manifest", "Emit landing manifest"]
+    order = ["Check out the isolation actions", "Start the model broker", "Harden runner",
+             "Download failed logs from upstream run", "Run Claude triage agent",
+             "Stop the model broker", "Compose landing manifest", "Emit landing manifest"]
     assert [n for n in names if n in order] == order
+    # The key secret is referenced only by the broker step; no ANTHROPIC_API_KEY
+    # of any kind reaches the agent step.
     for s in steps:
         if s.get("id") == "broker":
             assert set(re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(s))) == {"TRIAGE_ANTHROPIC_API_KEY"}
@@ -779,31 +781,45 @@ def test_the_key_reaches_only_the_broker_which_starts_before_harden_runner():
             assert "ANTHROPIC_API_KEY" not in yaml.safe_dump(s), s.get("name")
     assert agent_step("broker")["uses"] == "./actions-repo/.github/actions/model-broker"
     assert agent_step("broker")["with"] == {"api-key": "${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}"}
-    checkout = agent_step("Check out the model broker")
-    assert checkout["with"] == {"path": "actions-repo", "sparse-checkout": ".github/actions/model-broker", "persist-credentials": False}
-    check = agent_step("Check the model key is out of the agent's reach")
-    assert check["run"].strip() == "bash actions-repo/.github/actions/model-broker/check_isolation.sh"
+    checkout = agent_step("Check out the isolation actions")
+    assert checkout["with"] == {"path": "actions-repo", "sparse-checkout": ".github/actions", "persist-credentials": False}
+    # The whole Claude process runs through the isolated-agent action, not
+    # claude-code-action; the isolation check is that action's own first
+    # concern, so there is no separate check step to run as the runner user.
+    assert agent_step("claude")["uses"] == "./actions-repo/.github/actions/isolated-agent"
+    assert "anthropics/claude-code-action" not in yaml.safe_dump(load_workflow()["jobs"]["agent"])
 
 
-def test_harden_runner_blocks_egress_and_disables_sudo_and_containers():
+def test_harden_runner_blocks_egress_and_does_not_disable_sudo():
     with_ = agent_step("Harden runner")["with"]
     assert with_["egress-policy"] == "block"
-    assert with_["disable-sudo-and-containers"] is True
+    # B1: harden-runner's pre hook would drop sudo before the broker/agent-user
+    # bootstrap, so this workflow must NOT ask it to. The agent is powerless
+    # because it runs as an unprivileged user, checked by the isolated-agent
+    # action, not because the runner's sudo was removed here.
+    assert "disable-sudo-and-containers" not in with_ and "disable-sudo" not in with_
     endpoints = with_["allowed-endpoints"].split()
     assert all(e.endswith(":443") for e in endpoints)
-    assert "api.anthropic.com:443" in endpoints and "api.github.com:443" in endpoints and "github.com:443" in endpoints
+    assert {"api.anthropic.com:443", "api.github.com:443", "github.com:443"} <= set(endpoints)
     # Only Anthropic, GitHub and the action's installer: no package index
     # (triage installs nothing) and no other host.
     assert set(endpoints) <= {"api.anthropic.com:443", "api.github.com:443", "github.com:443", "claude.ai:443",
                               "downloads.claude.ai:443", "registry.npmjs.org:443", "release-assets.githubusercontent.com:443"}
 
 
-def test_the_agent_is_pointed_at_the_broker_with_the_run_token():
+def test_the_agent_runs_as_the_isolated_user_pointed_at_the_broker():
     claude = agent_step("claude")
-    assert claude["with"]["anthropic_api_key"] == "${{ steps.broker.outputs.token }}"
-    assert claude["env"]["ANTHROPIC_BASE_URL"] == "${{ steps.broker.outputs.base-url }}"
-    assert claude["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert claude["uses"] == "./actions-repo/.github/actions/isolated-agent"
+    w = claude["with"]
+    assert w["token"] == "${{ steps.broker.outputs.token }}"
+    assert w["base-url"] == "${{ steps.broker.outputs.base-url }}"
+    assert w["github-token"] == "${{ github.token }}"
+    assert w["write-dir"] == "${{ runner.temp }}/landing"
+    # The agent step names no secret at all (the broker holds the key).
     assert "secrets." not in yaml.safe_dump(claude)
+    # The compose step reads the action's conclusion output, not a step outcome.
+    compose = agent_step("landing")
+    assert compose["env"]["CLAUDE_OUTCOME"] == "${{ steps.claude.outputs.conclusion }}"
     stop = agent_step("Stop the model broker")
     assert stop["if"] == "always() && steps.broker.outcome == 'success'"
     assert stop["env"] == {"STOP_FILE": "${{ steps.broker.outputs.stop-file }}"}

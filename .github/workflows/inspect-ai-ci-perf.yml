@@ -16,22 +16,25 @@
 # before the agent ran, validates report.md and findings.json, and only then
 # writes fork issues and Atlas cards as marvin. The publisher never shares a
 # runner with the agent, and no marvin identity (MARVIN_TOKEN, the app
-# secrets, the minted token) may appear in analyze. A compromised analysis
-# can produce a bad report.md and findings.json, which the publisher
-# validates, and nothing else.
+# secrets, the minted token) may appear in analyze. Issue and Atlas writes
+# consume the validated report.md and findings.json plus the pinned summary.
+# Validation constrains the proposals' shape, not their factual correctness.
 #
 # Secrets:
 # - CI_PERF_ANTHROPIC_API_KEY: a key from a dedicated Anthropic Console
 #   workspace with a monthly spend cap, added as an org secret scoped to this
-#   repository. The agent never holds it: the model broker
-#   (.github/actions/model-broker, checked out from this repo and started
-#   before harden-runner, the one step that needs sudo) reads it into a
-#   process that runs as its own Unix user and forwards Messages API calls,
-#   and nothing else, to api.anthropic.com. The agent's ANTHROPIC_API_KEY is
-#   the broker's per-run token, good only for 127.0.0.1 on this runner while
-#   the broker is alive, and its ANTHROPIC_BASE_URL is the broker. The cap
-#   bounds what the agent can spend through the broker during the job. Until
-#   the secret exists the broker step fails.
+#   repository. The agent never holds it. Two Unix users besides the runner
+#   carry the separation: the model broker (.github/actions/model-broker)
+#   reads the key into a process running as the model-broker user and
+#   forwards Messages API calls, and nothing else, to api.anthropic.com; the
+#   agent (.github/actions/isolated-agent) runs the whole Claude process as a
+#   third, unprivileged user whose ANTHROPIC_API_KEY is only the broker's
+#   per-run token (good only for 127.0.0.1 while the broker is alive) and
+#   whose ANTHROPIC_BASE_URL is the broker. The agent cannot read the broker
+#   user's key file or memory, cannot read the runner process's memory or its
+#   .NET diagnostic socket (where the runner keeps every job secret for
+#   masking), and cannot sudo. The cap bounds what the agent can spend through
+#   the broker during the job. Until the secret exists the broker step fails.
 # - MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY: the meridian-marvin
 #   GitHub App, used only in publish, which mints a token scoped to the
 #   inspect_ai fork with issues and organization-projects write (its only
@@ -39,9 +42,7 @@
 # - MARVIN_TOKEN: the PAT the publish job falls back to while the app
 #   secrets roll out; used only in publish.
 #
-# Egress: harden-runner runs in analyze with egress-policy block, right
-# after the broker checkout and start (those two need github.com and sudo
-# and run only this repo's own code; nothing untrusted has run yet).
+# Egress: harden-runner runs in analyze with egress-policy block.
 # allowed-endpoints is the egress observed in audit mode on run
 # https://github.com/meridianlabs-ai/actions/actions/runs/34880688791:
 # Anthropic (api.anthropic.com, now reached only by the broker; claude.ai
@@ -61,16 +62,19 @@
 # checks. A newly needed endpoint shows up as a blocked call in the
 # harden-runner step summary and as a job annotation; add it only if it is
 # clearly required, that is an Anthropic, GitHub or package-index host.
-# publish needs no allow-list: its only egress is GitHub. The same
-# harden-runner step sets disable-sudo-and-containers: the runner user has
-# passwordless sudo, and with it a process on the runner could alter the
-# iptables rules that enforce the allow-list or read the broker's files as
-# root. After the broker start nothing in analyze needs sudo or Docker: pip,
-# the collector, the tests and Claude all run as the runner user, and the
-# step "Check the model key is out of the agent's reach" fails the job
-# before the agent starts if sudo or Docker still work, if ptrace_scope
-# would let a child read its ancestors' memory, or if the broker's files or
-# /proc entries are readable.
+# publish needs no allow-list: its only egress is GitHub.
+#
+# Privileges: harden-runner does NOT disable sudo here. Its hardening runs in
+# a `pre` hook that GitHub runs before every job step, so a
+# disable-sudo-and-containers would take sudo away before the broker start
+# and the agent-user setup, both of which need it (review round 1, B1).
+# Instead the untrusted agent runs as its own unprivileged user (not in sudo
+# or docker), so it cannot alter the egress firewall or read another user's
+# files as root; the isolated-agent action's own check fails the job before
+# the agent if sudo or Docker are reachable to that user, if ptrace_scope
+# would let it read another process, or if the broker or runner processes are
+# open to it. Nothing untrusted runs as the runner user, so the runner
+# keeping sudo is not a path for the agent.
 #
 # What the allow-list does and does not do: it stops connections to hosts
 # not on the list. It does not stop an upload to an attacker's own resource
@@ -82,11 +86,20 @@
 # the collected data, which is public.
 #
 # Published output: this repo is public, so the job summary and the artifact
-# are world-readable. They carry whatever the agent wrote, unscreened: a
-# scan on the agent's own runner after the agent has run is not a control
-# (its tools and environment are the agent's to shim), and it would need the
-# key on that runner to look for. Nothing the agent holds is a reusable
-# secret, so there is nothing to screen for.
+# are world-readable. They carry whatever the agent wrote, unscreened: the
+# agent holds no reusable secret (the key is in the broker, reachable only by
+# the model-broker user, and the agent runs as its own unprivileged user), so
+# there is nothing to screen for, and a scan on a runner the agent could have
+# shimmed would not be a control anyway.
+#
+# Publication result (publish job): the downloaded artifact is agent-written
+# and may carry a published.json of its own. The Publish step deletes that
+# path before it runs the publisher, so published.json exists afterwards only
+# if this run's publisher wrote it, and Show published issues and Retain
+# published issue URLs outside Git run only when that step succeeded. What
+# they show and retain is therefore the publisher's result (the fork issues it
+# created or reused, [] when none), also when the Atlas step fails after it; a
+# failed validation or publisher reports nothing.
 name: Inspect AI CI Perf
 
 "on":
@@ -132,14 +145,15 @@ jobs:
       artifact_name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
-      # This repo's own code at the workflow's commit, for the model broker
-      # (a local action needs a checkout). Before harden-runner: the fetch
-      # is to github.com and the broker start needs sudo.
-      - name: Check out the model broker
+      # This repo's own code at the workflow's commit, for the local model-broker
+      # and isolated-agent actions. It does not matter that harden-runner's pre
+      # hook (below) has already programmed the egress firewall: the fetch is to
+      # github.com, which the allow-list permits.
+      - name: Check out the isolation actions
         uses: actions/checkout@v7
         with:
           path: actions-repo
-          sparse-checkout: .github/actions/model-broker
+          sparse-checkout: .github/actions
           persist-credentials: false
 
       - name: Start the model broker
@@ -149,11 +163,18 @@ jobs:
           api-key: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
           lifetime-minutes: "90"
 
+      # egress-policy block only. sudo and containers are deliberately NOT
+      # disabled here: harden-runner does that in its `pre` hook, which runs
+      # before every step including the broker start and the agent-user setup,
+      # both of which need sudo (review round 1, B1). Instead the untrusted
+      # agent runs as its own unprivileged user (the isolated-agent action),
+      # which is not in sudo or docker and so cannot alter the firewall or read
+      # another user's files as root; the isolation check inside that action
+      # fails the job before the agent if that boundary does not hold.
       - name: Harden runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
           egress-policy: block
-          disable-sudo-and-containers: true
           allowed-endpoints: >
             api.anthropic.com:443
             api.github.com:443
@@ -164,13 +185,6 @@ jobs:
             release-assets.githubusercontent.com:443
             pypi.org:443
             files.pythonhosted.org:443
-
-      # As the runner user, with the privileges the agent will have: sudo and
-      # Docker gone, ptrace scope 1, the broker's files and /proc entries
-      # closed, the broker answering on loopback. Fails the job before the
-      # agent starts otherwise.
-      - name: Check the model key is out of the agent's reach
-        run: bash actions-repo/.github/actions/model-broker/check_isolation.sh
 
       - name: Initialize output directory
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
@@ -194,6 +208,8 @@ jobs:
           python -m pip install pytest
           python -m pytest -c /dev/null -p no:cacheprovider inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
 
+      # previous-summaries.json is analysis context, not a --publish input;
+      # the hashes below protect the collected measurements used at publication.
       - name: Collect timings and prior summaries
         id: data
         env:
@@ -211,21 +227,28 @@ jobs:
           echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      # The model credential here is the broker's per-run token, and
-      # ANTHROPIC_BASE_URL sends Claude Code to the broker; the action passes
-      # both through to Claude Code as ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL.
+      # The entire Claude process runs as a dedicated unprivileged user (the
+      # isolated-agent action), pointed at the broker on loopback with its
+      # per-run token as ANTHROPIC_API_KEY; the reusable key is never in this
+      # agent's environment, files or reachable processes. The action's own
+      # isolation check fails the job before the agent if that does not hold.
+      # `conclusion` (success/failure) drives the publish job. --model fable
+      # pins the model to the current-best Claude family (was the action's
+      # default). CI_PERF_OUTPUT_DIR and CI_PERF_RUN_URL are non-secret values
+      # the prompt refers to, forwarded into the agent's otherwise-empty
+      # environment.
       - name: Analyze CI performance
         id: analysis
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-          ANTHROPIC_BASE_URL: ${{ steps.broker.outputs.base-url }}
-        uses: anthropics/claude-code-action@v1
+        uses: ./actions-repo/.github/actions/isolated-agent
         with:
-          anthropic_api_key: ${{ steps.broker.outputs.token }}
-          github_token: ${{ github.token }}
-          claude_args: |
-            --allowedTools Bash,Read,Edit,Write,Grep,Glob
+          base-url: ${{ steps.broker.outputs.base-url }}
+          token: ${{ steps.broker.outputs.token }}
+          github-token: ${{ github.token }}
+          write-dir: ${{ env.CI_PERF_OUTPUT_DIR }}
+          claude-args: "--model fable --allowedTools Bash,Read,Edit,Write,Grep,Glob"
+          forward-env: |
+            CI_PERF_OUTPUT_DIR=${{ env.CI_PERF_OUTPUT_DIR }}
+            CI_PERF_RUN_URL=${{ env.CI_PERF_RUN_URL }}
           prompt: |
             Run the scheduled analysis described in
             inspect_ai/.claude/skills/ci-perf/SKILL.md.
@@ -355,15 +378,30 @@ jobs:
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR"
 
+      # Upstream publisher contract at source_sha: --publish reads findings.json,
+      # summary.json and report.md, never previous-summaries.json or an existing
+      # published.json. Success overwrites published.json with the active issue
+      # URLs, including [] when none remain. Preserve this contract when changing
+      # the tooling; the downloaded directory can contain an agent-written result,
+      # which this step deletes first (a file, a directory or a link, whatever
+      # the artifact carried) so that a published.json after this step is this
+      # run's publisher result and nothing else.
       - name: Publish fork issues and trend summary
+        id: publish
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
         run: |
+          rm -rf -- "$CI_PERF_OUTPUT_DIR/published.json"
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --publish \
             --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
 
+      # Keep the default success() gate: a failed validation skips the publisher
+      # and leaves a downloaded published.json on disk. Only a successful
+      # publisher's freshly written result may drive these issue and project
+      # writes.
       - name: Add published issues to Atlas and assign unowned ones to Eric
+        id: atlas
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
         run: |
@@ -398,18 +436,31 @@ jobs:
               ], input=json.dumps({"assignees": ["epatey"]}), text=True, check=True)
           PYTHON
 
+      # The two reporting steps run only when the publisher succeeded (and so
+      # wrote published.json), whatever the Atlas step did after it; a skipped
+      # or failed publisher reports nothing, so a result the artifact carried
+      # is never shown or retained as this run's publication.
       - name: Show published issues
-        if: always()
+        if: always() && steps.publish.outcome == 'success'
+        env:
+          ATLAS_OUTCOME: ${{ steps.atlas.outcome }}
         run: |
-          if test -f "$CI_PERF_OUTPUT_DIR/published.json"; then
-            cat "$CI_PERF_OUTPUT_DIR/published.json" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "Published fork issues (the publisher's result for this run):"
+            echo
+            cat "$CI_PERF_OUTPUT_DIR/published.json"
+            echo
+            if test "$ATLAS_OUTCOME" != "success"; then
+              echo
+              echo "Atlas step outcome: $ATLAS_OUTCOME. The list is what the publisher created or reused, not proof that every issue reached Atlas or was assigned."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Retain published issue URLs outside Git
-        if: always()
+        if: always() && steps.publish.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}-published
           path: ${{ env.CI_PERF_OUTPUT_DIR }}/published.json
           retention-days: 90
-          if-no-files-found: ignore
+          if-no-files-found: error

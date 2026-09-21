@@ -22,8 +22,12 @@ where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_slack_release_announce.py` covers the announce converter;
 `tests/test_model_broker.py` covers the model broker of
 `.github/actions/model-broker` in-process and, when a Docker daemon is
-available, end to end in an Ubuntu container). `.github/workflows/tests.yml`
-runs them in CI on every push and pull request that touches a path it lists.
+available, the whole `.github/actions/isolated-agent` lifecycle — the agent
+user's isolation from the broker and from a runner/.NET-diagnostic sentinel,
+and the `env -i` launch — end to end in an Ubuntu container). Both actions
+live under the `.github/actions/**` path `tests.yml` lists.
+`.github/workflows/tests.yml` runs them in CI on every push and pull request
+that touches a path it lists.
 
 So a change to a workflow script is not done until:
 
@@ -56,12 +60,18 @@ clean.
   destination, and step outputs are written with heredoc delimiters.
 - A job that runs an agent over untrusted input holds only the job token;
   the model key is held by the model broker (`.github/actions/model-broker`,
-  started before harden-runner) and the agent gets a per-run token that
-  works only on the runner's loopback interface; writes to issues and Slack
-  happen in a separate job from a validated manifest (see the headers of
-  `triage-test-failures.yml` and `inspect-ai-ci-perf.yml`). Do not widen an
-  agent job's permissions or allow list without a test for the write vector
-  it closes, and put no secret in a step that runs after the agent.
+  a separate Unix user) and the whole Claude process runs as a third,
+  unprivileged user through `.github/actions/isolated-agent` with only the
+  broker's per-run loopback token, so the key is not in the agent's
+  environment, files or reachable processes (not the broker's, not the
+  runner's .NET worker). harden-runner keeps sudo here on purpose: its
+  hardening is a `pre` hook that runs before the bootstrap that needs sudo,
+  so the agent's powerlessness comes from its user, not from disabling sudo.
+  Writes to issues and Slack happen in a separate job from a validated
+  manifest (see the headers of `triage-test-failures.yml` and
+  `inspect-ai-ci-perf.yml`). Do not widen an agent job's permissions or allow
+  list without a test for the write vector it closes, and put no secret in a
+  step that runs after the agent.
 
 ## PRs
 
