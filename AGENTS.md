@@ -18,9 +18,12 @@ The `run:` blocks and permission rules in `.github/workflows/*.yml` are
 tested in `tests/`: each test file lifts the scripts out of the YAML and
 executes them under bash, with stand-ins for `gh` and `pytest` on `PATH`
 where the script calls them (`tests/test_triage_workflow.py`,
-`tests/test_scheduled_workflows.py`; `tests/test_slack_release_announce.py`
-covers the announce converter). `.github/workflows/tests.yml` runs them in CI
-on every push and pull request that touches a path it lists.
+`tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`;
+`tests/test_slack_release_announce.py` covers the announce converter;
+`tests/test_model_broker.py` covers the model broker of
+`.github/actions/model-broker` in-process and, when a Docker daemon is
+available, end to end in an Ubuntu container). `.github/workflows/tests.yml`
+runs them in CI on every push and pull request that touches a path it lists.
 
 So a change to a workflow script is not done until:
 
@@ -34,7 +37,7 @@ So a change to a workflow script is not done until:
 
 ```
 pip install pytest pyyaml        # or a venv; the repo has no lock file
-python3 -m pytest -q tests
+python3 -m pytest -q tests       # the broker's container tests need Docker; MODEL_BROKER_SKIP_DOCKER=1 skips them
 actionlint .github/workflows/<changed>.yml
 python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflows/<changed>.yml
 ```
@@ -51,11 +54,14 @@ clean.
   bash through `env:` or files, are validated against a shape (a 40-hex
   SHA, a Slack channel ID) before they become a ref, an output or a
   destination, and step outputs are written with heredoc delimiters.
-- A job that runs an agent over untrusted input holds only the job token
-  and the model key; writes to issues and Slack happen in a separate job
-  from a validated manifest (see the header of
-  `triage-test-failures.yml`). Do not widen an agent job's permissions or
-  allow list without a test for the write vector it closes.
+- A job that runs an agent over untrusted input holds only the job token;
+  the model key is held by the model broker (`.github/actions/model-broker`,
+  started before harden-runner) and the agent gets a per-run token that
+  works only on the runner's loopback interface; writes to issues and Slack
+  happen in a separate job from a validated manifest (see the headers of
+  `triage-test-failures.yml` and `inspect-ai-ci-perf.yml`). Do not widen an
+  agent job's permissions or allow list without a test for the write vector
+  it closes, and put no secret in a step that runs after the agent.
 
 ## PRs
 

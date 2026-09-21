@@ -1,0 +1,129 @@
+name: model-broker
+description: >-
+  Start a loopback broker that holds the Anthropic API key for an agent job,
+  so the agent never has the key. The broker (model_broker.py, next to this
+  file) runs as its own Unix user, model-broker, created here with sudo; the
+  key reaches it through a file only that user can read, which the broker
+  deletes once read, and it forwards Messages API calls, and nothing else, to
+  api.anthropic.com. The agent's Claude Code step is pointed at the broker
+  with ANTHROPIC_BASE_URL and given the per-run `token` output as its
+  ANTHROPIC_API_KEY: a credential that works only against 127.0.0.1 on this
+  runner while the broker is alive, so its disclosure through any channel
+  (network, job summary, artifact, issue body) is worthless.
+
+  Ordering is the contract. This action is the one step in the job that needs
+  sudo, so it runs BEFORE step-security/harden-runner, whose
+  disable-sudo-and-containers then takes sudo and Docker away from the runner
+  user for the rest of the job; without that, `sudo cat` or a privileged
+  container would read the key straight back. After harden-runner and before
+  the agent, the workflow runs check_isolation.sh (also next to this file),
+  which asserts as the runner user that sudo and Docker are gone, that
+  ptrace_scope keeps a descendant from reading its ancestors' memory, that
+  the broker's files and /proc entries are unreadable, and that the broker
+  answers on loopback. The broker exits when the workflow creates the
+  `stop-file` after the agent step, or when `lifetime-minutes` run out.
+
+  The runner's own process still holds every job secret in memory; that is
+  GitHub Actions' design, and the ptrace_scope check is what stops a process
+  the agent starts from reading it.
+
+inputs:
+  api-key:
+    description: The Anthropic API key the broker holds. Empty fails the step.
+    required: true
+  port:
+    description: Loopback port the broker listens on.
+    required: false
+    default: "8317"
+  lifetime-minutes:
+    description: The broker exits after this long even if never stopped.
+    required: false
+    default: "120"
+  stop-file:
+    description: >-
+      Path whose existence stops the broker. Under /tmp so the model-broker
+      user can see a file the runner user creates.
+    required: false
+    default: /tmp/model-broker.stop
+
+outputs:
+  base-url:
+    description: The ANTHROPIC_BASE_URL for the agent step.
+    value: ${{ steps.start.outputs.base-url }}
+  token:
+    description: The per-run token the agent presents as its ANTHROPIC_API_KEY.
+    value: ${{ steps.start.outputs.token }}
+  stop-file:
+    description: The file the workflow creates to stop the broker.
+    value: ${{ steps.start.outputs.stop-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Start the model broker
+      id: start
+      shell: bash
+      env:
+        MODEL_BROKER_API_KEY: ${{ inputs.api-key }}
+        BROKER_PORT: ${{ inputs.port }}
+        BROKER_LIFETIME_MINUTES: ${{ inputs.lifetime-minutes }}
+        STOP_FILE: ${{ inputs.stop-file }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        # Runs as the runner user, before any untrusted code, with sudo still
+        # available. The key is in this step's environment and travels to the
+        # broker through a pipe into a file only model-broker can read; it is
+        # never an argument, never logged, never in a runner-readable file.
+        home=/var/lib/model-broker
+        if [ -z "$MODEL_BROKER_API_KEY" ]; then
+          echo "::error::model-broker: the api-key input is empty; the workflow's Anthropic secret is not configured for this repository"
+          exit 1
+        fi
+        [[ "$BROKER_PORT" =~ ^[0-9]{2,5}$ ]] || { echo "::error::model-broker: port must be a number"; exit 1; }
+        [[ "$BROKER_LIFETIME_MINUTES" =~ ^[0-9]{1,4}$ ]] || { echo "::error::model-broker: lifetime-minutes must be a number"; exit 1; }
+        [[ "$STOP_FILE" =~ ^/tmp/[A-Za-z0-9._-]+$ ]] || { echo "::error::model-broker: stop-file must be a file directly under /tmp"; exit 1; }
+        if ! sudo -n true 2>/dev/null; then
+          echo "::error::model-broker: sudo is not available; this action must run before harden-runner disables it"
+          exit 1
+        fi
+        if ! id -u model-broker >/dev/null 2>&1; then
+          sudo -n useradd --system --user-group --home-dir "$home" --no-create-home --shell /usr/sbin/nologin model-broker
+        fi
+        # 0711: the runner user can open a file it knows the name of (the log,
+        # the ready file) but cannot list the directory; key and token are 0600.
+        sudo -n install -d -m 0711 -o model-broker -g model-broker "$home"
+        sudo -n install -m 0444 -o root -g root "$ACTION_PATH/model_broker.py" "$home/model_broker.py"
+        sudo -n rm -f "$home/ready" "$home/key" "$home/token"
+        rm -f "$STOP_FILE"
+        if [ -e "$STOP_FILE" ]; then
+          echo "::error::model-broker: $STOP_FILE exists and cannot be removed"
+          exit 1
+        fi
+        token="broker-run-$(/usr/bin/python3 -c 'import secrets; print(secrets.token_hex(24))')"
+        printf '%s' "$MODEL_BROKER_API_KEY" | sudo -n -u model-broker sh -c 'umask 077; cat > /var/lib/model-broker/key'
+        printf '%s' "$token" | sudo -n -u model-broker sh -c 'umask 077; cat > /var/lib/model-broker/token'
+        # setsid -f detaches the broker from this step; the shell that opens
+        # the log runs as model-broker, so the log file is that user's too.
+        sudo -n -u model-broker -- sh -c 'umask 022; exec setsid -f /usr/bin/python3 /var/lib/model-broker/model_broker.py "$@" </dev/null >>/var/lib/model-broker/broker.log 2>&1' sh \
+          --port "$BROKER_PORT" \
+          --key-file "$home/key" \
+          --token-file "$home/token" \
+          --ready-file "$home/ready" \
+          --stop-file "$STOP_FILE" \
+          --lifetime-minutes "$BROKER_LIFETIME_MINUTES"
+        for _ in $(seq 1 50); do
+          [ -f "$home/ready" ] && break
+          sleep 0.2
+        done
+        if ! [ -f "$home/ready" ]; then
+          echo "::error::model-broker: the broker did not start"
+          cat "$home/broker.log" 2>/dev/null || true
+          exit 1
+        fi
+        cat "$home/ready"
+        {
+          echo "base-url<<EOF"; echo "http://127.0.0.1:$BROKER_PORT"; echo "EOF"
+          echo "token<<EOF"; echo "$token"; echo "EOF"
+          echo "stop-file<<EOF"; echo "$STOP_FILE"; echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        echo "model broker listening on 127.0.0.1:$BROKER_PORT as $(sudo -n -u model-broker id -un); the key is in its memory only"

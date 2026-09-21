@@ -7,8 +7,9 @@
 # upstream CI logs, upstream PR titles and bodies, and fork issue text, so its
 # runner is untrusted once the agent has run: injected text could leave a gh
 # shim on $GITHUB_PATH, a variable in $GITHUB_ENV, or a .pth file in the
-# ambient Python. analyze holds only read tokens and the capped Anthropic key,
-# and uploads its evidence as an artifact.
+# ambient Python. analyze holds only read tokens (the capped Anthropic key is
+# in the model broker, a process the agent cannot read) and uploads its
+# evidence as an artifact.
 #
 # publish runs on a fresh runner the agent never had. It downloads that
 # artifact, checks the collected data against the sha256 values recorded
@@ -22,8 +23,15 @@
 # Secrets:
 # - CI_PERF_ANTHROPIC_API_KEY: a key from a dedicated Anthropic Console
 #   workspace with a monthly spend cap, added as an org secret scoped to this
-#   repository. The key is in the agent's environment by necessity; the cap
-#   bounds what a leak costs. Until the secret exists the analysis step fails.
+#   repository. The agent never holds it: the model broker
+#   (.github/actions/model-broker, checked out from this repo and started
+#   before harden-runner, the one step that needs sudo) reads it into a
+#   process that runs as its own Unix user and forwards Messages API calls,
+#   and nothing else, to api.anthropic.com. The agent's ANTHROPIC_API_KEY is
+#   the broker's per-run token, good only for 127.0.0.1 on this runner while
+#   the broker is alive, and its ANTHROPIC_BASE_URL is the broker. The cap
+#   bounds what the agent can spend through the broker during the job. Until
+#   the secret exists the broker step fails.
 # - MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY: the meridian-marvin
 #   GitHub App, used only in publish, which mints a token scoped to the
 #   inspect_ai fork with issues and organization-projects write (its only
@@ -31,10 +39,13 @@
 # - MARVIN_TOKEN: the PAT the publish job falls back to while the app
 #   secrets roll out; used only in publish.
 #
-# Egress: harden-runner is the first step of analyze with egress-policy
-# block. allowed-endpoints is the egress observed in audit mode on run
+# Egress: harden-runner runs in analyze with egress-policy block, right
+# after the broker checkout and start (those two need github.com and sudo
+# and run only this repo's own code; nothing untrusted has run yet).
+# allowed-endpoints is the egress observed in audit mode on run
 # https://github.com/meridianlabs-ai/actions/actions/runs/34880688791:
-# Anthropic (api.anthropic.com; claude.ai and downloads.claude.ai are the
+# Anthropic (api.anthropic.com, now reached only by the broker; claude.ai
+# and downloads.claude.ai are the
 # action's Claude Code installer), GitHub (github.com and api.github.com,
 # listed explicitly in case the agent's meta-domain fetch fails;
 # release-assets.githubusercontent.com is the action downloading a release
@@ -52,19 +63,30 @@
 # clearly required, that is an Anthropic, GitHub or package-index host.
 # publish needs no allow-list: its only egress is GitHub. The same
 # harden-runner step sets disable-sudo-and-containers: the runner user has
-# passwordless sudo, and without it a process on the runner could alter the
-# iptables rules that enforce the allow-list. Nothing in analyze needs sudo
-# or Docker: pip, the collector, the tests and Claude all run as the runner
-# user.
+# passwordless sudo, and with it a process on the runner could alter the
+# iptables rules that enforce the allow-list or read the broker's files as
+# root. After the broker start nothing in analyze needs sudo or Docker: pip,
+# the collector, the tests and Claude all run as the runner user, and the
+# step "Check the model key is out of the agent's reach" fails the job
+# before the agent starts if sudo or Docker still work, if ptrace_scope
+# would let a child read its ancestors' memory, or if the broker's files or
+# /proc entries are readable.
+#
+# What the allow-list does and does not do: it stops connections to hosts
+# not on the list. It does not stop an upload to an attacker's own resource
+# on a listed multi-tenant host (a github.com repository or gist, an npm
+# package) authenticated with a credential the attacker put in the text the
+# agent reads. So the allow-list is not what keeps the key confidential; the
+# broker is. What the agent can still move off the runner is what it can
+# read: the read-only job token (this repository, expires with the job) and
+# the collected data, which is public.
 #
 # Published output: this repo is public, so the job summary and the artifact
-# are world-readable. The allow-list closes the network exfiltration path,
-# but the report the agent writes is itself published, so the step "Refuse
-# to publish evidence that contains a secret" fails the job if any file in
-# CI_PERF_OUTPUT_DIR contains the Anthropic key, its base64 encoding or the
-# sk-ant- prefix, if anything there is not a regular file (publication
-# follows symlinks), or if a file cannot be scanned. Show report and Retain
-# CI evidence outside Git run only if that step did not fail.
+# are world-readable. They carry whatever the agent wrote, unscreened: a
+# scan on the agent's own runner after the agent has run is not a control
+# (its tools and environment are the agent's to shim), and it would need the
+# key on that runner to look for. Nothing the agent holds is a reusable
+# secret, so there is nothing to screen for.
 name: Inspect AI CI Perf
 
 "on":
@@ -110,6 +132,23 @@ jobs:
       artifact_name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
+      # This repo's own code at the workflow's commit, for the model broker
+      # (a local action needs a checkout). Before harden-runner: the fetch
+      # is to github.com and the broker start needs sudo.
+      - name: Check out the model broker
+        uses: actions/checkout@v7
+        with:
+          path: actions-repo
+          sparse-checkout: .github/actions/model-broker
+          persist-credentials: false
+
+      - name: Start the model broker
+        id: broker
+        uses: ./actions-repo/.github/actions/model-broker
+        with:
+          api-key: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
+          lifetime-minutes: "90"
+
       - name: Harden runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
@@ -125,6 +164,13 @@ jobs:
             release-assets.githubusercontent.com:443
             pypi.org:443
             files.pythonhosted.org:443
+
+      # As the runner user, with the privileges the agent will have: sudo and
+      # Docker gone, ptrace scope 1, the broker's files and /proc entries
+      # closed, the broker answering on loopback. Fails the job before the
+      # agent starts otherwise.
+      - name: Check the model key is out of the agent's reach
+        run: bash actions-repo/.github/actions/model-broker/check_isolation.sh
 
       - name: Initialize output directory
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
@@ -165,14 +211,18 @@ jobs:
           echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
+      # The model credential here is the broker's per-run token, and
+      # ANTHROPIC_BASE_URL sends Claude Code to the broker; the action passes
+      # both through to Claude Code as ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL.
       - name: Analyze CI performance
         id: analysis
         env:
           GH_TOKEN: ${{ github.token }}
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          ANTHROPIC_BASE_URL: ${{ steps.broker.outputs.base-url }}
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ steps.broker.outputs.token }}
           github_token: ${{ github.token }}
           claude_args: |
             --allowedTools Bash,Read,Edit,Write,Grep,Glob
@@ -194,70 +244,24 @@ jobs:
             Missing observations are not zero. Do not retry known permission
             blockers. Do not run the collector again.
 
-      - name: Refuse to publish evidence that contains a secret
-        id: secret_scan
-        if: always()
+      # The broker runs as model-broker, so the runner user cannot signal it:
+      # it exits when this file appears. From here on the runner is the
+      # agent's; this step is diagnostics (the broker's log names each
+      # forwarded call by method and path) and authorizes nothing.
+      - name: Stop the model broker
+        if: always() && steps.broker.outcome == 'success'
         env:
-          CI_PERF_ANTHROPIC_API_KEY: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
+          STOP_FILE: ${{ steps.broker.outputs.stop-file }}
         run: |
-          # Scan the directory the next two steps publish. Show report reads
-          # CI_PERF_OUTPUT_DIR, the upload reads runner.temp/ci-perf; the
-          # agent could have changed GITHUB_ENV, so they must still agree.
-          dir="$RUNNER_TEMP/ci-perf"
-          if test "$CI_PERF_OUTPUT_DIR" != "$dir"; then
-            echo "::error::CI_PERF_OUTPUT_DIR is $CI_PERF_OUTPUT_DIR, expected $dir; not publishing"
-            exit 1
-          fi
-          if test -L "$dir"; then
-            echo "::error::$dir is a symlink; not publishing"
-            exit 1
-          fi
-          if ! test -d "$dir"; then
-            echo "No output directory; nothing to scan"
-            exit 0
-          fi
-          # Publication follows symlinks, so only regular files and
-          # directories may be present. find and the listings fail the step
-          # on any error (bash -e, pipefail).
-          entries=$(mktemp)
-          find "$dir" -mindepth 1 ! -type f ! -type d -print > "$entries"
-          if test -s "$entries"; then
-            sed 's/^/::error::not a regular file, not publishing: /' "$entries"
-            exit 1
-          fi
-          files=$(mktemp)
-          find "$dir" -type f -print0 > "$files"
-          key_b64=""
-          if test -n "$CI_PERF_ANTHROPIC_API_KEY"; then
-            key_b64=$(printf '%s' "$CI_PERF_ANTHROPIC_API_KEY" | base64 -w0)
-          fi
-          # Patterns reach grep through a pipe, never argv or the log.
-          patterns() {
-            printf '%s\n' 'sk-ant-'
-            if test -n "$CI_PERF_ANTHROPIC_API_KEY"; then
-              printf '%s\n' "$CI_PERF_ANTHROPIC_API_KEY" "$key_b64"
-            fi
-          }
-          status=0
-          while IFS= read -r -d '' file; do
-            rc=0
-            grep -F -q -f <(patterns) -- "$file" || rc=$?
-            case "$rc" in
-              0)
-                echo "::error::$file contains an Anthropic key or key prefix; not publishing"
-                status=1
-                ;;
-              1) ;;
-              *)
-                echo "::error::could not scan $file (grep exit $rc); not publishing"
-                status=1
-                ;;
-            esac
-          done < "$files"
-          exit "$status"
+          touch "$STOP_FILE"
+          for _ in $(seq 1 20); do
+            pgrep -u model-broker -x python3 >/dev/null 2>&1 || break
+            sleep 0.5
+          done
+          cat /var/lib/model-broker/broker.log
 
       - name: Show report
-        if: always() && steps.secret_scan.outcome != 'failure'
+        if: always()
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
@@ -271,7 +275,7 @@ jobs:
           done
 
       - name: Retain CI evidence outside Git
-        if: always() && steps.secret_scan.outcome != 'failure'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
