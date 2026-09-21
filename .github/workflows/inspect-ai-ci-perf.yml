@@ -15,9 +15,9 @@
 # before the agent ran, validates report.md and findings.json, and only then
 # writes fork issues and Atlas cards as marvin. The publisher never shares a
 # runner with the agent, and no marvin identity (MARVIN_TOKEN, the app
-# secrets, the minted token) may appear in analyze. A compromised analysis
-# can produce a bad report.md and findings.json, which the publisher
-# validates, and nothing else.
+# secrets, the minted token) may appear in analyze. Issue and Atlas writes
+# consume the validated report.md and findings.json plus the pinned summary.
+# Validation constrains the proposals' shape, not their factual correctness.
 #
 # Secrets:
 # - CI_PERF_ANTHROPIC_API_KEY: a key from a dedicated Anthropic Console
@@ -148,6 +148,8 @@ jobs:
           python -m pip install pytest
           python -m pytest -c /dev/null -p no:cacheprovider inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
 
+      # previous-summaries.json is analysis context, not a --publish input;
+      # the hashes below protect the collected measurements used at publication.
       - name: Collect timings and prior summaries
         id: data
         env:
@@ -351,6 +353,11 @@ jobs:
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR"
 
+      # Upstream publisher contract at source_sha: --publish reads findings.json,
+      # summary.json and report.md, never previous-summaries.json or an existing
+      # published.json. Success overwrites published.json with the active issue
+      # URLs, including [] when none remain. Preserve this contract when changing
+      # the tooling; the downloaded directory can contain an agent-written result.
       - name: Publish fork issues and trend summary
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
@@ -359,6 +366,9 @@ jobs:
             --directory "$CI_PERF_OUTPUT_DIR" --publish \
             --run-url "$CI_PERF_RUN_URL" --run-attempt "$CI_PERF_RUN_ATTEMPT"
 
+      # Keep the default success() gate: a publisher error can leave a downloaded
+      # published.json untouched. Only a successful publisher's freshly written
+      # result may drive these issue and project writes.
       - name: Add published issues to Atlas and assign unowned ones to Eric
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
