@@ -174,10 +174,11 @@ repo's files, and when to repeat them.
   the temp directory, absolute paths to pre-created stand-ins for the
   runner's `GITHUB_ENV`, `GITHUB_PATH` and `GITHUB_STEP_SUMMARY` files
   (the stand-ins stayed empty), and `$GITHUB_ENV` quoted and unquoted.
-  `git --output` was denied; `/dev/null` and `2>&1` were allowed. Limits: these were the official Linux ARM64 builds of those two
-  releases, run directly with a deterministic stand-in model and fake data
-  in an isolated container, not the Linux x64 binary the hosted runner
-  installs and not through the action and Agent SDK; and they covered the
+  `git --output` was denied; `/dev/null` and `2>&1` were allowed. Limits:
+  these were the official Linux ARM64 builds of those two releases, run
+  directly with a deterministic stand-in model and fake data in an isolated
+  container, not the Linux x64 binary the hosted runner installs and not
+  through the action and Agent SDK; and they covered the
   redirect operators listed, not every way a program can write (symlinks,
   command substitution, here-documents and allowed programs' own output
   options were not surveyed). `tests/test_triage_workflow.py` approximates
