@@ -555,12 +555,12 @@ def test_setup_creates_an_unprivileged_agent_separate_from_runner_and_broker(env
 # --- Check: the isolation boundary (B1/B2) ---------------------------------------
 
 
-def make_command_file(container: Container, path: str, mode: str, owner: str = "runner") -> None:
+def make_command_file(container: Container, path: str, mode: str, owner: str = "runner", group: str = "runner") -> None:
     # Deterministic regardless of any prior owner (sudo rm first, create as the
-    # named owner). A plain `> file` as the container's default user was flaky
-    # under the CI docker daemon.
+    # named owner/group/mode). A plain `> file` as the container's default user
+    # was flaky under the CI docker daemon.
     container.run("sudo", "-n", "sh", "-c",
-                  f"rm -f {path} && install -m {mode} -o {owner} -g {owner} /dev/null {path}", user="runner")
+                  f"rm -f {path} && install -m {mode} -o {owner} -g {group} /dev/null {path}", user="runner")
 
 
 def run_check(container: Container) -> subprocess.CompletedProcess:
@@ -653,7 +653,12 @@ def test_check_fails_closed_when_the_agent_can_sudo(env, container):
 
 
 def test_check_flags_a_writable_runner_command_file(env, container):
-    make_command_file(container, "/tmp/ghenv-bad", "666")
+    # A runner-owned command file the agent CAN write (here via the agent's own
+    # group, so writability does not depend on any "other" ACL mask). The check
+    # must flag it. Precondition: confirm the agent really can write it.
+    make_command_file(container, "/tmp/ghenv-bad", "664", owner="runner", group=AGENT_USER)
+    assert as_agent(container, "sh", "-c", "echo probe >> /tmp/ghenv-bad").returncode == 0, \
+        "fixture: the agent should be able to write the group-writable command file"
     r = container.run(
         "sudo", "-n", "-u", AGENT_USER, "-H", "--", "env", "-i",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
