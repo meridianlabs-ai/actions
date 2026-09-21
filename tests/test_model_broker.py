@@ -653,12 +653,14 @@ def test_check_fails_closed_when_the_agent_can_sudo(env, container):
 
 
 def test_check_flags_a_writable_runner_command_file(env, container):
-    # A runner-owned command file the agent CAN write (here via the agent's own
-    # group, so writability does not depend on any "other" ACL mask). The check
+    # A command file the agent CAN write. To make writability deterministic
+    # across hosts (the CI runner's /tmp neither honours group-write across
+    # sudo nor "other"-write for a file there), the file is agent-OWNED; the
+    # probe opens it for append, which needs only file-owner write. The check
     # must flag it. Precondition: confirm the agent really can write it.
-    make_command_file(container, "/tmp/ghenv-bad", "664", owner="runner", group=AGENT_USER)
+    make_command_file(container, "/tmp/ghenv-bad", "644", owner=AGENT_USER, group=AGENT_USER)
     assert as_agent(container, "sh", "-c", "echo probe >> /tmp/ghenv-bad").returncode == 0, \
-        "fixture: the agent should be able to write the group-writable command file"
+        "fixture: the agent should be able to write its own command file"
     r = container.run(
         "sudo", "-n", "-u", AGENT_USER, "-H", "--", "env", "-i",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
