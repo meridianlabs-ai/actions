@@ -80,8 +80,9 @@ and its satellites, and nothing that serves end users:
   broker (`.github/actions/model-broker`) reads the key into a process
   running as the `model-broker` user and forwards Messages API calls, and
   nothing else, to `api.anthropic.com`. The whole Claude process and every
-  tool it spawns run as a third, unprivileged `agent` user
-  (`.github/actions/isolated-agent`), whose `ANTHROPIC_API_KEY` is only the
+  tool it spawns run as a third, unprivileged user (`claude-agent`, chosen so
+  its home does not collide with harden-runner's `/home/agent`) through
+  `.github/actions/isolated-agent`, whose `ANTHROPIC_API_KEY` is only the
   broker's per-run token (usable only against the broker on loopback while
   the job runs) and whose `ANTHROPIC_BASE_URL` is the broker. That agent
   cannot read the broker user's key file or memory; cannot read the runner

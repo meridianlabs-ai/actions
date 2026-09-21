@@ -55,9 +55,13 @@ inputs:
     description: The job token, given to the agent as GH_TOKEN for read-only gh.
     required: true
   agent-user:
-    description: The dedicated unprivileged user to run the agent as.
+    description: >-
+      The dedicated unprivileged user to run the agent as. Its home must not
+      collide with a trusted directory: `agent` is avoided because
+      harden-runner hardcodes `/home/agent` for its own agent (review round 2,
+      F1).
     required: false
-    default: agent
+    default: claude-agent
   workdir:
     description: Directory the agent runs in (must be traversable by the agent user).
     required: false
@@ -101,15 +105,27 @@ runs:
           exit 1
         fi
         [[ "$AGENT_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "::error::isolated-agent: bad agent-user"; exit 1; }
-        home="/home/$AGENT_USER"
-        if ! id -u "$AGENT_USER" >/dev/null 2>&1; then
+        # harden-runner hardcodes /home/agent for its own agent's executable,
+        # config, status and post_event.json; the untrusted user must not own
+        # that (F1). Refuse the name outright, and refuse any home that
+        # already exists when we would create the user (a collision with a
+        # trusted directory).
+        [ "$AGENT_USER" != "agent" ] || { echo "::error::isolated-agent: agent-user must not be 'agent' (collides with harden-runner's /home/agent)"; exit 1; }
+        if id -u "$AGENT_USER" >/dev/null 2>&1; then
+          home="$(getent passwd "$AGENT_USER" | cut -d: -f6)"
+        else
+          home="/home/$AGENT_USER"
+          if [ -e "$home" ]; then
+            echo "::error::isolated-agent: $home already exists; refusing to run the agent as a user whose home is a pre-existing (possibly trusted) directory"
+            exit 1
+          fi
           sudo -n useradd --system --user-group --create-home --home-dir "$home" --shell /usr/sbin/nologin "$AGENT_USER"
         fi
         # Unprivileged by construction: never in sudo/docker, even if the
         # image seeds them.
         sudo -n gpasswd -d "$AGENT_USER" sudo 2>/dev/null || true
         sudo -n gpasswd -d "$AGENT_USER" docker 2>/dev/null || true
-        sudo -n install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0700 "$home"
+        sudo -n chmod 0700 "$home"
         # git run as the agent over the runner-owned checkout would hit the
         # dubious-ownership refusal; the agent cannot add this exemption itself.
         sudo -n -u "$AGENT_USER" -H git config --global --add safe.directory '*'
@@ -118,8 +134,14 @@ runs:
         if ! command -v claude >/dev/null 2>&1; then
           sudo -n env "PATH=$PATH" npm install -g @anthropic-ai/claude-code >/dev/null
         fi
-        # The one directory the agent may write.
-        sudo -n install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0755 "$WRITE_DIR"
+        # The one directory the agent may write. Owned by the runner user with
+        # the agent's group and setgid+group-write (2775), so the agent writes
+        # its manifest/body/report files (group) AND the trusted runner steps
+        # that run after it can still write the directory too — triage's
+        # emit-landing creates manifest.json here as the runner (F2). This is
+        # shared work product, not a runner control file.
+        owner="$(id -un)"
+        sudo -n install -d -o "$owner" -g "$AGENT_USER" -m 2775 "$WRITE_DIR"
         # Prompt and settings: runner-owned, world-readable, agent cannot
         # rewrite them (so it cannot change its own permissions). Under a
         # runner-only directory.
@@ -206,6 +228,24 @@ runs:
         if [ "$rc" = 0 ]; then conclusion=success; else conclusion=failure; fi
         echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
         echo "isolated agent finished as '$AGENT_USER': conclusion=$conclusion (claude exit $rc)"
-        # A non-zero agent run is reported through `conclusion`, not by failing
-        # this step: the caller gates on it (ci-perf's publish, triage's
-        # compose), and the always() teardown/report steps must still run.
+        # This step always exits 0 so `conclusion` propagates as a composite
+        # output even on a failed agent (a failed step's outputs are less
+        # reliably surfaced). The next step turns a non-success conclusion into
+        # a job failure.
+
+    # (4) GATE — fail the job when the agent did not succeed, INDEPENDENTLY of
+    # whether anything is published. ci-perf skips its publisher for dry-run
+    # and non-main refs, so without this a failed analysis would finish green
+    # in those modes (review round 2, F3). The caller's always() teardown and
+    # report steps (Stop the broker, Show report, Retain, Compose landing,
+    # Emit landing) still run because they carry `if: always()`.
+    - name: Fail the job if the agent did not succeed
+      shell: bash
+      env:
+        CONCLUSION: ${{ steps.run.outputs.conclusion }}
+      run: |
+        if [ "$CONCLUSION" != "success" ]; then
+          echo "::error::isolated-agent: the agent did not succeed (conclusion=${CONCLUSION:-none}); failing the job"
+          exit 1
+        fi
+        echo "isolated agent succeeded"

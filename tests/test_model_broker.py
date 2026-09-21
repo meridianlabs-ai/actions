@@ -329,10 +329,11 @@ def test_action_passes_inputs_through_env_and_writes_outputs_with_heredocs():
 
 IMAGE = "ubuntu:24.04"
 ACTIONS_MOUNT = ROOT / ".github" / "actions"
-AGENT_USER = "agent"
+AGENT_USER = "claude-agent"
 WRITE_DIR = "/tmp/agent-out"
 RUNNER_TEMP = "/tmp/rt"
 SENTINEL_SECRET = "SENTINEL-RUNNER-WORKER-SECRET-" + "z" * 40
+EXPOSED_SECRET = "EXPOSED-IN-ARGV-POSITIVE-CONTROL-" + "q" * 40
 
 FAKE_TLS_UPSTREAM = r"""
 import http.server, json, ssl, time
@@ -356,8 +357,12 @@ srv.serve_forever()
 # Stand-in for the .NET Runner.Worker: runs as `runner`, holds a secret only
 # in memory, and opens a 0600 diagnostic socket named like the runtime's.
 SENTINEL = r'''
-import os, socket, sys, time
-secret = sys.argv[1]  # noqa: F841 -- kept in memory, never on disk/argv beyond this
+import os, socket, time
+# The secret arrives through the environment (a 0400 /proc/environ channel a
+# different UID cannot read), is kept only in this Python variable, and is
+# cleared from the process environment immediately -- never in argv/cmdline,
+# which is world-readable.
+secret = os.environ.pop("SENTINEL_SECRET")  # noqa: F841 -- kept in memory only
 sock = f"{os.environ.get('TMPDIR', '/tmp')}/dotnet-diagnostic-{os.getpid()}-1-socket"
 try: os.unlink(sock)
 except FileNotFoundError: pass
@@ -507,8 +512,9 @@ def env(container: Container) -> dict:
     })
     outputs = parse_outputs_file(container.run("cat", "/tmp/broker_output", user="runner").stdout)
     # The sentinel .NET-like runner process (owned by runner, secret in memory).
-    subprocess.run(["docker", "exec", "-d", "-u", "runner", "-e", "TMPDIR=/tmp", container.name,
-                    "python3", "/usr/local/lib/sentinel.py", SENTINEL_SECRET], check=True)
+    subprocess.run(["docker", "exec", "-d", "-u", "runner", "-e", "TMPDIR=/tmp",
+                    "-e", f"SENTINEL_SECRET={SENTINEL_SECRET}", container.name,
+                    "python3", "/usr/local/lib/sentinel.py"], check=True)
     for _ in range(100):
         if container.run("test", "-f", "/tmp/sentinel.pid", check=False).returncode == 0:
             break
@@ -549,10 +555,18 @@ def test_setup_creates_an_unprivileged_agent_separate_from_runner_and_broker(env
 # --- Check: the isolation boundary (B1/B2) ---------------------------------------
 
 
+def make_command_file(container: Container, path: str, mode: str, owner: str = "runner") -> None:
+    # Deterministic regardless of any prior owner (sudo rm first, create as the
+    # named owner). A plain `> file` as the container's default user was flaky
+    # under the CI docker daemon.
+    container.run("sudo", "-n", "sh", "-c",
+                  f"rm -f {path} && install -m {mode} -o {owner} -g {owner} /dev/null {path}", user="runner")
+
+
 def run_check(container: Container) -> subprocess.CompletedProcess:
     # Exactly what the action's check step runs, with a runner-owned command
     # file to prove it is not agent-writable.
-    container.run("sh", "-c", "echo x > /tmp/ghenv && chmod 644 /tmp/ghenv && chown runner:runner /tmp/ghenv")
+    make_command_file(container, "/tmp/ghenv", "644")
     return container.run(
         "sudo", "-n", "-u", AGENT_USER, "-H", "--", "env", "-i",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -599,12 +613,31 @@ def test_agent_cannot_read_the_runner_worker_memory_or_its_diagnostic_socket(env
     assert sock, "the sentinel opened no diagnostic socket"
     probe = as_agent(container, "python3", "/usr/local/lib/connect_probe.py", sock)
     assert probe.returncode != 0 and "refused" in probe.stdout, probe.stdout
-    # The secret the sentinel holds in memory is nowhere the agent can read
-    # (needle on stdin so the sweep's own argv is not a hit).
-    sweep = container.run("sudo", "-n", "-u", AGENT_USER, "sh", "-c",
-                          "needle=$(cat); printf '%s\\n' \"$needle\" | grep -rIl -f - /proc/[0-9]*/environ /proc/[0-9]*/cmdline 2>/dev/null; true",
-                          user="runner", stdin=SENTINEL_SECRET, check=False)
-    assert sweep.stdout.strip() == "", f"the sentinel secret is readable at: {sweep.stdout}"
+    # F4: a BINARY-SAFE sweep (grep -a, not -I which skips the NUL-bearing
+    # cmdline/environ) of every process file the agent can read finds the
+    # sentinel's in-memory secret nowhere -- it was never in argv or a readable
+    # environ. The needle travels on stdin so the sweep's own argv is not a hit.
+    def sweep(needle: str, grep_opts: str) -> subprocess.CompletedProcess:
+        return container.run(
+            "sudo", "-n", "-u", AGENT_USER, "sh", "-c",
+            f"n=$(cat); printf '%s\\n' \"$n\" | grep {grep_opts} -f - /proc/[0-9]*/cmdline /proc/[0-9]*/environ 2>/dev/null; true",
+            user="runner", stdin=needle, check=False)
+    assert sweep(SENTINEL_SECRET, "-a -l").stdout.strip() == "", \
+        f"the sentinel secret is readable at: {sweep(SENTINEL_SECRET, '-a -l').stdout}"
+    # Positive control: a secret deliberately exposed in a runner process's
+    # argv IS found by the same binary-safe sweep, so it is not vacuously
+    # empty -- and the old `grep -I` MISSES it, which is the F4 bug.
+    subprocess.run(["docker", "exec", "-d", "-u", "runner", container.name,
+                    "python3", "-c", "import time; time.sleep(300)", EXPOSED_SECRET], check=True)
+    for _ in range(50):
+        if EXPOSED_SECRET in container.run("sh", "-c", "cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\000' ' '", check=False).stdout:
+            break
+        time.sleep(0.05)
+    try:
+        assert sweep(EXPOSED_SECRET, "-a -l").stdout.strip() != "", "binary-safe sweep should find an argv-exposed secret"
+        assert sweep(EXPOSED_SECRET, "-r -I -l").stdout.strip() == "", "grep -I skips NUL cmdline: the F4 false negative"
+    finally:
+        container.run("pkill", "-f", EXPOSED_SECRET, check=False)
 
 
 def test_check_fails_closed_when_the_agent_can_sudo(env, container):
@@ -620,7 +653,7 @@ def test_check_fails_closed_when_the_agent_can_sudo(env, container):
 
 
 def test_check_flags_a_writable_runner_command_file(env, container):
-    container.run("sh", "-c", "echo x > /tmp/ghenv-bad && chmod 666 /tmp/ghenv-bad")
+    make_command_file(container, "/tmp/ghenv-bad", "666")
     r = container.run(
         "sudo", "-n", "-u", AGENT_USER, "-H", "--", "env", "-i",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -709,3 +742,89 @@ def test_the_stop_file_ends_the_broker(env, container):
         time.sleep(0.1)
     assert container.run("pgrep", "-u", "model-broker", "-x", "python3", check=False).returncode != 0
     assert "stop file present; exiting" in container.run("cat", "/var/lib/model-broker/broker.log", user="runner").stdout
+
+
+# --- F1: the agent's home does not collide with harden-runner's /home/agent --
+
+
+def run_setup(container: Container, agent_user: str, write_dir: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    return container.bash_step(ia_step("Set up the isolated agent user"), {
+        "AGENT_USER": agent_user, "WRITE_DIR": write_dir, "AGENT_PROMPT": "p",
+        "AGENT_SETTINGS": "", "WORK_DIR": "/tmp", "RUNNER_TEMP": RUNNER_TEMP,
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }, check=check)
+
+
+def test_agent_home_is_not_harden_runners_directory(env, container):
+    home = container.run("sh", "-c", f"getent passwd {AGENT_USER} | cut -d: -f6").stdout.strip()
+    assert home == f"/home/{AGENT_USER}" and AGENT_USER != "agent"
+    # /home/agent is harden-runner's; setup created /home/claude-agent and
+    # never touched /home/agent (it does not exist in this container).
+    assert container.run("test", "-e", "/home/agent", check=False).returncode != 0
+
+
+def test_setup_refuses_the_name_agent(container):
+    r = run_setup(container, "agent", "/tmp/agent-out", check=False)
+    assert r.returncode != 0 and "must not be 'agent'" in r.stdout, r.stdout
+
+
+def test_setup_refuses_a_colliding_pre_existing_home(container):
+    # A pre-existing home for a not-yet-created user (a trusted directory such
+    # as harden-runner's) makes setup refuse and leaves it untouched.
+    container.run("sudo", "-n", "sh", "-c",
+                  "rm -rf /home/collide-agent && install -d -o root -g root -m 0755 /home/collide-agent && echo trusted > /home/collide-agent/x",
+                  user="runner")
+    try:
+        r = run_setup(container, "collide-agent", "/tmp/collide-out", check=False)
+        assert r.returncode != 0 and "already exists" in r.stdout, r.stdout
+        assert container.run("stat", "-c", "%U", "/home/collide-agent").stdout.strip() == "root"
+        assert container.run("id", "-u", "collide-agent", check=False).returncode != 0
+    finally:
+        container.run("sudo", "-n", "rm", "-rf", "/home/collide-agent", user="runner")
+
+
+# --- F2: the landing/output dir is writable by both the runner and the agent -
+
+
+def test_write_dir_is_writable_by_both_runner_and_agent(env, container):
+    # emit-landing (triage) runs as the runner and must create manifest.json in
+    # the write-dir; the agent must also be able to write its manifest and body
+    # files. setgid + group-write (2775, runner:agent-group) gives both without
+    # handing the agent any runner control file.
+    perms = container.run("stat", "-c", "%a %U %G", WRITE_DIR).stdout.strip()
+    assert perms == f"2775 runner {AGENT_USER}", perms
+    # The runner (owner) creates manifest.json, as emit-landing would.
+    assert container.run("sh", "-c", f"echo m > {WRITE_DIR}/manifest.json", user="runner", check=False).returncode == 0
+    # The agent (group) creates its manifest-extra and a body file.
+    assert as_agent(container, "sh", "-c", f"echo e > {WRITE_DIR}/manifest-extra.json").returncode == 0
+    assert as_agent(container, "sh", "-c", f"echo b > {WRITE_DIR}/issue.md").returncode == 0
+    # Each can read the other's file (setgid group + world-read).
+    assert container.run("cat", f"{WRITE_DIR}/issue.md", user="runner").stdout.strip() == "b"
+    assert as_agent(container, "cat", f"{WRITE_DIR}/manifest.json", check=True).stdout.strip() == "m"
+
+
+# --- F3: a nonzero agent exit fails the job even when nothing is published ---
+
+
+def test_run_records_failure_and_the_gate_fails_the_job(env, container):
+    # The run step exits 0 (so `conclusion` propagates) but records failure
+    # when Claude exits nonzero; the gate step then fails the job, independently
+    # of any publisher (ci-perf skips publish for dry-run/non-main refs, F3).
+    container.run("mkdir", "-p", "/tmp/failbin")
+    container.write("/tmp/failbin/claude", "#!/bin/sh\nexit 23\n", "0755")
+    container.run("chmod", "0755", "/tmp/failbin")
+    container.run("touch", "/tmp/failout", user="runner")
+    run = container.bash_step(ia_step("Run the agent"), {
+        "AGENT_USER": AGENT_USER, "WORK_DIR": "/tmp",
+        "BASE_URL": "http://127.0.0.1:8317", "TOKEN": "t", "GH_TOKEN_IN": "g",
+        "CLAUDE_ARGS": "--model fable", "FORWARD_ENV": "",
+        "RUNNER_TEMP": RUNNER_TEMP, "GITHUB_OUTPUT": "/tmp/failout",
+        "PATH": "/tmp/failbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    }, check=False)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert parse_outputs_file(container.run("cat", "/tmp/failout", user="runner").stdout)["conclusion"] == "failure"
+    # The gate fails on a non-success conclusion, passes on success.
+    gate = ia_step("Fail the job if the agent did not succeed")
+    fail = container.bash_step(gate, {"CONCLUSION": "failure"}, check=False)
+    assert fail.returncode != 0 and "did not succeed" in fail.stdout, fail.stdout
+    assert container.bash_step(gate, {"CONCLUSION": "success"}, check=False).returncode == 0
