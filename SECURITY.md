@@ -55,6 +55,24 @@ and its satellites, and nothing that serves end users:
   run the dispatcher selects and validates its context fields (a 40-hex
   SHA, a Slack channel ID, a Slack timestamp) without independently
   checking that run's event or branch.
+- **Triage's issue policies are enforced on the agent's runner.** The
+  triage workflow's "Compose landing manifest" step reduces an issue's
+  labels to `auto` and its assignees to `ransomr`, keeps one issue action
+  per run and carries a failed agent step into the manifest's
+  `error.fail_run`. That step runs on the same runner as the agent, after
+  it. The `land` job's validator, on its fresh runner, independently
+  enforces the generic manifest contract: schema and known keys, body and
+  text file references, the allowed issue repository, and no bundle under
+  `refuse-bundle`; the Slack destination is a `land` input, not a manifest
+  field. It does not repeat those four triage policies. They hold against
+  a mistyped or hostile `manifest-extra.json`; after a separate compromise
+  of the agent runner (a shim on `$GITHUB_PATH`, a line in `$GITHUB_ENV`)
+  a forged manifest could reach `land` with other label or assignee
+  values, several issue actions or no `error`, within the one repository
+  the validator allows. It could not make an already failed agent job
+  green: the job result is the runner's, and `land` runs after a failure
+  either way. Repeating those policies in the validator is separate
+  hardening, not a fix for a demonstrated write primitive.
 - **Release notes are contributor text.** The announce action reads notes
   assembled from merged commit subjects in the calling repo and treats them
   as untrusted when it builds Slack mrkdwn.
@@ -72,7 +90,12 @@ and its satellites, and nothing that serves end users:
   Anthropic key (ci-perf's from a dedicated Console workspace with a spend
   cap). The triage agent's tools are reads plus file writes under the
   landing directory; the writes it wants are a manifest that the `land`
-  job validates and performs.
+  job validates and performs. Claude Code checks the target of a shell
+  output redirect against those same file rules, so an allowed read
+  command such as `grep` is not a write outside the landing directory
+  through `>` or `>>` in the releases checked under "Verification notes";
+  that check belongs to the installed Claude Code release, not to this
+  repo.
 - The two agent workflows perform their GitHub and Atlas writes in separate
   jobs on fresh runners, from artifacts those jobs validate first, under a
   GitHub App token minted for that job and scoped to the `inspect_ai` fork
@@ -123,6 +146,44 @@ and its satellites, and nothing that serves end users:
    before opening the PR (see `AGENTS.md`).
 6. Do not widen an agent job's permissions or tool allow list without a test
    for the write vector it closes.
+
+## Verification notes
+
+Dated checks of controls that live in a dependency rather than in this
+repo's files, and when to repeat them.
+
+- **Claude Code redirect-target checks in the triage agent job (checked
+  2026-09-21).** A Bash allow rule such as `Bash(grep *)` does not extend
+  to the command's output redirect: Claude Code checks the redirect target
+  against the file-write rules separately, an application-level permission
+  check rather than an OS sandbox
+  ([documentation](https://code.claude.com/docs/en/permissions#redirections)).
+  Checked in Claude Code 2.1.274, the release pinned by the
+  `claude-code-action@v1` revision the workflow resolved on 2026-09-17
+  (`3b8197d3d486006dd4af54613517f21ac6ac625e`), and 2.1.278, the release
+  pinned by the revision `v1` resolved to on 2026-09-21
+  (`b949468893d8bba436c9c71ea860b1f5f344804e`). The action pins its Claude
+  Code release internally; the `@v1` reference moves between revisions.
+  The settings were the permissions block of the workflow's `settings:`
+  input, with the landing directory under a runner-style temp path and the
+  `inspect_ai` clone below the working directory. Writes and redirects
+  (`>`, `>>`, `2>`, `&>`, `>|`, absolute and relative) into the landing
+  directory ran; the same forms into the working directory, into another
+  temp path and into pre-created stand-ins for the runner's `GITHUB_ENV`,
+  `GITHUB_PATH` and `GITHUB_STEP_SUMMARY` files were refused (the
+  pre-created stand-ins stayed empty); `git --output` was denied;
+  `/dev/null` and `2>&1` were allowed. Limits: these were the official Linux ARM64 builds of those two
+  releases, run directly with a deterministic stand-in model and fake data
+  in an isolated container, not the Linux x64 binary the hosted runner
+  installs and not through the action and Agent SDK; and they covered the
+  redirect operators listed, not every way a program can write (symlinks,
+  command substitution, here-documents and allowed programs' own output
+  options were not surveyed). `tests/test_triage_workflow.py` approximates
+  only the Bash-pattern step of the decision and cannot stand in for this
+  check. Repeat it with the installed CLI when `@v1` moves to a revision
+  that pins another release, when the runner image or architecture
+  changes, or when the `settings:` block changes. The records are kept
+  with the maintainers' security notes, not in this repository.
 
 ## Further reading
 

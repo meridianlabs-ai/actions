@@ -23,11 +23,12 @@
 # mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
 # `land` only.
 #
-# Blocked by meridianlabs-ai/agents#102: the manifest's `slack` field,
-# `issues[].assignees` / `issues[].reopen`, land's `slack-*` inputs and the
-# Atlas Todo status are that PR's extension of the landing pair; until it
-# lands at `@main` the validator refuses a manifest carrying `slack` or
-# those issue fields.
+# The manifest's `slack` field, `issues[].assignees` / `issues[].reopen`,
+# land's `slack-*` inputs and the Atlas Todo status came to the landing pair
+# with meridianlabs-ai/agents#102 (merged 2026-09-15; `@main` has carried it
+# since). A validator from before it refuses a manifest carrying `slack` or
+# those issue fields, which is why tests/test_triage_workflow.py xfails its
+# cross-check on such a TRIAGE_VALIDATOR_REF.
 name: Triage Test Failures
 
 "on":
@@ -279,6 +280,24 @@ jobs:
       # checks these rules against the write vectors named here. Guard
       # rails: the boundary is that nothing in this job can write as marvin
       # or reach Slack — the land job does both, from the validated manifest.
+      #
+      # A Bash allow rule is one check, not the whole decision. Claude Code
+      # checks the target of an output redirect (`>`, `>>`, `2>` and the
+      # other forms) separately, against the file-write rules — the Edit
+      # allow and deny rules, its protected paths and the working
+      # directories — as if the agent had written that file itself, so
+      # `Bash(grep *)` allows grep and not `grep ... >> <a path outside
+      # landing>`; in a headless run a target that would prompt is refused
+      # (https://code.claude.com/docs/en/permissions#redirections). This is
+      # the CLI's own permission engine, not an OS sandbox: it does not
+      # reach what an allowed program writes through its own options (hence
+      # the `git *--output*` deny), and it is a property of the Claude Code
+      # release the action installs — the revision `@v1` resolves to pins
+      # one internally, and the tag moves. The rule matcher in
+      # tests/test_triage_workflow.py approximates only the Bash-pattern
+      # step of this decision; SECURITY.md → "Verification notes" records
+      # which releases were checked against these settings and when to
+      # recheck.
       - name: Run Claude triage agent
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -670,6 +689,23 @@ jobs:
       # without Slack text (every triage owes the thread a reply) becomes
       # the manifest's `error` (fail_run), so the land job fails loudly
       # instead of ending a triage green with part of it missing.
+      #
+      # Those four triage policies — labels reduced to `auto`, assignees to
+      # ASSIGNEE, one issue action, a failed agent step carried into
+      # `error.fail_run` — are enforced here and only here, by a step on
+      # the agent's own runner. The land job's validator independently
+      # enforces the generic contract: the schema and known keys, the body
+      # and text file references, the allowed issue repository, no bundle
+      # under refuse-bundle; the Slack destination is a land input, not a
+      # manifest field. It does not repeat these four. So they hold against
+      # a mistyped or hostile manifest-extra.json, not against a separate
+      # compromise of this runner after the agent step (a shim on
+      # $GITHUB_PATH, a line in $GITHUB_ENV): a manifest forged past this
+      # step could reach land with other label or assignee values, several
+      # issue actions or no `error`, within the one repository the validator
+      # allows. It could not make an already failed agent job green: the job
+      # result is the runner's, not the manifest's, and land runs under
+      # always() either way.
       - name: Compose landing manifest
         id: landing
         if: always()
