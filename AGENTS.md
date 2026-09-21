@@ -36,8 +36,8 @@ show that no rule shape grants a listed write vector; they do not model the
 installed CLI's decision, which also involves its command parser, its
 separate check of redirect targets against the file rules, protected paths
 and the effective settings. An `allow` from that helper is not proof that
-Claude Code runs the command, and a redirect the helper passes is not one
-the CLI passes; `SECURITY.md` → "Verification notes" records the checks of
+Claude Code runs the command, and a redirect the helper passes still
+requires the CLI's separate file-write check; `SECURITY.md` → "Verification notes" records the checks of
 the real permission engine and when to repeat them.
 
 ## Checks

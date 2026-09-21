@@ -166,13 +166,15 @@ repo's files, and when to repeat them.
   Code release internally; the `@v1` reference moves between revisions.
   The settings were the permissions block of the workflow's `settings:`
   input, with the landing directory under a runner-style temp path and the
-  `inspect_ai` clone below the working directory. Writes and redirects
-  (`>`, `>>`, `2>`, `&>`, `>|`, absolute and relative) into the landing
-  directory ran; the same forms into the working directory, into another
-  temp path and into pre-created stand-ins for the runner's `GITHUB_ENV`,
-  `GITHUB_PATH` and `GITHUB_STEP_SUMMARY` files were refused (the
-  pre-created stand-ins stayed empty); `git --output` was denied;
-  `/dev/null` and `2>&1` were allowed. Limits: these were the official Linux ARM64 builds of those two
+  `inspect_ai` clone below the working directory. Direct Write calls and
+  absolute-path redirects with `>`, `>>`, `2>`, `&>` and `>|` into the
+  landing directory ran; the corresponding writes and redirects into the
+  working directory and into another temp path were refused. Separate `>>`
+  cases were refused too: relative paths into the working directory and
+  the temp directory, absolute paths to pre-created stand-ins for the
+  runner's `GITHUB_ENV`, `GITHUB_PATH` and `GITHUB_STEP_SUMMARY` files
+  (the stand-ins stayed empty), and `$GITHUB_ENV` quoted and unquoted.
+  `git --output` was denied; `/dev/null` and `2>&1` were allowed. Limits: these were the official Linux ARM64 builds of those two
   releases, run directly with a deterministic stand-in model and fake data
   in an isolated container, not the Linux x64 binary the hosted runner
   installs and not through the action and Agent SDK; and they covered the
