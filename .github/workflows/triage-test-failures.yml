@@ -947,7 +947,8 @@ jobs:
 
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate
-  # (refusing any manifest that carries commits: nothing here may push; or
+  # (refusing any manifest that carries commits or pull-request fields:
+  # nothing here may push, open, adopt or label a PR, or post `@review`; or
   # that names a label, another assignee or a second issue action, whatever
   # the agent job uploaded), create, comment on, reopen and assign the fork's tracking issues as
   # marvin (created and adopted issues go on Atlas at Todo by node ID; the
@@ -999,6 +1000,15 @@ jobs:
           # that names it.
           token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           refuse-bundle: "true"
+          # No PR either: a manifest carrying `pr` (open or adopt a PR for
+          # a branch that already exists on origin and label it — `auto`
+          # opts a PR into the autonomous loops, whose gates accept the
+          # machine account as the labeler) or `handback` (the live
+          # `@review`) is refused whole. refuse-bundle alone does not close
+          # this: `pr.open` needs no push, and while the minted token
+          # reaches only the fork's issues, the MARVIN_TOKEN fallback above
+          # reaches this repository's pull requests (review round 1, B1).
+          refuse-pr: "true"
           # The one repo the manifest's issues[] may name; the validator
           # refuses every other.
           allowed-issue-repos: ${{ env.ISSUES_REPO }}

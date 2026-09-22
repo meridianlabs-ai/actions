@@ -585,10 +585,10 @@ def validator(tmp_path_factory) -> Path:
     if not all(f'"{key}"' in text for key in ("slack", "assignees", "reopen")):
         pytest.xfail(f"the agents validator at {override or ref} predates agents#102 (slack / assignees / reopen); "
                      "this workflow is blocked on that PR")
-    if "--allowed-issue-labels" not in text:
+    if "--allowed-issue-labels" not in text or "--refuse-pr" not in text:
         pytest.xfail(f"the agents validator at {override or ref} predates the per-caller issue policy flags "
-                     "(--allowed-issue-labels / --allowed-issue-assignees / --max-issues, Claude Security finding "
-                     "4628345); this workflow is blocked on that PR")
+                     "(--allowed-issue-labels / --allowed-issue-assignees / --max-issues / --refuse-pr, Claude "
+                     "Security finding 4628345); this workflow is blocked on that PR")
     return target
 
 
@@ -600,11 +600,11 @@ def land_validate(validator: Path, tmp_path: Path, extra: dict) -> subprocess.Co
     (tmp_path / "landing").mkdir(exist_ok=True)
     (tmp_path / "landing" / "manifest.json").write_text(json.dumps({**extra, **core}))
     inputs = land_inputs()
-    assert inputs["refuse-bundle"] == "true" and inputs["branch-prefix"] == "triage"
+    assert inputs["refuse-bundle"] == "true" and inputs["refuse-pr"] == "true" and inputs["branch-prefix"] == "triage"
     return subprocess.run(
         ["python3", str(validator), "--dir", str(tmp_path / "landing"), "--repo", "meridianlabs-ai/actions",
          "--run-id", "42", "--default-branch", "main", "--refused-branches", "main",
-         "--allowed-issue-repos", inputs["allowed-issue-repos"], "--branch-prefix", "triage", "--refuse-bundle",
+         "--allowed-issue-repos", inputs["allowed-issue-repos"], "--branch-prefix", "triage", "--refuse-bundle", "--refuse-pr",
          "--allowed-issue-labels", inputs["allowed-issue-labels"],
          "--allowed-issue-assignees", inputs["allowed-issue-assignees"],
          "--max-issues", inputs["max-issues"]],
@@ -621,6 +621,7 @@ def test_land_enforces_the_triage_policies_from_the_workflow_env():
     assert inputs["allowed-issue-labels"] == ""
     assert inputs["allowed-issue-assignees"] == workflow_env("ISSUE_ASSIGNEE") == "ransomr"
     assert inputs["max-issues"] == "1"
+    assert inputs["refuse-pr"] == "true"
 
 
 @pytest.mark.parametrize(
@@ -679,6 +680,32 @@ def test_land_refuses_a_manifest_crafted_past_the_composer(validator, tmp_path, 
     r = land_validate(validator, tmp_path, crafted(tmp_path, issues, files))
     assert r.returncode == 1, r.stdout + r.stderr
     assert needle in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("extra, needles", [
+    # Review round 1, B1: the composer ignores `pr` and `handback`, but a
+    # manifest forged past it could open or adopt a PR for a branch already
+    # on origin (`triage-fixture` carries the prefix), label it `auto` — a
+    # label the loop gates accept from the machine account — and post the
+    # live `@review`. refuse-bundle does not close this (no push is needed),
+    # and the PAT fallback reaches this repository's pull requests.
+    ({"branch": "triage-fixture", "pr": {"open": True, "title": "Fixture", "body_file": "body.md", "labels": ["auto"]},
+      "handback": True},
+     ["refuses pull-request fields (--refuse-pr) but the manifest carries `pr`",
+      "refuses pull-request fields (--refuse-pr) but the manifest sets handback"]),
+    ({"pr": {"open": True, "title": "Fixture", "body_file": "body.md"}},
+     ["refuses pull-request fields (--refuse-pr) but the manifest carries `pr`"]),
+    ({"handback": True},
+     ["refuses pull-request fields (--refuse-pr) but the manifest sets handback"]),
+])
+def test_land_refuses_pull_request_fields_forged_into_a_triage_manifest(validator, tmp_path, extra, needles):
+    (tmp_path / "landing").mkdir(exist_ok=True)
+    (tmp_path / "landing" / "body.md").write_text("Review fixture only.\n")
+    manifest = {**crafted(tmp_path, [], ["s.txt"]), **extra}
+    r = land_validate(validator, tmp_path, manifest)
+    assert r.returncode == 1, r.stdout + r.stderr
+    for needle in needles:
+        assert needle in r.stdout, r.stdout
 
 
 @pytest.mark.parametrize("issues, files", [

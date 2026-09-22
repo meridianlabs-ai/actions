@@ -79,12 +79,16 @@ and its satellites, and nothing that serves end users:
   on its fresh runner as `allowed-issue-labels: ""`,
   `allowed-issue-assignees` and `max-issues: "1"`, alongside the generic
   manifest contract (schema and known keys, body and text file references,
-  the allowed issue repository, no bundle under `refuse-bundle`; the Slack
-  destination is a `land` input, not a manifest field), so a manifest
-  forged past the composing step after a separate compromise of the agent
-  runner (a shim on `$GITHUB_PATH`, a line in `$GITHUB_ENV`) is refused
-  whole rather than landed with a label, another owner or several issue
-  actions. The fourth policy is the composer's alone: such a forged
+  the allowed issue repository, no bundle under `refuse-bundle`, and no
+  `pr` or `handback` field under `refuse-pr`: a `pr.open` needs no push,
+  it adopts or opens a PR for a branch already on origin and labels it,
+  and the `MARVIN_TOKEN` fallback reaches this repository's pull requests
+  where the minted token does not; the Slack destination is a `land`
+  input, not a manifest field), so a manifest forged past the composing
+  step after a separate compromise of the agent runner (a shim on
+  `$GITHUB_PATH`, a line in `$GITHUB_ENV`) is refused whole rather than
+  landed with a label, another owner, several issue actions, a labelled PR
+  or an `@review`. The fourth policy is the composer's alone: such a forged
   manifest could drop its `error`, but could not make an already failed
   agent job green, since the job result is the runner's and `land` runs
   after a failure either way. This is enforcement of an authorization
@@ -150,8 +154,9 @@ and its satellites, and nothing that serves end users:
 - The Slack destination of a triage reply comes from the validated context
   of the failed run, never from the agent's manifest. The issues triage
   files carry no label, and the `land` job's validator refuses a manifest
-  that names one, names an owner other than `ransomr` or carries more than
-  one issue action, whatever the agent job uploaded. The release-note
+  that names one, names an owner other than `ransomr`, carries more than
+  one issue action, or carries a `pr` or `handback` field, whatever the
+  agent job uploaded. The release-note
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
