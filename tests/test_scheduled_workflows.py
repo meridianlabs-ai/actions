@@ -7,8 +7,14 @@ run. None of that text may be parsed as syntax: inputs reach bash through
 env: and are validated or split into an array, the artifact is accepted only
 from a scheduled run on the default branch and only when it is a 40-hex SHA,
 and step outputs travel to later steps through env:, never through `${{ }}`
-inside a script. The scripts are lifted from the YAML and executed under
-bash with stand-ins for gh and pytest on PATH.
+inside a script. The jobs that run the day's dependency closure and the test
+suites hold nothing that reaches beyond the job: a token declared read-only,
+no persisted checkout credential, no Actions cache; and the report job, the
+only producer of the two artifacts later runs trust, refuses a name another
+job took and records the identity of the triage-context it uploaded for the
+triage consumer (tests/test_triage_workflow.py checks that consumer against
+this producer). The scripts are lifted from the YAML and executed under bash
+with stand-ins for gh and pytest on PATH.
 
 Run with `python3 -m pytest` from the repo root (needs pytest, PyYAML and jq;
 `.github/workflows/tests.yml` does the same in CI).
@@ -20,6 +26,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -290,3 +297,212 @@ def test_triage_context_is_built_by_jq_from_env(tmp_path):
         "inspect_ai_sha": SHA,
         "inspect_ai_ref": "feature/x",
     }
+
+
+# --- The token, checkout and cache contract of the jobs that run third-party code ---
+#
+# slow-tests, static-analysis and nightly-tests install the day's dependency
+# closure and run pytest or mypy over it, so whatever they hold reaches code
+# this repo does not control. The contract: a job token declared read-only in
+# the file (not left to the repository's default setting), no token persisted
+# into a checkout, and no Actions cache restored or saved by such a job (a
+# cache saved after that code ran would be installed by every later run).
+
+
+def workflow_jobs(workflow: Path) -> dict:
+    return yaml.safe_load(workflow.read_text())["jobs"]
+
+
+def runs_third_party_code(job: dict) -> bool:
+    return any("pip install" in (s.get("run") or "") for s in job["steps"])
+
+
+@pytest.mark.parametrize("workflow", [SCHEDULED, NIGHTLY], ids=REF_IDS)
+def test_the_job_token_is_declared_read_only_everywhere(workflow):
+    wf = yaml.safe_load(workflow.read_text())
+    assert wf["permissions"] == {"contents": "read"}
+    for name, job in wf["jobs"].items():
+        perms = job.get("permissions", {})
+        assert set(perms) <= {"contents", "actions"}, (name, perms)
+        assert set(perms.values()) <= {"read"}, (name, perms)
+
+
+def test_only_the_jobs_that_read_this_repos_run_data_add_actions_read():
+    jobs = workflow_jobs(SCHEDULED)
+    # check-commit lists runs and downloads the skip-cache artifact; report
+    # lists this run's artifacts before it uploads. The jobs that run
+    # third-party code inherit the workflow-level contents: read and nothing else.
+    assert jobs["check-commit"]["permissions"] == {"contents": "read", "actions": "read"}
+    assert jobs["report"]["permissions"] == {"contents": "read", "actions": "read"}
+    third_party = {name for name, job in jobs.items() if runs_third_party_code(job)}
+    assert third_party == {"slow-tests", "static-analysis"}
+    assert all("permissions" not in jobs[name] for name in third_party)
+    nightly = workflow_jobs(NIGHTLY)
+    assert {name for name, job in nightly.items() if runs_third_party_code(job)} == {"nightly-tests"}
+    assert all("permissions" not in job for job in nightly.values())
+
+
+@pytest.mark.parametrize("workflow", [SCHEDULED, NIGHTLY], ids=REF_IDS)
+def test_no_checkout_persists_the_job_token(workflow):
+    checkouts = [(name, s) for name, job in workflow_jobs(workflow).items() for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
+    assert checkouts, "expected at least one checkout"
+    for name, s in checkouts:
+        assert s["with"].get("persist-credentials") is False, (name, s.get("name"))
+
+
+@pytest.mark.parametrize("workflow", [SCHEDULED, NIGHTLY], ids=REF_IDS)
+def test_no_job_restores_or_saves_an_actions_cache(workflow):
+    for name, job in workflow_jobs(workflow).items():
+        for s in job["steps"]:
+            uses = str(s.get("uses", ""))
+            assert "cache" not in uses.lower(), (name, uses)
+            if uses.startswith("actions/setup-python@"):
+                assert "cache" not in s.get("with", {}) and "cache-dependency-path" not in s.get("with", {}), (name, s["with"])
+
+
+# --- The report job's artifact names ------------------------------------------------
+#
+# The report job is the only intended producer of last-inspect-ai-sha and
+# triage-context, but any job of the run can claim those names first, and the
+# test jobs run third-party code before report starts. The step refuses to
+# upload a name that already exists in the run and says whether the existing
+# artifact was made during this attempt (tampering) or before it (a previous
+# attempt's leftover).
+
+FAKE_GH_RUN = r'''#!/usr/bin/env python3
+"""Stand-in for gh api over one run: its artifact list and its run object from $FAKE_GH_DIR."""
+import json, os, pathlib, re, subprocess, sys
+
+args = sys.argv[1:]
+store = pathlib.Path(os.environ["FAKE_GH_DIR"])
+with (store / "calls.log").open("a") as log:
+    log.write(" ".join(args) + "\n")
+assert args[0] == "api", args
+path = [a for a in args[1:] if not a.startswith("-") and a != (args[args.index("--jq") + 1] if "--jq" in args else None)][0].split("?")[0]
+if (store / "fail").exists():
+    sys.exit("fake gh: API failure")
+if re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+/artifacts", path):
+    data = json.dumps({"artifacts": json.loads((store / "artifacts.json").read_text())})
+elif re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+", path):
+    data = (store / "run.json").read_text()
+else:
+    sys.exit(f"fake gh: unexpected call {args}")
+if "--jq" in args:
+    data = subprocess.run(["jq", "-r", args[args.index("--jq") + 1]], input=data, text=True, capture_output=True, check=True).stdout
+sys.stdout.write(data)
+'''
+
+STARTED = "2026-09-22T10:15:25Z"
+
+
+def artifact(name: str, id: int, created: str, expired: bool = False) -> dict:
+    return {"id": id, "name": name, "created_at": created, "expired": expired, "digest": "sha256:" + "0" * 64}
+
+
+def check_names(tmp_path: Path, *, artifacts: list, tests_passed: bool, event: str = "schedule", fail_api: bool = False) -> subprocess.CompletedProcess:
+    store = Path(tempfile.mkdtemp(prefix="gh-", dir=tmp_path))  # one store per call; a test may call twice
+    (store / "artifacts.json").write_text(json.dumps(artifacts))
+    (store / "run.json").write_text(json.dumps({"id": 35714973776, "run_attempt": 2, "run_started_at": STARTED}))
+    if fail_api:
+        (store / "fail").touch()
+    s = step(SCHEDULED, "report", "names")
+    assert s["env"]["UPLOAD_TESTED_SHA"] == "${{ needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule' }}"
+    assert s["env"]["UPLOAD_TRIAGE_CONTEXT"] == "${{ needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success' }}"
+    env = {
+        "PATH": f"{bin_dir(tmp_path, gh=FAKE_GH_RUN)}:{os.environ['PATH']}",
+        "FAKE_GH_DIR": str(store),
+        "GH_TOKEN": "fake",
+        "REPO": REPO,
+        "RUN_ID": "35714973776",
+        "RUN_ATTEMPT": "2",
+        "UPLOAD_TESTED_SHA": str(tests_passed and event == "schedule").lower(),
+        "UPLOAD_TRIAGE_CONTEXT": str(not tests_passed).lower(),
+    }
+    return run_bash(s["run"], cwd=tmp_path, env=env)
+
+
+def test_report_uploads_when_no_job_took_its_artifact_name(tmp_path):
+    r = check_names(tmp_path, artifacts=[artifact("something-else", 1, "2026-09-22T10:20:00Z")], tests_passed=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "No artifact named triage-context exists in this run yet." in r.stdout
+
+
+def test_report_refuses_a_name_a_job_of_this_attempt_took_and_calls_it_tampering(tmp_path):
+    # A test job that ran third-party code created triage-context during this
+    # attempt (after run_started_at) and before report ran.
+    r = check_names(tmp_path, artifacts=[artifact("triage-context", 900, "2026-09-22T10:28:00Z")], tests_passed=False)
+    assert r.returncode == 1
+    assert "::error::An artifact named triage-context (id 900, created 2026-09-22T10:28:00Z) already exists in this run, created during attempt 2 before this job ran." in r.stdout
+    assert "tampering" in r.stdout
+
+
+def test_report_names_a_previous_attempts_leftover_as_such(tmp_path):
+    r = check_names(tmp_path, artifacts=[artifact("triage-context", 800, "2026-09-22T08:30:00Z")], tests_passed=False)
+    assert r.returncode == 1
+    assert "from before attempt 2 started (2026-09-22T10:15:25Z): a previous attempt's" in r.stdout
+    assert "tampering" not in r.stdout
+
+
+def test_report_checks_only_the_name_it_is_about_to_upload(tmp_path):
+    # A passing scheduled attempt uploads last-inspect-ai-sha; a triage-context
+    # left by an earlier failed attempt is not its concern.
+    r = check_names(tmp_path, artifacts=[artifact("triage-context", 800, "2026-09-22T08:30:00Z")], tests_passed=True)
+    assert r.returncode == 0, r.stdout
+    assert "No artifact named last-inspect-ai-sha exists in this run yet." in r.stdout
+    # ... but a squatted last-inspect-ai-sha stops the upload the skip cache would trust.
+    r = check_names(tmp_path, artifacts=[artifact("last-inspect-ai-sha", 901, "2026-09-22T10:28:00Z")], tests_passed=True)
+    assert r.returncode == 1
+    assert "An artifact named last-inspect-ai-sha (id 901" in r.stdout
+
+
+def test_report_ignores_expired_artifacts_and_uploads_nothing_on_a_passing_push_run(tmp_path):
+    r = check_names(tmp_path, artifacts=[artifact("triage-context", 700, "2026-09-22T10:28:00Z", expired=True)], tests_passed=False)
+    assert r.returncode == 0, r.stdout
+    r = check_names(tmp_path, artifacts=[], tests_passed=True, event="push")
+    assert r.returncode == 0 and "This run uploads no artifact." in r.stdout
+
+
+def test_report_uploads_nothing_when_the_artifact_list_cannot_be_read(tmp_path):
+    r = check_names(tmp_path, artifacts=[], tests_passed=False, fail_api=True)
+    assert r.returncode == 1
+    assert "::error::Could not list this run's artifacts" in r.stdout
+
+
+def test_the_uploads_wait_for_the_name_check_and_the_identity_is_recorded_from_the_upload_outputs():
+    report = workflow_jobs(SCHEDULED)["report"]
+    names = [s.get("name") for s in report["steps"]]
+    assert names[0] == "Refuse an artifact name another job already took"
+    for s in report["steps"]:
+        if s.get("name") in ("Upload Slack thread info for triage", "Upload triage artifact"):
+            assert "steps.names.outcome == 'success'" in s["if"], s["name"]
+        if s.get("name") in ("Save tested inspect_ai SHA as artifact", "Upload tested SHA artifact"):
+            # No always(): a failed name check skips them.
+            assert "always()" not in s["if"], s["name"]
+    upload = step(SCHEDULED, "report", "triage_context")
+    assert upload["uses"].startswith("actions/upload-artifact@") and upload["with"]["name"] == "triage-context"
+    assert "overwrite" not in upload["with"]
+    record = step(SCHEDULED, "report", "Record the triage-context artifact identity")
+    assert record["if"] == "always() && steps.triage_context.outcome == 'success'"
+    assert record["env"] == {"ARTIFACT_ID": "${{ steps.triage_context.outputs.artifact-id }}", "ARTIFACT_DIGEST": "${{ steps.triage_context.outputs.artifact-digest }}"}
+
+
+DIGEST = "63530825b48fcab4917b7b131b7922a24e326c849624ee64fb2ef9f2f9b30cd9"
+
+
+def record_identity(tmp_path: Path, artifact_id: str, digest: str) -> subprocess.CompletedProcess:
+    s = step(SCHEDULED, "report", "Record the triage-context artifact identity")
+    return run_bash(s["run"], cwd=tmp_path, env={"ARTIFACT_ID": artifact_id, "ARTIFACT_DIGEST": digest})
+
+
+def test_the_recorded_identity_is_one_fixed_shape_line(tmp_path):
+    r = record_identity(tmp_path, "10689465503", DIGEST)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == f"triage-context-artifact id=10689465503 digest=sha256:{DIGEST}\n"
+
+
+@pytest.mark.parametrize("artifact_id, digest", [("", DIGEST), ("10689465503", ""), ("123; echo x", DIGEST), ("123", DIGEST.upper()), ("123", DIGEST[:-1])])
+def test_a_malformed_upload_output_records_nothing_and_fails(tmp_path, artifact_id, digest):
+    r = record_identity(tmp_path, artifact_id, digest)
+    assert r.returncode == 1
+    assert "triage-context-artifact id=" not in r.stdout
+    assert "::error::upload-artifact returned no artifact id and digest" in r.stdout

@@ -7,6 +7,19 @@ name: Inspect SWE Nightly Tests
 # inspect_ai scheduled tests, there is deliberately NO skip-if-unchanged
 # check: inspect_swe breaks via upstream drift (weekly inspect_ai releases,
 # agent CLI churn), so re-testing an unchanged commit is the point.
+#
+# nightly-tests runs code this repository does not control: `pip install -e
+# ".[dev]"` resolves inspect_swe's dev closure against PyPI on the day (no
+# lock file, on purpose), sdist build hooks included, and pytest imports it
+# with the provider keys in env. SECURITY.md names that code as an adversary
+# that can take over its job's runner. So the job holds nothing that reaches
+# beyond the job: the token is declared read-only (workflow-level
+# `permissions`) rather than left to the repository's default setting, the
+# checkout does not persist it, and no Actions cache is restored or saved
+# (a cache saved after that code ran would be installed by every later
+# nightly and outlive both the offending release and a key rotation; the
+# same header in inspect-ai-scheduled-tests.yml has the detail).
+# tests/test_scheduled_workflows.py checks this contract.
 
 "on":
   schedule:
@@ -24,6 +37,11 @@ name: Inspect SWE Nightly Tests
         required: false
         default: ""
         type: string
+
+# Read-only job token; nothing in this workflow reads or writes this
+# repository's Actions data.
+permissions:
+  contents: read
 
 jobs:
   nightly-tests:
@@ -52,6 +70,9 @@ jobs:
         with:
           repository: meridianlabs-ai/inspect_swe
           ref: ${{ inputs.inspect_swe_ref || '' }}
+          # The dependency closure and the tests run in this tree; the job
+          # token stays out of its .git/config.
+          persist-credentials: false
 
       - name: Get inspect_swe commit info
         id: swe_commit
@@ -62,18 +83,12 @@ jobs:
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "ref=${INSPECT_SWE_REF:-main}" >> "$GITHUB_OUTPUT"
 
+      # No pip cache (`cache:` on setup-python or actions/cache on
+      # ~/.cache/pip): see the header. Fresh resolution on a fresh runner.
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-swe-pip-${{ hashFiles('**/pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-swe-pip-
 
       - name: Install dependencies
         run: |

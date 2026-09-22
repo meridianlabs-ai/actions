@@ -1,9 +1,11 @@
 """Tests for .github/workflows/triage-test-failures.yml's agent-job scripts.
 
-The workflow's trust boundary is in three places a YAML file cannot test on
-its own: the step that validates the triage-context artifact before any
-field becomes a checkout ref, a step output or the Slack destination; the
-step that composes the landing manifest from what the agent wrote
+The workflow's trust boundary is in four places a YAML file cannot test on
+its own: the step that resolves the triage-context artifact by the identity
+the scheduled run's report job recorded in its own log (any job of that run
+could otherwise supply a same-named artifact) and the step that validates its
+fields before any becomes a checkout ref, a step output or the Slack
+destination; the step that composes the landing manifest from what the agent wrote
 (whitelisting, normalizing, and turning every dropped action into a
 fail_run error); and the agent's permission rules, whose allow list must not
 reach a write outside the landing directory. The step that collects the
@@ -857,3 +859,334 @@ def test_no_secret_input_or_step_output_expression_inside_a_run_script():
         for s in job["steps"]:
             hit = re.search(r"\$\{\{\s*(inputs|steps|needs|secrets|github\.event)\b", s.get("run") or "")
             assert hit is None, f"{job_name} / {s.get('name')}: {hit.group(0)} inside run:"
+
+
+# --- Resolve the trusted triage context -------------------------------------
+#
+# The artifact namespace of a run is shared by its jobs, and the scheduled
+# run's test jobs execute third-party code before the report job uploads
+# triage-context. The step trusts nothing by name: it finds the report job of
+# the attempt it triages, requires its upload step to have succeeded, reads
+# the artifact id and digest that job recorded in its own log, checks them
+# against the run's artifact list and the downloaded bytes, and only then
+# writes triage/slack_thread.json for the shape validation above. Everything
+# short of that is "no context".
+
+SCHEDULED_WORKFLOW = WORKFLOW.parent / "inspect-ai-scheduled-tests.yml"
+RUN_ID = "35714973776"
+REPORT_JOB = 106708300065
+
+FAKE_GH_API = r'''#!/usr/bin/env python3
+"""Stand-in for gh api over one upstream run, from fixtures in $FAKE_GH_DIR:
+the run object, the jobs of each attempt, a job's log, the artifact list and
+an artifact's zip. Every call is appended to calls.log."""
+import json, os, pathlib, re, subprocess, sys
+
+args = sys.argv[1:]
+store = pathlib.Path(os.environ["FAKE_GH_DIR"])
+with (store / "calls.log").open("a") as log:
+    log.write(" ".join(args) + "\n")
+assert args[0] == "api", args
+jq = args[args.index("--jq") + 1] if "--jq" in args else None
+path = [a for a in args[1:] if not a.startswith("-") and a != jq][0].split("?")[0]
+def serve(file, wrap=None):
+    if not file.exists():
+        sys.exit(f"fake gh: HTTP 404 for {path}")
+    return json.dumps({wrap: json.loads(file.read_text())}) if wrap else file.read_text()
+if m := re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/(\d+)/attempts/(\d+)/jobs", path):
+    data = serve(store / "jobs" / f"{m.group(2)}.json", "jobs")
+elif m := re.fullmatch(r"repos/[^/]+/[^/]+/actions/jobs/(\d+)/logs", path):
+    data = serve(store / "logs" / f"{m.group(1)}.txt")
+elif re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+/artifacts", path):
+    data = serve(store / "artifacts.json", "artifacts")
+elif m := re.fullmatch(r"repos/[^/]+/[^/]+/actions/artifacts/(\d+)/zip", path):
+    zip_file = store / "zips" / f"{m.group(1)}.zip"
+    zip_file.exists() or sys.exit(f"fake gh: HTTP 404 for {path}")
+    sys.stdout.buffer.write(zip_file.read_bytes())
+    sys.exit(0)
+elif re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+", path):
+    data = serve(store / "run.json")
+else:
+    sys.exit(f"fake gh: unexpected call {args}")
+if jq is not None:
+    data = subprocess.run(["jq", "-r", jq], input=data, text=True, capture_output=True, check=True).stdout
+sys.stdout.write(data)
+'''
+
+
+def context_zip(fields: dict) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("slack_thread.json", json.dumps(fields))
+    return buf.getvalue()
+
+
+def sha256(data: bytes) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def report_job(upload: str | None = "success", job_id: int = REPORT_JOB, name: str = "report") -> dict:
+    steps = [{"name": "Set up job", "conclusion": "success"}, {"name": "Report test results to Slack", "conclusion": "success"}]
+    if upload is not None:
+        steps.append({"name": "Upload triage artifact", "conclusion": upload})
+    return {"id": job_id, "name": name, "conclusion": "success" if upload != "failure" else "failure", "run_attempt": 1, "steps": steps}
+
+
+def report_log(*identities: tuple[int, str], job_id: int = REPORT_JOB) -> str:
+    """The report job's log as the API serves it: timestamped lines, CRLF, the
+    runner's echo of the recording step's script (with `$ARTIFACT_ID` unexpanded)
+    and the identity line(s) the step printed."""
+    lines = [
+        "﻿2026-09-22T10:29:20.2622752Z Current runner version: '2.337.0'",
+        "2026-09-22T10:29:22.6000000Z ##[group]Run if ! [[ \"$ARTIFACT_ID\" =~ ^[0-9]+$ && \"$ARTIFACT_DIGEST\" =~ ^[0-9a-f]{64}$ ]]; then",
+        "2026-09-22T10:29:22.6000001Z \x1b[36;1m  echo \"triage-context-artifact id=$ARTIFACT_ID digest=sha256:$ARTIFACT_DIGEST\"\x1b[0m",
+        "2026-09-22T10:29:22.6000002Z env:",
+        "2026-09-22T10:29:22.6000003Z   ARTIFACT_ID: 10689465503",
+        "2026-09-22T10:29:22.6000004Z ##[endgroup]",
+    ]
+    lines += [f"2026-09-22T10:29:22.7000000Z triage-context-artifact id={i} digest={d}" for i, d in identities]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def api_artifact(id: int, data: bytes, name: str = "triage-context", expired: bool = False, digest: str | None = None) -> dict:
+    return {"id": id, "name": name, "digest": digest or sha256(data), "expired": expired, "size_in_bytes": len(data),
+            "workflow_run": {"id": int(RUN_ID), "head_branch": "main"}}
+
+
+def resolve(tmp_path: Path, *, jobs: dict, logs: dict, artifacts: list, zips: dict, attempt: str = "1", run_attempt: int = 1) -> tuple[dict | None, subprocess.CompletedProcess, list[str]]:
+    """Run the step with the fixtures; return the context it wrote (or None), the process and the gh calls."""
+    store = tmp_path / "gh"
+    (store / "jobs").mkdir(parents=True)
+    (store / "logs").mkdir()
+    (store / "zips").mkdir()
+    (store / "run.json").write_text(json.dumps({"id": int(RUN_ID), "run_attempt": run_attempt, "event": "schedule"}))
+    for n, job_list in jobs.items():
+        (store / "jobs" / f"{n}.json").write_text(json.dumps(job_list))
+    for job_id, text in logs.items():
+        (store / "logs" / f"{job_id}.txt").write_text(text)
+    (store / "artifacts.json").write_text(json.dumps(artifacts))
+    for artifact_id, data in zips.items():
+        (store / "zips" / f"{artifact_id}.zip").write_bytes(data)
+    gh = tmp_path / "bin" / "gh"
+    gh.parent.mkdir()
+    gh.write_text(FAKE_GH_API)
+    gh.chmod(0o755)
+    (tmp_path / "triage").mkdir()
+    (tmp_path / "triage" / "failed.log").write_text("FAILED tests/x.py::test_y\n")
+    s = agent_step("Resolve the trusted triage context")
+    assert set(s["env"]) == {"GH_TOKEN", "REPO", "UPSTREAM_RUN_ATTEMPT"}
+    assert s["env"]["UPSTREAM_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt || '' }}"
+    env = {"PATH": f"{gh.parent}:{os.environ['PATH']}", "FAKE_GH_DIR": str(store), "GH_TOKEN": "fake", "REPO": "meridianlabs-ai/actions",
+           "UPSTREAM_RUN_ID": RUN_ID, "UPSTREAM_RUN_ATTEMPT": attempt}
+    r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]], cwd=tmp_path, env={**os.environ, **env},
+                       text=True, capture_output=True, check=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "No trusted triage context" in r.stdout or "Trusted triage context: artifact" in r.stdout, r.stdout
+    written = tmp_path / "triage" / "slack_thread.json"
+    calls = (store / "calls.log").read_text().splitlines()
+    assert (tmp_path / "triage" / "failed.log").read_text() == "FAILED tests/x.py::test_y\n"
+    return (json.loads(written.read_text()) if written.exists() else None), r, calls
+
+
+GENUINE = {"channel": "C099JCXDC06", "thread_ts": "1790072961.576449", "inspect_ai_sha": SHA, "inspect_ai_ref": "main"}
+HOSTILE = {"channel": "C0EVIL00000", "thread_ts": "1.2", "inspect_ai_sha": "f" * 40, "inspect_ai_ref": "main"}
+GENUINE_ZIP = context_zip(GENUINE)
+HOSTILE_ZIP = context_zip(HOSTILE)
+GENUINE_ID = 10689465503
+SQUAT_ID = 10689400000
+
+
+def test_resolve_takes_the_context_the_report_job_recorded(tmp_path):
+    ctx, r, calls = resolve(
+        tmp_path,
+        jobs={"1": [{"id": 1, "name": "check-commit", "conclusion": "success", "steps": []}, report_job()]},
+        logs={REPORT_JOB: report_log((GENUINE_ID, sha256(GENUINE_ZIP)))},
+        artifacts=[api_artifact(GENUINE_ID, GENUINE_ZIP)],
+        zips={GENUINE_ID: GENUINE_ZIP},
+    )
+    assert ctx == GENUINE
+    assert f"Trusted triage context: artifact {GENUINE_ID} ({sha256(GENUINE_ZIP)}), uploaded by report job {REPORT_JOB} in attempt 1 of run {RUN_ID}." in r.stdout
+    assert "::warning::" not in r.stdout
+    # The attempt from the event, the report job's own log, the artifact by id: nothing by name.
+    assert any(f"actions/runs/{RUN_ID}/attempts/1/jobs" in c for c in calls)
+    assert any(f"actions/jobs/{REPORT_JOB}/logs" in c for c in calls)
+    assert any(f"actions/artifacts/{GENUINE_ID}/zip" in c for c in calls)
+    assert not any("run download" in c or "--name" in c for c in calls)
+    assert not any(f"actions/runs/{RUN_ID}\"" in c or c.endswith(f"actions/runs/{RUN_ID}") for c in calls), "the event named the attempt; the run object is not needed"
+
+
+def test_resolve_ignores_a_squatted_artifact_and_names_the_conflict(tmp_path):
+    # A test job created triage-context first; the report job's upload failed
+    # on the name conflict and recorded nothing. The hostile context is never
+    # downloaded, and the run's shape-valid fields never reach the outputs.
+    ctx, r, calls = resolve(
+        tmp_path,
+        jobs={"1": [report_job(upload="failure")]},
+        logs={REPORT_JOB: report_log()},
+        artifacts=[api_artifact(SQUAT_ID, HOSTILE_ZIP)],
+        zips={SQUAT_ID: HOSTILE_ZIP},
+    )
+    assert ctx is None
+    assert "::warning::The report job's triage-context upload ended 'failure' in attempt 1" in r.stdout
+    assert "a job that ran third-party code created an artifact named triage-context before the report job could" in r.stdout
+    assert not any("/zip" in c for c in calls)
+    assert "C0EVIL00000" not in r.stdout
+
+
+def test_resolve_ignores_a_squat_even_when_the_report_job_claims_success_for_another_id(tmp_path):
+    # Belt and braces: the report job recorded its own id; a same-named
+    # artifact with another id (a squat, or a previous attempt's) is named
+    # and ignored, and the recorded one is used.
+    ctx, r, calls = resolve(
+        tmp_path,
+        jobs={"1": [report_job()]},
+        logs={REPORT_JOB: report_log((GENUINE_ID, sha256(GENUINE_ZIP)))},
+        artifacts=[api_artifact(SQUAT_ID, HOSTILE_ZIP), api_artifact(GENUINE_ID, GENUINE_ZIP)],
+        zips={SQUAT_ID: HOSTILE_ZIP, GENUINE_ID: GENUINE_ZIP},
+    )
+    assert ctx == GENUINE
+    assert f"::warning::Run {RUN_ID} also carries triage-context artifact(s) {SQUAT_ID} that the report job of attempt 1 did not produce" in r.stdout
+    assert not any(f"actions/artifacts/{SQUAT_ID}/zip" in c for c in calls)
+
+
+@pytest.mark.parametrize("upload, needle", [("skipped", "upload step: skipped"), (None, "upload step: absent")])
+def test_resolve_has_no_context_when_the_report_job_uploaded_none(tmp_path, upload, needle):
+    # The run passed, or its Slack notification failed: not a conflict, no warning.
+    ctx, r, _ = resolve(tmp_path, jobs={"1": [report_job(upload=upload)]}, logs={REPORT_JOB: report_log()},
+                        artifacts=[api_artifact(SQUAT_ID, HOSTILE_ZIP)], zips={SQUAT_ID: HOSTILE_ZIP})
+    assert ctx is None
+    assert needle in r.stdout and "::warning::" not in r.stdout
+
+
+@pytest.mark.parametrize(
+    "jobs, needle",
+    [
+        ([{"id": 1, "name": "check-commit", "conclusion": "failure", "steps": []}], "has 0 jobs named report"),
+        ([report_job(), report_job(job_id=REPORT_JOB + 1)], "has 2 jobs named report"),
+        ([report_job(name="report ", job_id=REPORT_JOB)], "has 0 jobs named report"),
+    ],
+    ids=["no-report-job", "two-report-jobs", "near-miss-name"],
+)
+def test_resolve_needs_exactly_one_report_job_in_the_attempt(tmp_path, jobs, needle):
+    ctx, r, calls = resolve(tmp_path, jobs={"1": jobs}, logs={REPORT_JOB: report_log((GENUINE_ID, sha256(GENUINE_ZIP)))},
+                            artifacts=[api_artifact(GENUINE_ID, GENUINE_ZIP)], zips={GENUINE_ID: GENUINE_ZIP})
+    assert ctx is None
+    assert needle in r.stdout
+    assert not any("/logs" in c or "/zip" in c for c in calls)
+
+
+@pytest.mark.parametrize(
+    "log, needle",
+    [
+        (report_log(), "records 0 triage-context artifact identities"),                                 # a producer from before this contract
+        (report_log((GENUINE_ID, sha256(GENUINE_ZIP)), (SQUAT_ID, sha256(HOSTILE_ZIP))), "records 2"),  # two identities: ambiguous
+        (report_log((GENUINE_ID, sha256(GENUINE_ZIP).upper())), "records 0"),                          # not the fixed shape
+        (report_log() + f"2026-09-22T10:29:23.0000000Z triage-context-artifact id={GENUINE_ID}; rm -rf / digest={sha256(GENUINE_ZIP)}\r\n", "records 0"),
+        (report_log() + f"2026-09-22T10:29:23.0000000Z FAILED triage-context-artifact id={GENUINE_ID} digest={sha256(GENUINE_ZIP)}\r\n", "records 0"),
+    ],
+    ids=["no-line", "two-lines", "uppercase-digest", "shell-in-id", "not-at-line-start"],
+)
+def test_resolve_needs_exactly_one_well_formed_identity_in_the_report_log(tmp_path, log, needle):
+    ctx, r, calls = resolve(tmp_path, jobs={"1": [report_job()]}, logs={REPORT_JOB: log},
+                            artifacts=[api_artifact(GENUINE_ID, GENUINE_ZIP)], zips={GENUINE_ID: GENUINE_ZIP})
+    assert ctx is None
+    assert needle in r.stdout
+    assert not any("/zip" in c for c in calls)
+
+
+def test_resolve_refuses_an_artifact_that_left_the_run_or_changed(tmp_path):
+    # Deleted or replaced after the report job recorded it: the recorded id
+    # is gone, and no same-named artifact stands in for it.
+    ctx, r, calls = resolve(tmp_path, jobs={"1": [report_job()]}, logs={REPORT_JOB: report_log((GENUINE_ID, sha256(GENUINE_ZIP)))},
+                            artifacts=[api_artifact(SQUAT_ID, HOSTILE_ZIP)], zips={SQUAT_ID: HOSTILE_ZIP})
+    assert ctx is None
+    assert f"Artifact {GENUINE_ID}, which the report job recorded, is no longer in run {RUN_ID}" in r.stdout
+    assert not any("/zip" in c for c in calls)
+    # Same id, but the API's digest, name or expiry disagrees with the record.
+    for bad in (api_artifact(GENUINE_ID, HOSTILE_ZIP), api_artifact(GENUINE_ID, GENUINE_ZIP, name="triage-context-2"), api_artifact(GENUINE_ID, GENUINE_ZIP, expired=True)):
+        ctx, r, calls = resolve(tmp_path / bad["name"] / str(bad["expired"]) / bad["digest"][-8:], jobs={"1": [report_job()]},
+                                logs={REPORT_JOB: report_log((GENUINE_ID, sha256(GENUINE_ZIP)))}, artifacts=[bad], zips={GENUINE_ID: HOSTILE_ZIP})
+        assert ctx is None
+        assert f"Artifact {GENUINE_ID} is not the unexpired triage-context artifact with digest {sha256(GENUINE_ZIP)}" in r.stdout
+        assert not any("/zip" in c for c in calls)
+
+
+def test_resolve_checks_the_downloaded_bytes_against_the_recorded_digest(tmp_path):
+    # The API agrees with the record but the bytes served do not: nothing is kept.
+    ctx, r, _ = resolve(tmp_path, jobs={"1": [report_job()]}, logs={REPORT_JOB: report_log((GENUINE_ID, sha256(GENUINE_ZIP)))},
+                        artifacts=[api_artifact(GENUINE_ID, GENUINE_ZIP)], zips={GENUINE_ID: HOSTILE_ZIP})
+    assert ctx is None
+    assert f"Downloaded artifact {GENUINE_ID} has digest {sha256(HOSTILE_ZIP)}, not the {sha256(GENUINE_ZIP)} the report job recorded" in r.stdout
+    assert not (tmp_path / "triage" / "triage-context.zip").exists()
+
+
+def test_resolve_needs_the_context_file_inside_the_artifact(tmp_path):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("other.json", "{}")
+    data = buf.getvalue()
+    ctx, r, _ = resolve(tmp_path, jobs={"1": [report_job()]}, logs={REPORT_JOB: report_log((GENUINE_ID, sha256(data)))},
+                        artifacts=[api_artifact(GENUINE_ID, data)], zips={GENUINE_ID: data})
+    assert ctx is None and f"Artifact {GENUINE_ID} holds no slack_thread.json" in r.stdout
+
+
+def test_resolve_binds_to_the_attempt_that_fired_and_a_dispatch_gets_the_latest(tmp_path):
+    # Attempt 1's report job failed its upload (a squat); the re-run's report
+    # job (attempt 2) uploaded and recorded its own artifact. The event names
+    # attempt 2, and the run's artifact list spans both attempts.
+    attempt2_job = REPORT_JOB + 1
+    fixtures = dict(
+        jobs={"1": [report_job(upload="failure")], "2": [report_job(job_id=attempt2_job)]},
+        logs={REPORT_JOB: report_log(), attempt2_job: report_log((GENUINE_ID, sha256(GENUINE_ZIP)), job_id=attempt2_job)},
+        artifacts=[api_artifact(SQUAT_ID, HOSTILE_ZIP), api_artifact(GENUINE_ID, GENUINE_ZIP)],
+        zips={SQUAT_ID: HOSTILE_ZIP, GENUINE_ID: GENUINE_ZIP},
+    )
+    ctx, r, calls = resolve(tmp_path / "event", attempt="2", run_attempt=2, **fixtures)
+    assert ctx == GENUINE
+    assert any("/attempts/2/jobs" in c for c in calls) and not any("/attempts/1/jobs" in c for c in calls)
+    assert f"artifact(s) {SQUAT_ID}" in r.stdout
+    # A dispatch (no event attempt) asks the run for its latest attempt.
+    ctx, r, calls = resolve(tmp_path / "dispatch", attempt="", run_attempt=2, **fixtures)
+    assert ctx == GENUINE
+    assert any(c.split()[1].split("?")[0] == f"repos/meridianlabs-ai/actions/actions/runs/{RUN_ID}" for c in calls)
+    assert any("/attempts/2/jobs" in c for c in calls)
+    # The event's attempt 1 (its own completion) sees only attempt 1's failed upload.
+    ctx, r, calls = resolve(tmp_path / "attempt1", attempt="1", run_attempt=2, **fixtures)
+    assert ctx is None and "upload ended 'failure' in attempt 1" in r.stdout
+
+
+def test_the_producers_recorded_line_is_what_the_consumer_reads(tmp_path):
+    # The contract between the two workflows, end to end: the report job's
+    # recording step (inspect-ai-scheduled-tests.yml) prints the line, the
+    # runner prefixes a timestamp, and this step reads it back.
+    record = next(s for s in yaml.safe_load(SCHEDULED_WORKFLOW.read_text())["jobs"]["report"]["steps"]
+                  if s.get("name") == "Record the triage-context artifact identity")
+    digest = sha256(GENUINE_ZIP)
+    printed = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", record["run"]], cwd=tmp_path,
+                             env={**os.environ, "ARTIFACT_ID": str(GENUINE_ID), "ARTIFACT_DIGEST": digest.split(":")[1]},
+                             text=True, capture_output=True, check=True).stdout
+    assert printed.count("\n") == 1
+    log = report_log() + "2026-09-22T10:29:22.7000000Z " + printed.replace("\n", "\r\n")
+    ctx, r, _ = resolve(tmp_path, jobs={"1": [report_job()]}, logs={REPORT_JOB: log},
+                        artifacts=[api_artifact(GENUINE_ID, GENUINE_ZIP)], zips={GENUINE_ID: GENUINE_ZIP})
+    assert ctx == GENUINE
+    # And the shape validation step then passes the fields through as usual.
+    gh_out = tmp_path / "output.txt"
+    gh_out.touch()
+    v = run_bash(agent_step("context")["run"], cwd=tmp_path, env={"GITHUB_OUTPUT": str(gh_out)})
+    assert v.returncode == 0, v.stderr
+    assert parse_outputs(gh_out.read_text()) == {"sha": SHA, "exact": "true", "channel": "C099JCXDC06", "thread_ts": "1790072961.576449"}
+
+
+def test_resolve_runs_before_the_validation_and_after_harden_runner():
+    names = [s.get("name") for s in load_workflow()["jobs"]["agent"]["steps"]]
+    assert names.index("Harden runner") < names.index("Resolve the trusted triage context") < names.index("Validate the triage context")
+    assert "Download triage-context artifact" not in names

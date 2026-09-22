@@ -51,13 +51,52 @@ and its satellites, and nothing that serves end users:
   unrestricted ref directly to checkout, and triage passes the selected run
   ID to `gh` as a quoted argument.
 - **Prior-run artifacts are trusted by provenance where a workflow checks
-  it.** A push or dispatch run executes whatever copy of a workflow its
-  branch carries, so the scheduled-test skip cache accepts a last-tested
-  SHA only from a successful scheduled run on the default branch. Automatic
-  triage is gated on a failed scheduled test run; manual triage trusts the
-  run the dispatcher selects and validates its context fields (a 40-hex
-  SHA, a Slack channel ID, a Slack timestamp) without independently
-  checking that run's event or branch.
+  it, and a run is not a producer.** A push or dispatch run executes
+  whatever copy of a workflow its branch carries, so the scheduled-test
+  skip cache accepts a last-tested SHA only from a successful scheduled run
+  on the default branch. Within a run, the artifact namespace is shared by
+  every job, and the scheduled run's `slow-tests` and `static-analysis`
+  jobs execute third-party code before the `report` job uploads, so the
+  name `triage-context` in a failed scheduled run proves nothing about who
+  wrote it. Triage therefore consumes only the artifact whose id and digest
+  the `report` job recorded in its own job log (a channel no other job of
+  the run can write to), found through the jobs API for the attempt being
+  triaged, checked against the run's artifact list and against the
+  downloaded bytes, and only then shape-validated (a 40-hex SHA, a Slack
+  channel ID, a Slack timestamp). A `report` job whose upload did not
+  succeed, a log with no or several recorded identities, an id missing from
+  the run or a digest that does not match all mean "no context": the reply
+  goes to the default Slack destination and the agent investigates
+  upstream `main` with `exact=false`. Manual triage trusts the run the
+  dispatcher selects and its latest attempt, with the same producer check,
+  without independently checking that run's event or branch. The skip
+  cache's `last-inspect-ai-sha` has no such binding: it is accepted only
+  from a run whose conclusion is success, and the `report` job refuses to
+  upload either name when an artifact with it already exists in the run
+  (no `overwrite`), so a squatted name fails the run instead of being
+  recorded; the worst a forged value could do there is make one scheduled
+  run skip a commit. What this rests on: a job's log is written by that
+  job's steps alone, and `actions/upload-artifact` refuses a duplicate name
+  unless told to overwrite (documented). Not established here: that code in
+  a test job can recover the runner's artifact-service token and upload
+  (a published technique, not reproduced), and how artifacts of a previous
+  attempt interact with a re-run's uploads; the consumer does not depend on
+  either, since it takes the attempt's own `report` job as the producer
+  and its recorded id as the artifact.
+- **Jobs that run the dependency closure hold nothing that reaches beyond
+  the job.** The scheduled suites install upstream's dev closure from PyPI
+  unlocked (the point of the run) and execute it. Their job token is
+  declared read-only in the workflow (`permissions: contents: read`, with
+  `actions: read` only on the jobs that read this repository's run data),
+  so its reach does not depend on the repository's default token setting;
+  the checkouts do not persist it; and no Actions cache is restored or
+  saved in those jobs, because a cache written after that code ran would
+  be installed by every later scheduled run, before the keys-bearing step,
+  and would outlive the offending release and a key rotation. The default
+  token setting itself was not read (the API query needs repository
+  administration), and no write exploit was observed: the job logs of runs
+  before the declaration already listed Contents, Metadata and Packages as
+  read-only, so the declaration fixes in the file what a setting provided.
 - **Triage's issue policies are enforced on the agent's runner.** The
   triage workflow's "Compose landing manifest" step reduces an issue's
   labels to `auto` and its assignees to `ransomr`, keeps one issue action
@@ -130,9 +169,16 @@ and its satellites, and nothing that serves end users:
 - Artifact content is validated against a shape before it becomes a ref, an
   output or a destination, and a value that fails its check is dropped, not
   passed on; the scheduled-test skip cache also checks its producer's event
-  and branch (see the trust boundaries above for where that check stops).
-- The Slack destination of a triage reply comes from the validated context
-  of the failed run, never from the agent's manifest. The release-note
+  and branch, and triage checks that the `report` job produced its context
+  before reading a field (see the trust boundaries above for where those
+  checks stop).
+- The scheduled test workflows declare a read-only job token, persist no
+  credential into a checkout and use no Actions cache; the `report` job
+  refuses to upload an artifact name that already exists in its run.
+- The Slack destination of a triage reply comes from the context of the
+  failed run that its `report` job produced, never from the agent's
+  manifest and never from a same-named artifact another job of that run
+  supplied. The release-note
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
