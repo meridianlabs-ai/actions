@@ -108,8 +108,17 @@ and its satellites, and nothing that serves end users:
   every job secret for masking; cannot `sudo` or reach Docker; and runs under
   `env -i` with no runner command-file variables (so it cannot rewrite a
   later trusted step) and no OIDC request variables (so it cannot mint
-  tokens). The isolated-agent action runs an isolation check as the agent
-  user and fails the job before the agent if any of that does not hold. The
+  tokens). Its reach into the filesystem is explicit: the runner's home is
+  private, so the action gives the agent user search-only (`--x`) ACL entries
+  on the ancestors of the workspace, the staged prompt and the output
+  directory that deny it traversal, and nothing else (no read, so it cannot
+  list those directories; no recursive or other-user change), then verifies
+  as the agent that those paths, the check script and the Claude Code
+  install are reachable. Files under a granted directory keep their own
+  modes, so what the runner keeps private stays private. The isolated-agent
+  action runs an isolation check as the agent user and fails the job before
+  the agent if any of that does not hold, including if the runner's own
+  registration credentials in its install directory are readable. The
   triage agent's tools are reads plus file writes under the landing
   directory; the writes it wants are a manifest that the `land` job validates
   and performs. Claude Code checks the target of a shell output redirect

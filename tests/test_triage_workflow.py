@@ -422,6 +422,18 @@ def test_compose_failed_agent_step_is_an_error(tmp_path):
     assert "outcome 'failure'" in extra["error"]["message"]
 
 
+def test_compose_agent_that_never_ran_is_an_unknown_outcome_error(tmp_path):
+    # The isolated-agent action failed in its setup or isolation check, before
+    # the run step that writes `conclusion` (the 2026-09-22 bootstrap failure,
+    # run 35752826766): the output is empty, and compose reports the triage as
+    # failed with outcome 'unknown' rather than landing nothing quietly.
+    extra, r = compose(tmp_path, None, outcome="")
+    assert extra["error"]["fail_run"] is True
+    assert "outcome 'unknown'" in extra["error"]["message"]
+    assert "no Slack reply" not in extra["error"]["message"]  # only a run that happened owes one
+    assert "::error::landing: the triage agent step ended with outcome 'unknown'." in r.stdout
+
+
 def test_compose_unparsable_manifest_lands_nothing_and_fails(tmp_path):
     extra, _ = compose(tmp_path, "{nope", files=["slack.txt"])
     assert "issues" not in extra and "slack" not in extra

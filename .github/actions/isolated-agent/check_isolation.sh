@@ -20,7 +20,13 @@
 #  - kernel.yama.ptrace_scope is 1 or stricter (defence in depth behind the
 #    UID boundary);
 #  - the runner command files handed to this check are not writable by the
-#    agent, so it cannot rewrite a later trusted step's environment.
+#    agent, so it cannot rewrite a later trusted step's environment;
+#  - the runner's own registration credentials in its install directory
+#    (RUNNER_ROOT, found by the check step) are not readable by the agent:
+#    setup grants the agent search-only access through the runner's private
+#    home to reach the workspace, so those files' own modes are what keeps
+#    them closed, and this makes that a checked fact rather than an
+#    assumption.
 set -uo pipefail
 
 BROKER_HOME="${BROKER_HOME:-/var/lib/model-broker}"
@@ -115,6 +121,18 @@ for f in ${RUNNER_COMMAND_FILES:-}; do
   [ -e "$f" ] || continue
   if ( : >>"$f" ) 2>/dev/null; then fail "runner command file $f is writable by the agent"; fi
 done
+
+# The runner's registration credentials must stay closed. The agent has
+# search-only access through the runner's home (setup granted it to reach the
+# workspace), so a world-readable file there is reachable by name; these two
+# are the files under that home that would matter, and their own modes must
+# deny the agent. A missing file reads as closed too (no runner root in the
+# tests, or a runner that keeps them elsewhere).
+if [ -n "${RUNNER_ROOT:-}" ]; then
+  for name in .credentials .credentials_rsaparams; do
+    cat "$RUNNER_ROOT/$name" >/dev/null 2>&1 && fail "$RUNNER_ROOT/$name (the runner's registration credential) is readable by the agent"
+  done
+fi
 
 # The broker answers on loopback; a wrong token and a foreign route are
 # refused before any upstream call.

@@ -326,12 +326,28 @@ def test_action_passes_inputs_through_env_and_writes_outputs_with_heredocs():
 # probe still passes (DAC blocks a cross-UID mem read or 0600-socket connect
 # without Yama), so the container still proves the boundary that closes B2.
 # Set MODEL_BROKER_SKIP_DOCKER=1 to skip this layer.
+#
+# The filesystem layout is the hosted runner's, not /tmp: the workspace,
+# RUNNER_TEMP and the runner's install directory all sit under the runner's
+# PRIVATE home (/home/runner, 0750 — Ubuntu's useradd default, and what the
+# 2026-09-22 ci-perf and triage runs hit: "fatal: failed to stat
+# '/home/runner/work/actions/actions': Permission denied" from the first git
+# run as the agent), with this repo's actions checked out inside the
+# workspace as `actions-repo`, where both callers put them. The stand-in
+# Runner.Worker is started from that install directory next to 0600
+# .credentials files, so the check step's runner-root lookup and its
+# credential probe run against the real thing.
 
 IMAGE = "ubuntu:24.04"
 ACTIONS_MOUNT = ROOT / ".github" / "actions"
 AGENT_USER = "claude-agent"
-WRITE_DIR = "/tmp/agent-out"
-RUNNER_TEMP = "/tmp/rt"
+RUNNER_HOME = "/home/runner"
+WORKSPACE = f"{RUNNER_HOME}/work/actions/actions"
+RUNNER_TEMP = f"{RUNNER_HOME}/work/_temp"
+WRITE_DIR = f"{RUNNER_TEMP}/agent-out"
+ACTION_PATH = f"{WORKSPACE}/actions-repo/.github/actions/isolated-agent"
+RUNNER_ROOT = f"{RUNNER_HOME}/runners/2.0.0"
+SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SENTINEL_SECRET = "SENTINEL-RUNNER-WORKER-SECRET-" + "z" * 40
 EXPOSED_SECRET = "EXPOSED-IN-ARGV-POSITIVE-CONTROL-" + "q" * 40
 
@@ -372,15 +388,17 @@ open("/tmp/sentinel.pid", "w").write(str(os.getpid()))
 while True: time.sleep(1)
 '''
 
-# A stand-in `claude`: records who it ran as, its whole environment, cwd and
-# argv into the write-dir the prompt named (forwarded as AGENT_RECORD_DIR), so
-# the test can prove the run happened as the agent under env -i.
+# A stand-in `claude`: records who it ran as, its whole environment, cwd, argv
+# and a listing of its working directory into the write-dir the prompt named
+# (forwarded as AGENT_RECORD_DIR), so the test can prove the run happened as
+# the agent under env -i, in a workspace the agent can read.
 FAKE_CLAUDE = r'''#!/usr/bin/env bash
 d="${AGENT_RECORD_DIR:?the agent got no record dir}"
 id -un > "$d/whoami"
 /usr/bin/env > "$d/env.txt"
 pwd > "$d/cwd"
 printf '%s\n' "$@" > "$d/argv"
+ls -A . > "$d/workdir-listing" 2>&1
 echo "analysis report" > "$d/report.md"
 exit 0
 '''
@@ -423,10 +441,13 @@ class Container:
     def __init__(self, name: str):
         self.name = name
 
-    def run(self, *args: str, user: str | None = None, env: dict | None = None, stdin: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    def run(self, *args: str, user: str | None = None, env: dict | None = None, stdin: str | None = None,
+            cwd: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
         cmd = ["docker", "exec", "-i"]
         if user:
             cmd += ["-u", user]
+        if cwd:
+            cmd += ["-w", cwd]
         for key, value in (env or {}).items():
             cmd += ["-e", f"{key}={value}"]
         r = subprocess.run(cmd + [self.name, *args], input=stdin, text=True, capture_output=True, check=False)
@@ -437,10 +458,11 @@ class Container:
     def write(self, path: str, text: str, mode: str = "0644") -> None:
         self.run("sh", "-c", f"cat > {path} && chmod {mode} {path}", stdin=text)
 
-    def bash_step(self, step: dict, env: dict, *, user: str = "runner", check: bool = True) -> subprocess.CompletedProcess:
-        """Lift a composite step's `run:` body and execute it verbatim."""
+    def bash_step(self, step: dict, env: dict, *, user: str = "runner", cwd: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+        """Lift a composite step's `run:` body and execute it verbatim (from the
+        workspace, as the runner runs a step, when `cwd` says so)."""
         self.write("/tmp/step.sh", step["run"], "0755")
-        return self.run("bash", "--noprofile", "--norc", "-eo", "pipefail", "/tmp/step.sh", user=user, env=env, check=check)
+        return self.run("bash", "--noprofile", "--norc", "-eo", "pipefail", "/tmp/step.sh", user=user, env=env, cwd=cwd, check=check)
 
 
 @pytest.fixture(scope="session")
@@ -454,11 +476,30 @@ def container():
     c = Container(name)
     try:
         c.run("sh", "-c", "apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "
-              "python3 sudo ca-certificates openssl procps util-linux git >/dev/null")
+              "python3 sudo ca-certificates openssl procps util-linux git acl >/dev/null")
         # The runner user: unprivileged but with passwordless sudo, KEPT (the
         # new design does not drop the runner's sudo; the agent user is the
-        # one that has none).
-        c.run("sh", "-c", "useradd -m -u 1001 runner && echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner && chmod 440 /etc/sudoers.d/runner")
+        # one that has none). Its home is private, as useradd makes it on
+        # Ubuntu (HOME_MODE 0750) and as the hosted failure implies; the
+        # chmod pins that so the test does not depend on the image's
+        # login.defs.
+        c.run("sh", "-c", "useradd -m -u 1001 runner && chmod 0750 /home/runner"
+              " && echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner && chmod 440 /etc/sudoers.d/runner")
+        # The hosted layout under that private home, all runner-owned with
+        # umask 022 (world-readable, like a checkout): the workspace holding
+        # this repo's actions as `actions-repo`, RUNNER_TEMP, the runner's
+        # install directory with a Runner.Worker (a python3 copy that runs the
+        # sentinel below) and 0600 registration credentials, and a private
+        # 0600 file and 0700 directory the traversal grants must not open.
+        c.run("sh", "-c",
+              f"umask 022 && mkdir -p {WORKSPACE}/actions-repo/.github {RUNNER_TEMP} {RUNNER_ROOT}/bin"
+              f" && cp -r /actions {WORKSPACE}/actions-repo/.github/actions"
+              f" && cp -L /usr/bin/python3 {RUNNER_ROOT}/bin/Runner.Worker"
+              f" && (umask 077 && echo '{{\"scheme\":\"OAuth\"}}' > {RUNNER_ROOT}/.credentials"
+              f"     && echo 'rsa-private-key' > {RUNNER_ROOT}/.credentials_rsaparams"
+              f"     && echo runner-private > {RUNNER_HOME}/.private && mkdir {RUNNER_HOME}/private-dir"
+              f"     && echo runner-private > {RUNNER_HOME}/private-dir/x)",
+              user="runner")
         # A `docker` binary that reports the daemon unreachable, so the check's
         # docker probe is meaningful (there is no daemon in the container).
         c.write("/usr/local/bin/docker", "#!/bin/sh\necho 'Cannot connect to the Docker daemon' >&2\nexit 1\n", "0755")
@@ -511,26 +552,34 @@ def env(container: Container) -> dict:
         "STOP_FILE": "/tmp/model-broker.stop", "ACTION_PATH": "/actions/model-broker", "GITHUB_OUTPUT": "/tmp/broker_output",
     })
     outputs = parse_outputs_file(container.run("cat", "/tmp/broker_output", user="runner").stdout)
-    # The sentinel .NET-like runner process (owned by runner, secret in memory).
+    # The sentinel .NET-like runner process (owned by runner, secret in
+    # memory), started as Runner.Worker from the runner's install directory so
+    # the check step finds that directory the way it does on a hosted runner.
     subprocess.run(["docker", "exec", "-d", "-u", "runner", "-e", "TMPDIR=/tmp",
                     "-e", f"SENTINEL_SECRET={SENTINEL_SECRET}", container.name,
-                    "python3", "/usr/local/lib/sentinel.py"], check=True)
+                    f"{RUNNER_ROOT}/bin/Runner.Worker", "/usr/local/lib/sentinel.py"], check=True)
     for _ in range(100):
         if container.run("test", "-f", "/tmp/sentinel.pid", check=False).returncode == 0:
             break
         time.sleep(0.1)
-    # isolated-agent SETUP (verbatim, as runner with sudo).
-    container.bash_step(ia_step("Set up the isolated agent user"), {
+    # isolated-agent SETUP (verbatim, as runner with sudo), from the workspace
+    # as a composite step runs, with the paths the callers pass.
+    setup = container.bash_step(ia_step("Set up the isolated agent user"), {
         "AGENT_USER": AGENT_USER, "WRITE_DIR": WRITE_DIR, "AGENT_PROMPT": "analyze the thing",
-        "AGENT_SETTINGS": '{"permissions": {"allow": ["Read"]}}', "WORK_DIR": "/tmp",
-        "RUNNER_TEMP": RUNNER_TEMP, "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    })
+        "AGENT_SETTINGS": '{"permissions": {"allow": ["Read"]}}', "WORK_DIR": WORKSPACE,
+        "RUNNER_TEMP": RUNNER_TEMP, "GITHUB_ACTION_PATH": ACTION_PATH, "PATH": SYSTEM_PATH,
+    }, cwd=WORKSPACE)
+    outputs["setup_log"] = setup.stdout
     outputs["sentinel_pid"] = container.run("cat", "/tmp/sentinel.pid").stdout.strip()
     return outputs
 
 
+def as_user(container: Container, user: str, *args: str, check: bool = False) -> subprocess.CompletedProcess:
+    return container.run("sudo", "-n", "-u", user, "--", *args, user="runner", check=check)
+
+
 def as_agent(container: Container, *args: str, check: bool = False) -> subprocess.CompletedProcess:
-    return container.run("sudo", "-n", "-u", AGENT_USER, "--", *args, user="runner", check=check)
+    return as_user(container, AGENT_USER, *args, check=check)
 
 
 def has_yama(container: Container) -> bool:
@@ -552,6 +601,78 @@ def test_setup_creates_an_unprivileged_agent_separate_from_runner_and_broker(env
     assert as_agent(container, "test", "-w", WRITE_DIR).returncode == 0
 
 
+# --- Bootstrap: reaching the workspace under the runner's private home -----------
+
+
+def test_the_private_runner_home_blocks_git_run_as_another_user_from_the_workspace(env, container):
+    # The 2026-09-22 hosted failure, reproduced with a fresh user that got no
+    # traversal grant: the workspace is runner-owned and world-readable
+    # (0755), yet `git config --global` run as that user with the workspace as
+    # its working directory dies stat-ing it, because /home/runner (0750)
+    # denies the user search permission. Ownership and the target's own mode
+    # do not decide reachability; every ancestor does.
+    container.run("sudo", "-n", "useradd", "--system", "--user-group", "--create-home", "repro-agent", user="runner")
+    try:
+        assert container.run("stat", "-c", "%a %U", WORKSPACE).stdout.strip() == "755 runner"
+        assert as_user(container, "repro-agent", "test", "-x", WORKSPACE).returncode != 0
+        git = container.run("sudo", "-n", "-u", "repro-agent", "-H", "git", "config", "--global", "--add", "safe.directory", "*",
+                            user="runner", cwd=WORKSPACE, check=False)
+        assert git.returncode == 128, git.stdout + git.stderr
+        assert f"failed to stat '{WORKSPACE}'" in git.stderr and "Permission denied" in git.stderr, git.stderr
+        # The fix's first half: the same command from / succeeds.
+        container.run("sudo", "-n", "-u", "repro-agent", "-H", "git", "config", "--global", "--add", "safe.directory", "*",
+                      user="runner", cwd="/")
+    finally:
+        container.run("sudo", "-n", "userdel", "-r", "repro-agent", user="runner", check=False)
+
+
+def test_setup_grants_search_only_on_the_ancestor_that_denies_traversal_and_nothing_else(env, container):
+    # The runner's home is the one ancestor that blocked the agent; it gets a
+    # named-user ACL entry with search permission only, and the setup log
+    # names it with the mode it worked around. Directories that already
+    # allowed traversal (755) get no entry.
+    assert f"granted {AGENT_USER} search-only (--x) access on {RUNNER_HOME}, which was drwxr-x--- runner:runner" in env["setup_log"], env["setup_log"]
+    assert env["setup_log"].count("granted") == 1, env["setup_log"]
+    assert f"user:{AGENT_USER}:--x" in container.run("getfacl", "-c", "-p", RUNNER_HOME).stdout
+    for untouched in (f"{RUNNER_HOME}/work", WORKSPACE, RUNNER_TEMP, ACTION_PATH, WRITE_DIR):
+        assert f"user:{AGENT_USER}" not in container.run("getfacl", "-c", "-p", untouched).stdout, untouched
+    # Other users gained nothing: the home's other-bits are still ---.
+    assert container.run("stat", "-c", "%a", RUNNER_HOME).stdout.strip() == "750"
+
+
+def test_agent_reaches_exactly_the_paths_it_needs_and_not_the_runners_private_files(env, container):
+    # Through the granted ancestor the agent reaches what the check and run
+    # steps use...
+    assert as_agent(container, "ls", WORKSPACE).returncode == 0
+    assert as_agent(container, "test", "-r", f"{ACTION_PATH}/check_isolation.sh").returncode == 0
+    assert as_agent(container, "test", "-r", f"{RUNNER_TEMP}/isolated-agent/prompt.txt").returncode == 0
+    assert as_agent(container, "test", "-w", WRITE_DIR).returncode == 0
+    # ...but cannot list the home itself (search is not read), write the
+    # runner-owned workspace, or open what the runner keeps private: a 0600
+    # file, a 0700 directory, and the runner's registration credentials.
+    assert as_agent(container, "ls", RUNNER_HOME).returncode != 0
+    assert as_agent(container, "touch", f"{WORKSPACE}/agent-was-here").returncode != 0
+    for closed in (f"{RUNNER_HOME}/.private", f"{RUNNER_HOME}/private-dir/x",
+                   f"{RUNNER_ROOT}/.credentials", f"{RUNNER_ROOT}/.credentials_rsaparams"):
+        assert as_agent(container, "cat", closed).returncode != 0, closed
+
+
+def test_setup_fails_closed_when_a_needed_path_is_still_unreadable(container):
+    # A workdir the agent can be walked into but not read (root-owned 0700):
+    # the search-only grant is not a read grant, so the verification at the
+    # end of setup must name the gap and fail instead of letting the run step
+    # discover it inside claude.
+    container.run("sudo", "-n", "sh", "-c", "rm -rf /srv/closed && install -d -o root -g root -m 0700 /srv/closed", user="runner")
+    try:
+        # A separate RUNNER_TEMP so this setup does not re-stage the prompt
+        # and settings the run tests below read.
+        r = run_setup(container, AGENT_USER, WRITE_DIR, workdir="/srv/closed", runner_temp=f"{RUNNER_HOME}/work/_temp-closed", check=False)
+        assert r.returncode != 0
+        assert f"not reachable by {AGENT_USER} after the traversal grants: workdir=/srv/closed" in r.stdout, r.stdout + r.stderr
+    finally:
+        container.run("sudo", "-n", "rm", "-rf", "/srv/closed", user="runner")
+
+
 # --- Check: the isolation boundary (B1/B2) ---------------------------------------
 
 
@@ -563,23 +684,26 @@ def make_command_file(container: Container, path: str, mode: str, owner: str = "
                   f"rm -f {path} && install -m {mode} -o {owner} -g {group} /dev/null {path}", user="runner")
 
 
-def run_check(container: Container) -> subprocess.CompletedProcess:
-    # Exactly what the action's check step runs, with a runner-owned command
-    # file to prove it is not agent-writable.
-    make_command_file(container, "/tmp/ghenv", "644")
-    return container.run(
-        "sudo", "-n", "-u", AGENT_USER, "-H", "--", "env", "-i",
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        f"EXPECT_AGENT_USER={AGENT_USER}", "BROKER_HOME=/var/lib/model-broker", "TMPDIR=/tmp",
-        "RUNNER_COMMAND_FILES=/tmp/ghenv",
-        "bash", "/actions/isolated-agent/check_isolation.sh",
-        user="runner", check=False,
-    )
+def run_check(container: Container, command_file: str = "/tmp/ghenv") -> subprocess.CompletedProcess:
+    # The action's check step, verbatim, as the runner from the workspace: it
+    # finds the runner's install directory from the Runner.Worker process and
+    # drops to the agent for check_isolation.sh. A runner-owned command file
+    # stands in for $GITHUB_ENV to prove it is not agent-writable.
+    if command_file == "/tmp/ghenv":
+        make_command_file(container, command_file, "644")
+    return container.bash_step(ia_step("Check the agent is isolated"), {
+        "AGENT_USER": AGENT_USER, "BROKER_HOME": "/var/lib/model-broker", "TMPDIR": "/tmp",
+        "GITHUB_ACTION_PATH": ACTION_PATH, "GITHUB_ENV": command_file, "PATH": SYSTEM_PATH,
+    }, cwd=WORKSPACE, check=False)
+
+
+def check_errors(r: subprocess.CompletedProcess) -> list[str]:
+    return [ln for ln in r.stdout.splitlines() if ln.startswith("::error::")]
 
 
 def test_check_isolation_holds_for_the_agent(env, container):
     r = run_check(container)
-    errors = [ln for ln in r.stdout.splitlines() if ln.startswith("::error::")]
+    errors = check_errors(r)
     if has_yama(container):
         assert r.returncode == 0 and errors == [], r.stdout + r.stderr
         assert "agent isolation holds" in r.stdout
@@ -588,6 +712,22 @@ def test_check_isolation_holds_for_the_agent(env, container):
         # Every UID-boundary probe below still passes without it.
         assert r.returncode == 1
         assert len(errors) == 1 and "ptrace_scope" in errors[0], r.stdout
+
+
+def test_check_flags_a_runner_credential_the_agent_can_read(env, container):
+    # The check step located the runner's install directory from the
+    # Runner.Worker process (there is no other way this probe could fire), and
+    # a registration credential there that the traversal grant made reachable
+    # AND whose own mode lets the agent read it fails the check.
+    container.run("chmod", "0644", f"{RUNNER_ROOT}/.credentials_rsaparams", user="runner")
+    try:
+        r = run_check(container)
+        assert r.returncode == 1
+        assert any(f"{RUNNER_ROOT}/.credentials_rsaparams (the runner's registration credential) is readable" in e for e in check_errors(r)), r.stdout
+    finally:
+        container.run("chmod", "0600", f"{RUNNER_ROOT}/.credentials_rsaparams", user="runner")
+    # Back at 0600 the probe is quiet again.
+    assert not any("registration credential" in e for e in check_errors(run_check(container)))
 
 
 def test_agent_cannot_escalate_or_reach_docker(env, container):
@@ -661,14 +801,7 @@ def test_check_flags_a_writable_runner_command_file(env, container):
     make_command_file(container, "/tmp/ghenv-bad", "644", owner=AGENT_USER, group=AGENT_USER)
     assert as_agent(container, "sh", "-c", "echo probe >> /tmp/ghenv-bad").returncode == 0, \
         "fixture: the agent should be able to write its own command file"
-    r = container.run(
-        "sudo", "-n", "-u", AGENT_USER, "-H", "--", "env", "-i",
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        f"EXPECT_AGENT_USER={AGENT_USER}", "BROKER_HOME=/var/lib/model-broker", "TMPDIR=/tmp",
-        "RUNNER_COMMAND_FILES=/tmp/ghenv-bad",
-        "bash", "/actions/isolated-agent/check_isolation.sh",
-        user="runner", check=False,
-    )
+    r = run_check(container, command_file="/tmp/ghenv-bad")
     assert any("is writable by the agent" in ln for ln in r.stdout.splitlines()), r.stdout
 
 
@@ -678,19 +811,20 @@ def test_check_flags_a_writable_runner_command_file(env, container):
 def test_run_step_launches_claude_as_the_agent_under_env_i(env, container):
     r = container.run("touch", "/tmp/run_output", user="runner")
     out = container.bash_step(ia_step("Run the agent"), {
-        "AGENT_USER": AGENT_USER, "WORK_DIR": "/tmp",
+        "AGENT_USER": AGENT_USER, "WORK_DIR": WORKSPACE,
         "BASE_URL": env["base-url"], "TOKEN": env["token"], "GH_TOKEN_IN": "job-token-123",
         "CLAUDE_ARGS": "--model fable --allowedTools Bash,Read", "FORWARD_ENV": f"AGENT_RECORD_DIR={WRITE_DIR}",
-        "RUNNER_TEMP": RUNNER_TEMP, "GITHUB_OUTPUT": "/tmp/run_output",
-        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "RUNNER_TEMP": RUNNER_TEMP, "GITHUB_OUTPUT": "/tmp/run_output", "PATH": SYSTEM_PATH,
         # Vars that MUST be stripped by env -i, planted in the runner step's env:
         "CI_PERF_ANTHROPIC_API_KEY": REAL_KEY, "GITHUB_ENV": "/tmp/ghenv",
         "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-secret", "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example",
-    })
+    }, cwd=WORKSPACE)
     assert parse_outputs_file(container.run("cat", "/tmp/run_output", user="runner").stdout)["conclusion"] == "success"
-    # It ran as the agent.
+    # It ran as the agent, in the workspace under the runner's private home,
+    # and could read it.
     assert container.run("cat", f"{WRITE_DIR}/whoami").stdout.strip() == AGENT_USER
-    assert container.run("cat", f"{WRITE_DIR}/cwd").stdout.strip() == "/tmp"
+    assert container.run("cat", f"{WRITE_DIR}/cwd").stdout.strip() == WORKSPACE
+    assert "actions-repo" in container.run("cat", f"{WRITE_DIR}/workdir-listing").stdout.split()
     agent_env = container.run("cat", f"{WRITE_DIR}/env.txt").stdout
     names = {ln.split("=", 1)[0] for ln in agent_env.splitlines() if "=" in ln}
     # Only the intended variables reach the agent.
@@ -754,12 +888,13 @@ def test_the_stop_file_ends_the_broker(env, container):
 # --- F1: the agent's home does not collide with harden-runner's /home/agent --
 
 
-def run_setup(container: Container, agent_user: str, write_dir: str, *, check: bool = True) -> subprocess.CompletedProcess:
+def run_setup(container: Container, agent_user: str, write_dir: str, *, workdir: str = WORKSPACE,
+              runner_temp: str = RUNNER_TEMP, check: bool = True) -> subprocess.CompletedProcess:
     return container.bash_step(ia_step("Set up the isolated agent user"), {
         "AGENT_USER": agent_user, "WRITE_DIR": write_dir, "AGENT_PROMPT": "p",
-        "AGENT_SETTINGS": "", "WORK_DIR": "/tmp", "RUNNER_TEMP": RUNNER_TEMP,
-        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    }, check=check)
+        "AGENT_SETTINGS": "", "WORK_DIR": workdir, "RUNNER_TEMP": runner_temp,
+        "GITHUB_ACTION_PATH": ACTION_PATH, "PATH": SYSTEM_PATH,
+    }, cwd=WORKSPACE, check=check)
 
 
 def test_agent_home_is_not_harden_runners_directory(env, container):
@@ -822,12 +957,12 @@ def test_run_records_failure_and_the_gate_fails_the_job(env, container):
     container.run("chmod", "0755", "/tmp/failbin")
     container.run("touch", "/tmp/failout", user="runner")
     run = container.bash_step(ia_step("Run the agent"), {
-        "AGENT_USER": AGENT_USER, "WORK_DIR": "/tmp",
+        "AGENT_USER": AGENT_USER, "WORK_DIR": WORKSPACE,
         "BASE_URL": "http://127.0.0.1:8317", "TOKEN": "t", "GH_TOKEN_IN": "g",
         "CLAUDE_ARGS": "--model fable", "FORWARD_ENV": "",
         "RUNNER_TEMP": RUNNER_TEMP, "GITHUB_OUTPUT": "/tmp/failout",
-        "PATH": "/tmp/failbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    }, check=False)
+        "PATH": f"/tmp/failbin:{SYSTEM_PATH}",
+    }, cwd=WORKSPACE, check=False)
     assert run.returncode == 0, run.stdout + run.stderr
     assert parse_outputs_file(container.run("cat", "/tmp/failout", user="runner").stdout)["conclusion"] == "failure"
     # The gate fails on a non-success conclusion, passes on success.
@@ -835,3 +970,138 @@ def test_run_records_failure_and_the_gate_fails_the_job(env, container):
     fail = container.bash_step(gate, {"CONCLUSION": "failure"}, check=False)
     assert fail.returncode != 0 and "did not succeed" in fail.stdout, fail.stdout
     assert container.bash_step(gate, {"CONCLUSION": "success"}, check=False).returncode == 0
+
+
+# --- On a hosted runner: the actual layout, in place -------------------------------
+#
+# The container above models the hosted layout; these tests run the same three
+# step scripts on the hosted runner itself when the suite runs there (tests.yml
+# on ubuntu-latest: GITHUB_ACTIONS is set, the runner user has sudo), against
+# the real /home/runner, the real Runner.Worker and .NET diagnostic sockets,
+# Yama, the real command files and the real registration credentials — what
+# Docker Desktop's kernel and a stand-in process cannot supply. The broker is
+# the action's start step with a dummy key; the check never calls upstream. A
+# stand-in `claude` on PATH keeps the run step off the network. Skipped
+# anywhere else; on a runner the skip reason names what is missing.
+
+
+def hosted_runner_unavailable() -> str:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return "not on a GitHub Actions runner"
+    if not Path("/proc/sys/kernel").exists():
+        return "not Linux"
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode != 0:
+        return "the runner user has no passwordless sudo"
+    return ""
+
+
+class Host:
+    """The Container interface, on this machine: `user` runs the command through
+    sudo, and a step runs with the job's own environment plus the step env."""
+
+    def run(self, *args: str, user: str | None = None, env: dict | None = None, stdin: str | None = None,
+            cwd: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+        cmd = ["sudo", "-n", "-u", user, "-H", "--", *args] if user and user != "runner" else list(args)
+        r = subprocess.run(cmd, input=stdin, text=True, capture_output=True, check=False, cwd=cwd,
+                           env={**os.environ, **(env or {})})
+        if check and r.returncode != 0:
+            raise AssertionError(f"{args} failed ({r.returncode}):\n{r.stdout}\n{r.stderr}")
+        return r
+
+    def bash_step(self, step: dict, env: dict, *, user: str = "runner", cwd: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+        script = Path(os.environ["RUNNER_TEMP"]) / "isolated-agent-hosted-test" / f"step-{uuid.uuid4().hex[:8]}.sh"
+        script.write_text(step["run"])
+        return self.run("bash", "--noprofile", "--norc", "-eo", "pipefail", str(script), user=user, env=env, cwd=cwd, check=check)
+
+
+@pytest.fixture(scope="session")
+def hosted() -> dict:
+    reason = hosted_runner_unavailable()
+    if reason:
+        pytest.skip(f"hosted-runner tests: {reason}")
+    host = Host()
+    base = Path(os.environ["RUNNER_TEMP"]) / "isolated-agent-hosted-test"
+    base.mkdir(exist_ok=True)
+    (base / "bin").mkdir(exist_ok=True)
+    (base / "bin" / "claude").write_text(FAKE_CLAUDE)
+    (base / "bin" / "claude").chmod(0o755)
+    path = f"{base / 'bin'}:{os.environ['PATH']}"
+    workspace = os.environ["GITHUB_WORKSPACE"]
+    write_dir = str(base / "out")
+    # The broker, from the action's start step, holding a dummy key.
+    (base / "broker_output").touch()
+    host.bash_step(start_step(), {
+        "MODEL_BROKER_API_KEY": REAL_KEY, "BROKER_PORT": "8317", "BROKER_LIFETIME_MINUTES": "15",
+        "STOP_FILE": "/tmp/model-broker.stop", "ACTION_PATH": str(ACTION_DIR), "GITHUB_OUTPUT": str(base / "broker_output"),
+    })
+    outputs = parse_outputs_file((base / "broker_output").read_text())
+    # isolated-agent SETUP, verbatim, from the workspace as the runner runs it.
+    setup = host.bash_step(ia_step("Set up the isolated agent user"), {
+        "AGENT_USER": AGENT_USER, "WRITE_DIR": write_dir, "AGENT_PROMPT": "analyze the thing",
+        "AGENT_SETTINGS": '{"permissions": {"allow": ["Read"]}}', "WORK_DIR": workspace,
+        "GITHUB_ACTION_PATH": str(ACTIONS_MOUNT / "isolated-agent"), "PATH": path,
+    }, cwd=workspace)
+    granted = re.findall(r"granted \S+ search-only \(--x\) access on (\S+), which was (\S+ \S+)", setup.stdout)
+    outputs.update(host=host, base=base, path=path, workspace=workspace, write_dir=write_dir,
+                   setup_log=setup.stdout, granted=granted)
+    # Evidence for the run's summary: what blocked the agent and what was granted.
+    ancestors = []
+    p = Path(workspace)
+    while p != p.parent:
+        ancestors.append(p)
+        p = p.parent
+    lines = ["### isolated-agent bootstrap on this runner", "", "Ancestors of the workspace (mode owner:group):", ""]
+    lines += [f"- `{a}`: `{host.run('stat', '-c', '%A %U:%G', str(a)).stdout.strip()}`" for a in reversed(ancestors)]
+    lines += ["", "Setup granted search-only access on:", ""] + [f"- `{d}` (was `{mode}`)" for d, mode in granted] + [""]
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write("\n".join(lines) + "\n")
+    yield outputs
+    Path("/tmp/model-broker.stop").touch()
+
+
+def test_hosted_setup_reaches_every_path_and_names_each_grant(hosted):
+    host: Host = hosted["host"]
+    assert "ready" in hosted["setup_log"] and "can reach" in hosted["setup_log"], hosted["setup_log"]
+    # Whatever the runner's layout denied is now traversable, by a
+    # search-only entry for the agent alone; the agent still cannot list it.
+    for directory, mode in hosted["granted"]:
+        assert f"user:{AGENT_USER}:--x" in host.run("getfacl", "-c", "-p", directory).stdout, directory
+        assert host.run("ls", directory, user=AGENT_USER, check=False).returncode != 0, f"{directory} ({mode}) is listable by the agent"
+    # A hosted runner's home is private; that is the ancestor the 2026-09-22
+    # runs died on. If this assertion fails the image changed and the grant
+    # was not needed; the test above still holds.
+    assert "/home/runner" in {d for d, _ in hosted["granted"]}, hosted["granted"]
+    assert host.run("test", "-r", hosted["workspace"], user=AGENT_USER, check=False).returncode == 0
+    assert host.run("touch", f"{hosted['workspace']}/agent-was-here", user=AGENT_USER, check=False).returncode != 0
+
+
+def test_hosted_check_isolation_holds_against_the_real_runner(hosted):
+    # The check step, verbatim, as the agent, against the real Runner.Worker
+    # (memory, environ, .NET diagnostic socket), Yama, the job's own command
+    # files, the broker and the runner's registration credentials.
+    r = hosted["host"].bash_step(ia_step("Check the agent is isolated"), {
+        "AGENT_USER": AGENT_USER, "BROKER_HOME": "/var/lib/model-broker",
+        "GITHUB_ACTION_PATH": str(ACTIONS_MOUNT / "isolated-agent"), "PATH": hosted["path"],
+    }, cwd=hosted["workspace"], check=False)
+    assert r.returncode == 0 and check_errors(r) == [], r.stdout + r.stderr
+    assert "agent isolation holds" in r.stdout
+
+
+def test_hosted_run_step_runs_claude_as_the_agent_in_the_workspace(hosted):
+    host: Host = hosted["host"]
+    out = hosted["base"] / "run_output"
+    out.touch()
+    host.bash_step(ia_step("Run the agent"), {
+        "AGENT_USER": AGENT_USER, "WORK_DIR": hosted["workspace"], "BASE_URL": hosted["base-url"], "TOKEN": hosted["token"],
+        "GH_TOKEN_IN": "job-token-123", "CLAUDE_ARGS": "--model fable", "FORWARD_ENV": f"AGENT_RECORD_DIR={hosted['write_dir']}",
+        "GITHUB_OUTPUT": str(out), "PATH": hosted["path"],
+    }, cwd=hosted["workspace"])
+    assert parse_outputs_file(out.read_text())["conclusion"] == "success"
+    record = Path(hosted["write_dir"])
+    assert (record / "whoami").read_text().strip() == AGENT_USER
+    assert (record / "cwd").read_text().strip() == hosted["workspace"]
+    assert ".github" in (record / "workdir-listing").read_text().split()
+    assert (record / "report.md").exists()
+    # The write-dir is shared work product: the runner can still write it.
+    (record / "manifest.json").write_text("m\n")
