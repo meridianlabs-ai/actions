@@ -67,22 +67,36 @@ and its satellites, and nothing that serves end users:
   succeed, a log with no or several recorded identities, an id missing from
   the run or a digest that does not match all mean "no context": the reply
   goes to the default Slack destination and the agent investigates
-  upstream `main` with `exact=false`. Manual triage trusts the run the
-  dispatcher selects and its latest attempt, with the same producer check,
-  without independently checking that run's event or branch. The skip
-  cache's `last-inspect-ai-sha` has no such binding: it is accepted only
-  from a run whose conclusion is success, and the `report` job refuses to
-  upload either name when an artifact with it already exists in the run
-  (no `overwrite`), so a squatted name fails the run instead of being
-  recorded; the worst a forged value could do there is make one scheduled
-  run skip a commit. What this rests on: a job's log is written by that
-  job's steps alone, and `actions/upload-artifact` refuses a duplicate name
-  unless told to overwrite (documented). Not established here: that code in
-  a test job can recover the runner's artifact-service token and upload
-  (a published technique, not reproduced), and how artifacts of a previous
-  attempt interact with a re-run's uploads; the consumer does not depend on
-  either, since it takes the attempt's own `report` job as the producer
-  and its recorded id as the artifact.
+  upstream `main` with `exact=false`. Triage resolves the attempt once,
+  before it reads anything: the attempt whose completion fired it, or the
+  latest attempt of the run a dispatcher selects. The failed log, the run
+  metadata, the failing run's install log and the context are all read at
+  that attempt, so a triage that runs after the upstream run gained another
+  attempt does not pair one attempt's failures with another's tested SHA
+  and thread. Manual triage trusts the run the dispatcher selects with the
+  same producer check, without independently checking that run's event or
+  branch. Artifact names are unique within a run attempt, not within a run:
+  a re-run is a new attempt and uploads the names again, so a run's
+  artifact list can hold one of each name per attempt. The `report` job
+  refuses to upload a name that an artifact created since its own attempt
+  started already carries (no `overwrite`; only another job of the attempt
+  can have made it), fails, and so fails the run, while it notes and
+  uploads beside an artifact from a previous attempt. The skip cache's
+  `last-inspect-ai-sha` has no log binding: it is accepted only from a run
+  whose conclusion is success, and the newest artifact of the name in that
+  run is taken, which is the successful attempt's `report` upload (a name
+  taken earlier in that attempt would have failed the attempt, and an
+  earlier attempt's artifact is older); the worst a forged value could do
+  there is make one scheduled run skip a commit. What this rests on: a job's
+  log is written by that job's steps alone; `actions/upload-artifact`
+  refuses a duplicate name within an attempt unless told to overwrite, and
+  its client documents re-runs as a source of same-named artifacts in one
+  run; the API's `run_started_at` is the latest attempt's start. Not
+  established here: that code in a test job can recover the runner's
+  artifact-service token and upload (a published technique, not
+  reproduced); the consumers do not depend on it, since triage takes the
+  attempt's own `report` job as the producer and its recorded id as the
+  artifact.
 - **Jobs that run the dependency closure hold nothing that reaches beyond
   the job.** The scheduled suites install upstream's dev closure from PyPI
   unlocked (the point of the run) and execute it. Their job token is
@@ -174,7 +188,7 @@ and its satellites, and nothing that serves end users:
   checks stop).
 - The scheduled test workflows declare a read-only job token, persist no
   credential into a checkout and use no Actions cache; the `report` job
-  refuses to upload an artifact name that already exists in its run.
+  refuses to upload an artifact name another job of its attempt took.
 - The Slack destination of a triage reply comes from the context of the
   failed run that its `report` job produced, never from the agent's
   manifest and never from a same-named artifact another job of that run

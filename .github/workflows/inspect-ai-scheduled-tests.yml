@@ -25,12 +25,14 @@
 #   fresh; setup-python has no `cache:` input here.
 # - The two artifacts (`last-inspect-ai-sha`, `triage-context`) are uploaded
 #   by the report job, which runs only after those jobs have finished. Their
-#   names are claimable by any job of the run, so the report job refuses a
-#   name that already exists (no `overwrite`), and the triage consumer trusts
-#   only the artifact id and digest this job records in its own log
-#   (triage-test-failures.yml, "Resolve the trusted triage context"). The
-#   skip-cache consumer (check-commit) takes `last-inspect-ai-sha` only from
-#   a run whose conclusion is success, which a refused upload prevents.
+#   names are claimable by any job of the run attempt (a re-run is a new
+#   attempt and legitimately uploads the names again), so the report job
+#   refuses a name taken since its attempt started (no `overwrite`), and the
+#   triage consumer trusts only the artifact id and digest this job records
+#   in its own log (triage-test-failures.yml, "Resolve the trusted triage
+#   context"). The skip-cache consumer (check-commit) takes
+#   `last-inspect-ai-sha` only from a run whose conclusion is success, which
+#   a refused upload prevents, and the newest of that name in it.
 #
 # tests/test_scheduled_workflows.py checks the permissions, checkout and
 # cache contract and runs the scripts below.
@@ -102,22 +104,34 @@ jobs:
           # the report job uploads the artifact only on `schedule`, while a
           # push or dispatch run executes whatever copy of this workflow its
           # branch carries. The query narrows the page to such runs; the jq
-          # filter enforces it on what comes back.
+          # filter enforces it on what comes back. Within the run, the name is
+          # not enough on its own: a run's artifact list spans its attempts,
+          # so a re-run that passed can carry both its report job's artifact
+          # and an artifact of the same name a test job of an earlier, failed
+          # attempt made (the report job refuses the name only within its own
+          # attempt, and only the run's conclusion is checked here). The
+          # newest of the name (highest id) is the one to take: the report
+          # job of the successful attempt uploads after every job of that
+          # attempt, and had a job of that attempt taken the name first the
+          # report job would have failed and the run would not be a success.
           echo "Searching for a successful scheduled run on $DEFAULT_BRANCH with the 'last-inspect-ai-sha' artifact..."
 
           RUN_ID=""
+          ARTIFACT_ID=""
           for run_id in $(gh api "repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs?event=schedule&branch=$DEFAULT_BRANCH&status=success" \
             | jq -r --arg branch "$DEFAULT_BRANCH" \
               '.workflow_runs[] | select(.conclusion == "success" and .event == "schedule" and .head_branch == $branch) | .id' \
             | head -10); do
 
             echo "Checking run $run_id for artifacts..."
-            artifact_count=$(gh api repos/${{ github.repository }}/actions/runs/$run_id/artifacts \
-              --jq '.artifacts[] | select(.name == "last-inspect-ai-sha") | .name' | wc -l)
+            artifact_id=$(gh api --paginate "repos/${{ github.repository }}/actions/runs/$run_id/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "last-inspect-ai-sha" and .expired == false) | .id] | max // empty' \
+              | sort -n | tail -1)
 
-            if [ "$artifact_count" -gt 0 ]; then
+            if [[ "$artifact_id" =~ ^[0-9]+$ ]]; then
               RUN_ID=$run_id
-              echo "Found run with artifact: $RUN_ID"
+              ARTIFACT_ID=$artifact_id
+              echo "Found run with artifact: $RUN_ID (artifact $ARTIFACT_ID)"
               break
             fi
           done
@@ -126,8 +140,9 @@ jobs:
             # Create directory for artifact
             mkdir -p .last-inspect-ai-sha
 
-            # Download the artifact from the actions repository (where this workflow runs)
-            if gh run download "$RUN_ID" --name last-inspect-ai-sha --dir .last-inspect-ai-sha --repo ${{ github.repository }}; then
+            # Download that artifact by id from the actions repository (where this workflow runs)
+            if gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > .last-inspect-ai-sha/artifact.zip \
+               && unzip -o -q .last-inspect-ai-sha/artifact.zip last_sha.txt -d .last-inspect-ai-sha; then
               echo "Successfully downloaded artifact from run $RUN_ID"
 
               # Read the SHA immediately and store it as output (before checkout wipes it).
@@ -412,18 +427,25 @@ jobs:
     steps:
       # This job is the only intended producer of `last-inspect-ai-sha` and
       # `triage-context`, but an artifact name is claimable by any job of the
-      # run, and slow-tests and static-analysis, which run third-party code,
-      # finish before this job starts. actions/upload-artifact refuses a name
-      # that already exists in the run (409) unless `overwrite` is set, which
-      # it deliberately is not: a same-named artifact from anywhere else is
-      # tampering (or a previous attempt's leftover), and this step says which
-      # before the upload would fail on it. The consumers are fail-closed
-      # either way: check-commit accepts `last-inspect-ai-sha` only from a run
-      # whose conclusion is success, which this step's failure prevents, and
-      # triage accepts only the `triage-context` artifact whose id and digest
-      # the step after the upload records in this job's log. The Slack report
-      # below still goes out (always()); only the uploads are withheld.
-      - name: Refuse an artifact name another job already took
+      # run attempt, and slow-tests and static-analysis, which run third-party
+      # code, finish before this job starts. Names are unique within an
+      # attempt: actions/upload-artifact refuses a name that already exists
+      # (409) unless `overwrite` is set, which it deliberately is not, while a
+      # re-run is a new attempt and may upload the names again, so a run's
+      # artifact list can legitimately hold one of each name per attempt
+      # (@actions/artifact documents reruns as a source of same-named
+      # artifacts). So the policy is per attempt: an artifact with one of
+      # these names created since this attempt started can only be another
+      # job's, and is refused as tampering before the upload would fail on
+      # it; one created before this attempt started is a previous attempt's
+      # and is noted, not refused. The consumers are fail-closed either way:
+      # check-commit accepts `last-inspect-ai-sha` only from a run whose
+      # conclusion is success, which this step's failure prevents, and takes
+      # the newest of that name; triage accepts only the `triage-context`
+      # artifact whose id and digest the step after the upload records in
+      # this job's log. The Slack report below still goes out (always());
+      # only the uploads are withheld.
+      - name: Refuse an artifact name another job of this attempt took
         id: names
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -446,24 +468,30 @@ jobs:
             echo "::error::Could not list this run's artifacts, so the artifact names cannot be checked; uploading nothing."
             exit 1
           fi
-          # The current attempt's start: an artifact created before it is a
-          # previous attempt's, one created after it was made during this
-          # attempt by a job that ran before this one.
-          started=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.run_started_at' 2>/dev/null) || started=""
+          # The current attempt's start (run_started_at is the latest
+          # attempt's): an artifact created before it is a previous attempt's,
+          # one created since was made during this attempt by a job that ran
+          # before this one. Both timestamps are the API's, ISO 8601 UTC, so
+          # they compare as strings.
+          if ! started=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.run_started_at' 2>/dev/null) \
+             || ! [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "::error::Could not read when attempt $RUN_ATTEMPT started, so an existing artifact cannot be told from a squat; uploading nothing."
+            exit 1
+          fi
           conflict=0
           for name in "${names[@]}"; do
             while read -r n id created; do
               [ "$n" = "$name" ] || continue
-              conflict=1
-              if [ -n "$started" ] && [[ "$created" < "$started" ]]; then
-                echo "::error::An artifact named $name (id $id, created $created) already exists in this run from before attempt $RUN_ATTEMPT started ($started): a previous attempt's. The name cannot be uploaded again, so this attempt records no $name and its consumer runs without one."
+              if [[ "$created" < "$started" ]]; then
+                echo "An artifact named $name (id $id, created $created) exists from before attempt $RUN_ATTEMPT started ($started): a previous attempt's. This attempt uploads its own; its consumer takes this job's recorded one, or the newest."
               else
-                echo "::error::An artifact named $name (id $id, created $created) already exists in this run, created during attempt $RUN_ATTEMPT before this job ran. Only this job uploads that name, and the jobs before it execute third-party code (SECURITY.md), so treat this as tampering. The consumers ignore an artifact this job did not produce, and this job uploads nothing under that name."
+                conflict=1
+                echo "::error::An artifact named $name (id $id, created $created) already exists in this run, created during attempt $RUN_ATTEMPT (started $started) before this job ran. Only this job uploads that name, and the jobs before it execute third-party code (SECURITY.md), so treat this as tampering. The consumers ignore an artifact this job did not produce, and this job uploads nothing under that name."
               fi
             done <<<"$existing"
           done
           [ "$conflict" = 0 ] || exit 1
-          echo "No artifact named ${names[*]} exists in this run yet."
+          echo "No job of attempt $RUN_ATTEMPT has taken the name(s) ${names[*]}."
 
       - name: Save tested inspect_ai SHA as artifact
         if: needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule'

@@ -193,30 +193,31 @@ def test_pytest_args_outside_the_allowlist_fail_before_pytest_runs(workflow, job
 # --- The last-inspect-ai-sha artifact ---------------------------------------------------
 
 FAKE_GH = r'''#!/usr/bin/env python3
-"""Stand-in for gh: canned run and artifact listings from $FAKE_GH_DIR, and a recorded download."""
+"""Stand-in for gh api: canned run and artifact listings from $FAKE_GH_DIR and artifact zips by id."""
 import json, os, pathlib, re, subprocess, sys
 
 args = sys.argv[1:]
 store = pathlib.Path(os.environ["FAKE_GH_DIR"])
 with (store / "calls.log").open("a") as log:
     log.write(" ".join(args) + "\n")
-if args[:1] == ["api"]:
-    path = args[1]
-    if "/actions/workflows/inspect-ai-scheduled-tests.yml/runs" in path:
-        data = (store / "runs.json").read_text()
-    else:
-        run_id = re.search(r"/actions/runs/(\d+)/artifacts$", path).group(1)
-        names = json.loads((store / "artifacts.json").read_text()).get(run_id, [])
-        data = json.dumps({"artifacts": [{"name": n} for n in names]})
-    if "--jq" in args:
-        data = subprocess.run(["jq", "-r", args[args.index("--jq") + 1]], input=data, text=True, capture_output=True, check=True).stdout
-    sys.stdout.write(data)
-elif args[:2] == ["run", "download"]:
-    dest = pathlib.Path(args[args.index("--dir") + 1])
-    dest.mkdir(parents=True, exist_ok=True)
-    (dest / "last_sha.txt").write_bytes((store / "last_sha.txt").read_bytes())
+if args[:1] != ["api"]:
+    sys.exit(f"fake gh: unexpected call {args}")
+jq = args[args.index("--jq") + 1] if "--jq" in args else None
+path = [a for a in args[1:] if not a.startswith("-") and a != jq][0].split("?")[0]
+if "/actions/workflows/inspect-ai-scheduled-tests.yml/runs" in path:
+    data = (store / "runs.json").read_text()
+elif m := re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/(\d+)/artifacts", path):
+    data = json.dumps({"artifacts": json.loads((store / "artifacts.json").read_text()).get(m.group(1), [])})
+elif m := re.fullmatch(r"repos/[^/]+/[^/]+/actions/artifacts/(\d+)/zip", path):
+    zip_file = store / "zips" / f"{m.group(1)}.zip"
+    zip_file.exists() or sys.exit(f"fake gh: HTTP 404 for {path}")
+    sys.stdout.buffer.write(zip_file.read_bytes())
+    sys.exit(0)
 else:
     sys.exit(f"fake gh: unexpected call {args}")
+if jq is not None:
+    data = subprocess.run(["jq", "-r", jq], input=data, text=True, capture_output=True, check=True).stdout
+sys.stdout.write(data)
 '''
 
 ARTIFACT = "last-inspect-ai-sha"
@@ -225,12 +226,31 @@ ARTIFACT = "last-inspect-ai-sha"
 RUNS = [(300, "push", "evil"), (200, "workflow_dispatch", "main"), (100, "schedule", "main")]
 
 
+def sha_zip(content: bytes) -> bytes:
+    """A last-inspect-ai-sha artifact as upload-artifact stores it: a zip holding last_sha.txt."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("last_sha.txt", content)
+    return buf.getvalue()
+
+
 def download(tmp_path: Path, *, runs=RUNS, artifacts: dict, content: bytes) -> tuple[dict, subprocess.CompletedProcess, list[str]]:
+    """Run the download step. `artifacts` maps a run id to its artifacts: a name (the
+    zip holds `content`, id = run id * 10 + position) or a dict with name, id, expired
+    and content."""
     store = tmp_path / "gh"
-    store.mkdir()
+    (store / "zips").mkdir(parents=True)
     (store / "runs.json").write_text(json.dumps({"workflow_runs": [{"id": i, "conclusion": "success", "event": e, "head_branch": b} for i, e, b in runs]}))
-    (store / "artifacts.json").write_text(json.dumps({str(k): v for k, v in artifacts.items()}))
-    (store / "last_sha.txt").write_bytes(content)
+    listing: dict[str, list] = {}
+    for run_id, entries in artifacts.items():
+        for pos, entry in enumerate(entries):
+            a = {"name": entry, "id": run_id * 10 + pos, "expired": False, "content": content} if isinstance(entry, str) else {"expired": False, "content": content, **entry}
+            (store / "zips" / f"{a['id']}.zip").write_bytes(sha_zip(a.pop("content")))
+            listing.setdefault(str(run_id), []).append(a)
+    (store / "artifacts.json").write_text(json.dumps(listing))
     gh_out = tmp_path / "output.txt"
     gh_out.touch()
     s = step(SCHEDULED, "check-commit", "download_artifact")
@@ -242,11 +262,15 @@ def download(tmp_path: Path, *, runs=RUNS, artifacts: dict, content: bytes) -> t
     return parse_outputs(gh_out.read_text()), r, calls
 
 
+def zip_downloads(calls: list[str]) -> list[str]:
+    return [re.search(r"/actions/artifacts/(\d+)/zip", c).group(1) for c in calls if "/zip" in c]
+
+
 def test_only_a_scheduled_run_on_the_default_branch_is_a_producer(tmp_path):
     outputs, r, calls = download(tmp_path, artifacts={300: [ARTIFACT], 200: [ARTIFACT], 100: [ARTIFACT]}, content=f"{SHA}\n".encode())
     assert outputs == {"last_sha": SHA}
-    assert "Found run with artifact: 100" in r.stdout
-    assert [c for c in calls if c.startswith("run download")] == [f"run download 100 --name {ARTIFACT} --dir .last-inspect-ai-sha --repo {REPO}"]
+    assert "Found run with artifact: 100 (artifact 1000)" in r.stdout
+    assert zip_downloads(calls) == ["1000"]
     assert not any("/runs/300/" in c or "/runs/200/" in c for c in calls)
 
 
@@ -254,7 +278,23 @@ def test_a_push_run_artifact_alone_is_never_selected(tmp_path):
     outputs, r, calls = download(tmp_path, artifacts={300: [ARTIFACT]}, content=SHA.encode())
     assert outputs == {"last_sha": ""}
     assert "No previous successful scheduled runs with artifacts found" in r.stdout
-    assert not any(c.startswith("run download") for c in calls)
+    assert zip_downloads(calls) == []
+
+
+def test_the_newest_artifact_of_the_name_is_taken_when_a_run_holds_several(tmp_path):
+    # A successful re-run: attempt 1 failed after a test job squatted the
+    # name (the report job refused it, so the attempt failed); attempt 2
+    # passed and its report job uploaded the genuine one, necessarily later.
+    # The run's artifact list holds both; the newest (highest id) is taken,
+    # and an expired artifact is not a candidate however new.
+    squat = {"name": ARTIFACT, "id": 5001, "content": b"f" * 40}
+    genuine = {"name": ARTIFACT, "id": 5002, "content": f"{SHA}\n".encode()}
+    expired = {"name": ARTIFACT, "id": 5003, "expired": True, "content": b"e" * 40}
+    outputs, r, calls = download(tmp_path, artifacts={100: [squat, genuine, expired]}, content=b"unused")
+    assert outputs == {"last_sha": SHA}
+    assert "Found run with artifact: 100 (artifact 5002)" in r.stdout
+    assert zip_downloads(calls) == ["5002"]
+    assert "f" * 40 not in r.stdout
 
 
 @pytest.mark.parametrize(
@@ -364,10 +404,10 @@ def test_no_job_restores_or_saves_an_actions_cache(workflow):
 #
 # The report job is the only intended producer of last-inspect-ai-sha and
 # triage-context, but any job of the run can claim those names first, and the
-# test jobs run third-party code before report starts. The step refuses to
-# upload a name that already exists in the run and says whether the existing
-# artifact was made during this attempt (tampering) or before it (a previous
-# attempt's leftover).
+# test jobs run third-party code before report starts. Names are unique per
+# attempt, and a re-run may upload them again, so the step refuses a name
+# taken since its attempt started (tampering) and notes, without refusing,
+# one from a previous attempt.
 
 FAKE_GH_RUN = r'''#!/usr/bin/env python3
 """Stand-in for gh api over one run: its artifact list and its run object from $FAKE_GH_DIR."""
@@ -399,13 +439,17 @@ def artifact(name: str, id: int, created: str, expired: bool = False) -> dict:
     return {"id": id, "name": name, "created_at": created, "expired": expired, "digest": "sha256:" + "0" * 64}
 
 
-def check_names(tmp_path: Path, *, artifacts: list, tests_passed: bool, event: str = "schedule", fail_api: bool = False) -> subprocess.CompletedProcess:
+def check_names(tmp_path: Path, *, artifacts: list, tests_passed: bool, event: str = "schedule", fail_api: bool = False, no_started: bool = False) -> subprocess.CompletedProcess:
     store = Path(tempfile.mkdtemp(prefix="gh-", dir=tmp_path))  # one store per call; a test may call twice
     (store / "artifacts.json").write_text(json.dumps(artifacts))
-    (store / "run.json").write_text(json.dumps({"id": 35714973776, "run_attempt": 2, "run_started_at": STARTED}))
+    run = {"id": 35714973776, "run_attempt": 2, "run_started_at": STARTED}
+    if no_started:
+        del run["run_started_at"]
+    (store / "run.json").write_text(json.dumps(run))
     if fail_api:
         (store / "fail").touch()
     s = step(SCHEDULED, "report", "names")
+    assert s["name"] == "Refuse an artifact name another job of this attempt took"
     assert s["env"]["UPLOAD_TESTED_SHA"] == "${{ needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule' }}"
     assert s["env"]["UPLOAD_TRIAGE_CONTEXT"] == "${{ needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success' }}"
     env = {
@@ -424,7 +468,7 @@ def check_names(tmp_path: Path, *, artifacts: list, tests_passed: bool, event: s
 def test_report_uploads_when_no_job_took_its_artifact_name(tmp_path):
     r = check_names(tmp_path, artifacts=[artifact("something-else", 1, "2026-09-22T10:20:00Z")], tests_passed=False)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "No artifact named triage-context exists in this run yet." in r.stdout
+    assert "No job of attempt 2 has taken the name(s) triage-context." in r.stdout
 
 
 def test_report_refuses_a_name_a_job_of_this_attempt_took_and_calls_it_tampering(tmp_path):
@@ -432,23 +476,37 @@ def test_report_refuses_a_name_a_job_of_this_attempt_took_and_calls_it_tampering
     # attempt (after run_started_at) and before report ran.
     r = check_names(tmp_path, artifacts=[artifact("triage-context", 900, "2026-09-22T10:28:00Z")], tests_passed=False)
     assert r.returncode == 1
-    assert "::error::An artifact named triage-context (id 900, created 2026-09-22T10:28:00Z) already exists in this run, created during attempt 2 before this job ran." in r.stdout
+    assert "::error::An artifact named triage-context (id 900, created 2026-09-22T10:28:00Z) already exists in this run, created during attempt 2 (started 2026-09-22T10:15:25Z) before this job ran." in r.stdout
     assert "tampering" in r.stdout
 
 
-def test_report_names_a_previous_attempts_leftover_as_such(tmp_path):
-    r = check_names(tmp_path, artifacts=[artifact("triage-context", 800, "2026-09-22T08:30:00Z")], tests_passed=False)
+@pytest.mark.parametrize("name, tests_passed", [("triage-context", False), ("last-inspect-ai-sha", True)], ids=["failing-rerun", "passing-rerun"])
+def test_report_uploads_beside_a_previous_attempts_artifact_of_the_same_name(tmp_path, name, tests_passed):
+    # Review round 1, B1: a re-run is a new attempt and may upload the name
+    # again (names are unique per attempt, not per run). An artifact created
+    # before this attempt started is noted, not refused: a second failing
+    # attempt still publishes its own Slack-thread context, and re-running a
+    # green scheduled run still records its tested SHA.
+    r = check_names(tmp_path, artifacts=[artifact(name, 800, "2026-09-22T08:30:00Z")], tests_passed=tests_passed)
+    assert r.returncode == 0, r.stdout
+    assert f"An artifact named {name} (id 800, created 2026-09-22T08:30:00Z) exists from before attempt 2 started (2026-09-22T10:15:25Z): a previous attempt's." in r.stdout
+    assert f"No job of attempt 2 has taken the name(s) {name}." in r.stdout
+    assert "::error::" not in r.stdout and "tampering" not in r.stdout
+
+
+def test_report_uploads_nothing_when_the_attempt_start_is_unknown(tmp_path):
+    # Without the attempt's start a leftover cannot be told from a squat: fail closed.
+    r = check_names(tmp_path, artifacts=[artifact("triage-context", 800, "2026-09-22T08:30:00Z")], tests_passed=False, no_started=True)
     assert r.returncode == 1
-    assert "from before attempt 2 started (2026-09-22T10:15:25Z): a previous attempt's" in r.stdout
-    assert "tampering" not in r.stdout
+    assert "::error::Could not read when attempt 2 started" in r.stdout
 
 
 def test_report_checks_only_the_name_it_is_about_to_upload(tmp_path):
     # A passing scheduled attempt uploads last-inspect-ai-sha; a triage-context
-    # left by an earlier failed attempt is not its concern.
-    r = check_names(tmp_path, artifacts=[artifact("triage-context", 800, "2026-09-22T08:30:00Z")], tests_passed=True)
+    # squatted in this very attempt is not its concern (that name is not uploaded).
+    r = check_names(tmp_path, artifacts=[artifact("triage-context", 800, "2026-09-22T10:28:00Z")], tests_passed=True)
     assert r.returncode == 0, r.stdout
-    assert "No artifact named last-inspect-ai-sha exists in this run yet." in r.stdout
+    assert "No job of attempt 2 has taken the name(s) last-inspect-ai-sha." in r.stdout
     # ... but a squatted last-inspect-ai-sha stops the upload the skip cache would trust.
     r = check_names(tmp_path, artifacts=[artifact("last-inspect-ai-sha", 901, "2026-09-22T10:28:00Z")], tests_passed=True)
     assert r.returncode == 1
@@ -471,7 +529,7 @@ def test_report_uploads_nothing_when_the_artifact_list_cannot_be_read(tmp_path):
 def test_the_uploads_wait_for_the_name_check_and_the_identity_is_recorded_from_the_upload_outputs():
     report = workflow_jobs(SCHEDULED)["report"]
     names = [s.get("name") for s in report["steps"]]
-    assert names[0] == "Refuse an artifact name another job already took"
+    assert names[0] == "Refuse an artifact name another job of this attempt took"
     for s in report["steps"]:
         if s.get("name") in ("Upload Slack thread info for triage", "Upload triage artifact"):
             assert "steps.names.outcome == 'success'" in s["if"], s["name"]

@@ -87,10 +87,13 @@ clean.
   workflow declares a read-only token, its checkouts set
   `persist-credentials: false`, and it restores and saves no Actions cache.
   An artifact a later trusted step consumes is bound to its producer, not to
-  its name: the scheduled run's `report` job refuses a name another job
-  already took and records the id and digest of the `triage-context` it
-  uploaded in its own log, and triage downloads that id or nothing (see the
-  headers of `inspect-ai-scheduled-tests.yml` and `triage-test-failures.yml`).
+  its name: the scheduled run's `report` job refuses a name another job of
+  its attempt took (a re-run may upload the names again) and records the id
+  and digest of the `triage-context` it uploaded in its own log; triage
+  resolves the upstream attempt once, reads every part of the run at it, and
+  downloads that id or nothing; the skip cache takes the newest
+  `last-inspect-ai-sha` of a successful run (see the headers of
+  `inspect-ai-scheduled-tests.yml` and `triage-test-failures.yml`).
 
 ## PRs
 

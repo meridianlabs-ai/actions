@@ -155,17 +155,47 @@ jobs:
             registry.npmjs.org:443
             release-assets.githubusercontent.com:443
 
+      # Every read of the upstream run below is of one attempt, resolved here
+      # once: the attempt whose completion fired this run, or, for a dispatch
+      # that names a run, its latest. A triage that starts late or is re-run
+      # after the upstream run gained another attempt would otherwise read
+      # attempt 2's failures and installed packages (unqualified `gh run view`
+      # serves the latest attempt) beside attempt 1's tested SHA and Slack
+      # thread. The failed log, the run metadata, the failing run's install
+      # log and the trusted context all take this value; the passing baseline
+      # is a different run, selected on its own.
+      - name: Resolve the upstream run attempt
+        id: attempt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_ATTEMPT: ${{ github.event.workflow_run.run_attempt || '' }}
+        run: |
+          set -uo pipefail
+          attempt="$EVENT_ATTEMPT"
+          if [ -z "$attempt" ]; then
+            attempt=$(gh api "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID" --jq '.run_attempt' 2>/dev/null || true)
+          fi
+          if ! [[ "$attempt" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Could not resolve the attempt of run $UPSTREAM_RUN_ID to triage (got '$attempt')."
+            exit 1
+          fi
+          { echo "attempt<<EOF"; echo "$attempt"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          echo "Triaging attempt $attempt of run $UPSTREAM_RUN_ID"
+
       - name: Download failed logs from upstream run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
         run: |
           mkdir -p triage
-          echo "Fetching logs for run $UPSTREAM_RUN_ID"
-          gh run view "$UPSTREAM_RUN_ID" \
-            --repo "${{ github.repository }}" \
+          echo "Fetching logs for run $UPSTREAM_RUN_ID attempt $UPSTREAM_RUN_ATTEMPT"
+          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
+            --repo "$REPO" \
             --log-failed > triage/failed.log 2>&1 || echo "No failed-step logs available"
-          gh run view "$UPSTREAM_RUN_ID" \
-            --repo "${{ github.repository }}" \
+          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
+            --repo "$REPO" \
             --json jobs,conclusion,displayTitle,headBranch,headSha,url,createdAt \
             > triage/run.json
           # Truncate very long logs so we fit in the context window.
@@ -185,7 +215,8 @@ jobs:
       # third-party code (the day's dependency closure, upstream's tests)
       # before the report job uploads: a process there can create an artifact
       # named triage-context with a channel, thread and SHA of its choosing,
-      # after which the report job's own upload fails on the name conflict.
+      # after which the report job's own upload in that attempt fails on the
+      # name conflict (a later attempt may upload the name again).
       # The run-level gate above (a failed scheduled run) does not see that,
       # and shape checks on the fields do not either. So this step downloads
       # nothing by name. It finds the report job of the attempt being triaged
@@ -200,14 +231,14 @@ jobs:
       # exact=false. A report job whose upload step failed is reported as a
       # possible squat; a same-named artifact with another id is named and
       # ignored. The attempt matters: a re-run has its own report job and its
-      # own log, and the run's artifact list spans attempts.
+      # own log, and the run's artifact list spans attempts (each attempt may
+      # upload the name again).
       - name: Resolve the trusted triage context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          # The attempt whose completion fired this run; a dispatch names a
-          # run and is served its latest attempt.
-          UPSTREAM_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt || '' }}
+          # The attempt every other read of the upstream run uses (resolved above).
+          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
         run: |
           set -uo pipefail
           mkdir -p triage
@@ -217,10 +248,7 @@ jobs:
             exit 0
           }
           attempt="$UPSTREAM_RUN_ATTEMPT"
-          if ! [[ "$attempt" =~ ^[0-9]+$ ]]; then
-            attempt=$(gh api "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID" --jq '.run_attempt' 2>/dev/null || true)
-            [[ "$attempt" =~ ^[0-9]+$ ]] || none "Could not read the latest attempt of run $UPSTREAM_RUN_ID."
-          fi
+          [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || none "No resolved attempt for run $UPSTREAM_RUN_ID (got '$attempt')."
           # The producer: exactly one job named report in that attempt, whose
           # upload step succeeded.
           if ! raw=$(gh api --paginate "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID/attempts/$attempt/jobs?per_page=100" \
@@ -290,21 +318,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TESTS_WORKFLOW: Inspect AI Scheduled Tests
+          # The failed run is read at the attempt being triaged; a passing
+          # run's latest attempt is the one that passed.
+          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
         run: |
           set -uo pipefail
           export LC_ALL=C
           dir=triage/versions
           mkdir -p "$dir"
-          # The `Successfully installed ...` lines of a run's full log (job name first), into $2.
+          # The `Successfully installed ...` lines of a run's full log (job name
+          # first), into $2; further arguments go to `gh run view` (`--attempt N`).
           installed() {
-            gh run view "$1" --repo "$REPO" --log 2>/dev/null | grep -F "Successfully installed" > "$2" || true
-            [ -s "$2" ]
+            local run=$1 out=$2
+            shift 2
+            gh run view "$run" --repo "$REPO" "$@" --log 2>/dev/null | grep -F "Successfully installed" > "$out" || true
+            [ -s "$out" ]
           }
           # name<TAB>version per package named on those lines (the version follows the last `-`).
           packages() {
             sed 's/.*Successfully installed //' "$1" | tr ' ' '\n' | sed -E 's/^(.+)-([^-]+)$/\1\t\2/' | sort -u
           }
-          installed "$UPSTREAM_RUN_ID" "$dir/failing.txt" \
+          installed "$UPSTREAM_RUN_ID" "$dir/failing.txt" --attempt "$UPSTREAM_RUN_ATTEMPT" \
             || echo "No install log found for the failed run $UPSTREAM_RUN_ID" > "$dir/failing.txt"
           created=$(jq -r 'if type == "object" and (.createdAt | type) == "string" then .createdAt else "" end' triage/run.json 2>/dev/null || true)
           passing=""; passing_at=""; passing_sha=""
