@@ -38,9 +38,12 @@ and its satellites, and nothing that serves end users:
 
 - **Test output and CI data are third-party-shaped input.** Any code the
   tests exercise (a dependency released that day, a PR under analysis) can
-  shape the logs, timings and run metadata the agents read. Once an agent
-  has read them, its runner is untrusted: a shim on `$GITHUB_PATH`, a line
-  in `$GITHUB_ENV` or a `.pth` file can outlive the agent step.
+  shape the logs, timings and run metadata the agents read, and the fork
+  issues the triage agent searches are public. Once an agent has read
+  them, its runner is untrusted: a shim on `$GITHUB_PATH`, a line in
+  `$GITHUB_ENV` or a `.pth` file can outlive the agent step, so no step
+  that runs after the agent on that runner holds a secret or decides
+  whether the agent's output is published.
 - **`workflow_dispatch` inputs are data, never syntax.** Only people with
   write access can dispatch, and no input reaches a shell script as
   syntax. Shape validation is per workflow: the scheduled suites validate
@@ -68,11 +71,30 @@ and its satellites, and nothing that serves end users:
 
 ## Guarantees (true on `main`)
 
-- The `analyze` and `agent` jobs hold only the read-only job token and an
-  Anthropic key (ci-perf's from a dedicated Console workspace with a spend
-  cap). The triage agent's tools are reads plus file writes under the
-  landing directory; the writes it wants are a manifest that the `land`
-  job validates and performs.
+- The `analyze` and `agent` jobs hold only the read-only job token; their
+  Anthropic keys (`CI_PERF_ANTHROPIC_API_KEY` and `TRIAGE_ANTHROPIC_API_KEY`,
+  each from a dedicated Console workspace with a spend cap; triage does not
+  use the `ANTHROPIC_API_KEY` the test suites run with) are never in the
+  agent's environment, files or reachable processes. Three Unix users carry
+  the separation. The runner user does the trusted bootstrap. The model
+  broker (`.github/actions/model-broker`) reads the key into a process
+  running as the `model-broker` user and forwards Messages API calls, and
+  nothing else, to `api.anthropic.com`. The whole Claude process and every
+  tool it spawns run as a third, unprivileged user (`claude-agent`, chosen so
+  its home does not collide with harden-runner's `/home/agent`) through
+  `.github/actions/isolated-agent`, whose `ANTHROPIC_API_KEY` is only the
+  broker's per-run token (usable only against the broker on loopback while
+  the job runs) and whose `ANTHROPIC_BASE_URL` is the broker. That agent
+  cannot read the broker user's key file or memory; cannot read the runner
+  process's memory or its .NET diagnostic socket, where GitHub's runner keeps
+  every job secret for masking; cannot `sudo` or reach Docker; and runs under
+  `env -i` with no runner command-file variables (so it cannot rewrite a
+  later trusted step) and no OIDC request variables (so it cannot mint
+  tokens). The isolated-agent action runs an isolation check as the agent
+  user and fails the job before the agent if any of that does not hold. The
+  triage agent's tools are reads plus file writes under the landing
+  directory; the writes it wants are a manifest that the `land` job validates
+  and performs.
 - The two agent workflows perform their GitHub and Atlas writes in separate
   jobs on fresh runners, from artifacts those jobs validate first, under a
   GitHub App token minted for that job and scoped to the `inspect_ai` fork
@@ -92,13 +114,36 @@ and its satellites, and nothing that serves end users:
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
-- The `analyze` job runs under an egress allow-list with sudo disabled and
-  refuses to publish evidence that contains the Anthropic key.
+- Both agent jobs run under harden-runner's egress allow-list (Anthropic,
+  reached only by the broker; GitHub; the action's installer; for ci-perf
+  the Python package indexes). harden-runner does not disable sudo here: its
+  hardening runs in a `pre` hook that GitHub runs before every step, so a
+  `disable-sudo-and-containers` would take sudo away before the broker start
+  and agent-user setup that need it; the agent is powerless because it runs
+  as an unprivileged user, not because the runner's sudo was removed. The
+  allow-list stops connections to any other host. It does not stop an
+  upload to an attacker-owned resource on a listed multi-tenant host
+  (`github.com`, `api.github.com`, `registry.npmjs.org`) authenticated with
+  a credential the attacker placed in the agent's input, and the job
+  summary, artifact, issue body and Slack text an agent job produces are
+  published unscreened. What any of these can carry is what the agent can
+  read: the run token, the read-only job token (this repository, expired
+  when the job ends) and the inputs, which are public. Agent output is not
+  screened for secrets because a screen on the agent's runner would be the
+  agent's to defeat and there is no reusable secret to screen for.
 - The stubs pass the shared workflows exactly the secrets they name, never
   `secrets: inherit`.
 
 ## By design
 
+- The agent can spend the capped workspace budget through the broker for as
+  long as its job runs; the cap bounds it. GitHub's runner process holds the
+  job's secrets in memory for masking (its design). The agent is a different
+  Unix user from that process, so it cannot read its memory or environment,
+  nor reach the .NET diagnostic socket that would let a same-user process ask
+  the runtime to dump itself; `kernel.yama.ptrace_scope` of 1 or stricter,
+  which the isolation check requires, is defence in depth behind that user
+  boundary.
 - The `workflow_dispatch` ref on ci-perf is unrestricted: a dispatcher may
   analyze any upstream ref, because the agent job holds no write token and
   publication requires the ref to be `main` (decision: Ransom, 2026-09-08).
@@ -113,8 +158,12 @@ and its satellites, and nothing that serves end users:
    quoted variables.
 2. Write credentials (app secrets, tokens, webhooks) stay out of any job
    that runs an agent or third-party code; such a job gets the job token
-   and its model key and nothing else, and its writes land in a separate
-   job from what it produced.
+   and nothing else, and its writes land in a separate job from what it
+   produced. The model key goes to `.github/actions/model-broker` (a process
+   under the `model-broker` user); the whole agent runs as a separate
+   unprivileged user through `.github/actions/isolated-agent` with only the
+   broker's per-run token and base URL, and no step after the agent holds a
+   secret.
 3. Mint the narrowest token for a write: one repository, only the
    permissions the job uses, in the job that writes.
 4. `tests/` parses the workflows and runs their scripts; extend the matching

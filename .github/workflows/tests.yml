@@ -18,6 +18,7 @@ name: tests
       - ".github/workflows/inspect-ai-scheduled-tests.yml"
       - ".github/workflows/inspect-swe-nightly-tests.yml"
       - ".github/workflows/tests.yml"
+      - ".github/actions/**"
       - "slack-release-announce/**"
       - "tests/**"
   pull_request:
@@ -30,6 +31,7 @@ name: tests
       - ".github/workflows/inspect-ai-scheduled-tests.yml"
       - ".github/workflows/inspect-swe-nightly-tests.yml"
       - ".github/workflows/tests.yml"
+      - ".github/actions/**"
       - "slack-release-announce/**"
       - "tests/**"
 
