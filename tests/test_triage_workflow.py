@@ -780,7 +780,7 @@ def test_the_key_reaches_only_the_broker_and_the_whole_agent_is_isolated():
         else:
             assert "ANTHROPIC_API_KEY" not in yaml.safe_dump(s), s.get("name")
     assert agent_step("broker")["uses"] == "./actions-repo/.github/actions/model-broker"
-    assert agent_step("broker")["with"] == {"api-key": "${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}"}
+    assert agent_step("broker")["with"] == {"api-key": "${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}", "lifetime-minutes": "60"}
     checkout = agent_step("Check out the isolation actions")
     assert checkout["with"] == {"path": "actions-repo", "sparse-checkout": ".github/actions", "persist-credentials": False}
     # The whole Claude process runs through the isolated-agent action, not
@@ -788,6 +788,17 @@ def test_the_key_reaches_only_the_broker_and_the_whole_agent_is_isolated():
     # concern, so there is no separate check step to run as the runner user.
     assert agent_step("claude")["uses"] == "./actions-repo/.github/actions/isolated-agent"
     assert "anthropics/claude-code-action" not in yaml.safe_dump(load_workflow()["jobs"]["agent"])
+
+
+def test_agent_job_timeout_matches_the_broker_lifetime():
+    # The broker exits after lifetime-minutes whether or not the job is done;
+    # a job allowed to run longer would carry on with no model. Both are 60:
+    # triage runs took 2 to 12 minutes over 47 runs (2026-09-03 to 2026-09-22),
+    # and an explicit timeout stops a wedged agent holding the runner for
+    # GitHub's six-hour default (Ransom, 2026-09-22).
+    job = load_workflow()["jobs"]["agent"]
+    assert job["timeout-minutes"] == 60
+    assert agent_step("broker")["with"]["lifetime-minutes"] == str(job["timeout-minutes"])
 
 
 def test_harden_runner_blocks_egress_and_does_not_disable_sudo():

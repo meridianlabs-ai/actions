@@ -91,6 +91,11 @@ jobs:
       (github.event.workflow_run.conclusion == 'failure' &&
        github.event.workflow_run.event == 'schedule')
     runs-on: ubuntu-latest
+    # Matches the broker's lifetime-minutes below, so the job cannot outlive
+    # its model access (a wedged agent would otherwise hold the runner for
+    # GitHub's six-hour default with no model). Triage runs took 2 to 12
+    # minutes over 47 runs, 2026-09-03 to 2026-09-22; 60 is a wide margin.
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: read
@@ -120,6 +125,7 @@ jobs:
         uses: ./actions-repo/.github/actions/model-broker
         with:
           api-key: ${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}
+          lifetime-minutes: "60"   # = the job's timeout-minutes above
 
       # Egress allow-list for the rest of the job. The endpoints are ci-perf's
       # observed set (inspect-ai-ci-perf.yml, "Egress") minus the Python
