@@ -82,12 +82,15 @@ and its satellites, and nothing that serves end users:
   started already carries (no `overwrite`; only another job of the attempt
   can have made it), fails, and so fails the run, while it notes and
   uploads beside an artifact from a previous attempt. The skip cache's
-  `last-inspect-ai-sha` has no log binding: it is accepted only from a run
-  whose conclusion is success, and the newest artifact of the name in that
-  run is taken, which is the successful attempt's `report` upload (a name
-  taken earlier in that attempt would have failed the attempt, and an
-  earlier attempt's artifact is older); the worst a forged value could do
-  there is make one scheduled run skip a commit. What this rests on: a job's
+  `last-inspect-ai-sha` has no log binding. The skip cache selects the
+  newest unexpired `last-inspect-ai-sha` from a successful scheduled run.
+  This does not independently authenticate its producer: a later
+  successful attempt that skips `report` (its `check-commit` found the
+  commit already tested) can leave an earlier attempt's artifact eligible.
+  The upload-conflict check protects attempts whose `report` actually
+  uploads. A forged SHA can cause incorrect skipping in later runs while
+  that artifact remains selected; it cannot select triage's checkout or
+  Slack destination. What this rests on: a job's
   log is written by that job's steps alone; `actions/upload-artifact`
   refuses a duplicate name within an attempt unless told to overwrite, and
   its client documents re-runs as a source of same-named artifacts in one

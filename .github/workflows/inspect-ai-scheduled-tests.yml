@@ -104,16 +104,21 @@ jobs:
           # the report job uploads the artifact only on `schedule`, while a
           # push or dispatch run executes whatever copy of this workflow its
           # branch carries. The query narrows the page to such runs; the jq
-          # filter enforces it on what comes back. Within the run, the name is
-          # not enough on its own: a run's artifact list spans its attempts,
-          # so a re-run that passed can carry both its report job's artifact
-          # and an artifact of the same name a test job of an earlier, failed
-          # attempt made (the report job refuses the name only within its own
-          # attempt, and only the run's conclusion is checked here). The
-          # newest of the name (highest id) is the one to take: the report
-          # job of the successful attempt uploads after every job of that
-          # attempt, and had a job of that attempt taken the name first the
-          # report job would have failed and the run would not be a success.
+          # filter enforces it on what comes back. Within the run, a run's
+          # artifact list spans its attempts, so a re-run that passed can carry
+          # both its report job's artifact and an artifact of the same name a
+          # test job of an earlier, failed attempt made (the report job refuses
+          # the name only within its own attempt). The newest unexpired
+          # artifact of the name (highest id) is taken. That does not
+          # independently authenticate its producer: only the run's conclusion
+          # is checked here, and a later successful attempt that skips report
+          # (this job found the commit already tested) leaves an earlier
+          # attempt's artifact eligible. The report job's name check protects
+          # attempts whose report actually uploads (a name taken earlier in
+          # such an attempt fails it, so the run is not a success). A forged
+          # SHA can make later runs skip a commit for as long as that artifact
+          # stays selected; it cannot select triage's checkout or Slack
+          # destination, which come from the report job's recorded artifact.
           echo "Searching for a successful scheduled run on $DEFAULT_BRANCH with the 'last-inspect-ai-sha' artifact..."
 
           RUN_ID=""
@@ -438,13 +443,15 @@ jobs:
       # these names created since this attempt started can only be another
       # job's, and is refused as tampering before the upload would fail on
       # it; one created before this attempt started is a previous attempt's
-      # and is noted, not refused. The consumers are fail-closed either way:
-      # check-commit accepts `last-inspect-ai-sha` only from a run whose
-      # conclusion is success, which this step's failure prevents, and takes
-      # the newest of that name; triage accepts only the `triage-context`
-      # artifact whose id and digest the step after the upload records in
-      # this job's log. The Slack report below still goes out (always());
-      # only the uploads are withheld.
+      # and is noted, not refused. What the consumers make of it differs:
+      # triage is fail-closed, accepting only the `triage-context` artifact
+      # whose id and digest the step after the upload records in this job's
+      # log; check-commit accepts `last-inspect-ai-sha` from a run whose
+      # conclusion is success (which this step's failure prevents for the
+      # attempt it runs in) and takes the newest of that name, which does not
+      # authenticate the producer when a later successful attempt skipped
+      # this job (see the check-commit comment). The Slack report below still
+      # goes out (always()); only the uploads are withheld.
       - name: Refuse an artifact name another job of this attempt took
         id: names
         env:
