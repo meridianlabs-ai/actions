@@ -58,24 +58,44 @@ and its satellites, and nothing that serves end users:
   run the dispatcher selects and validates its context fields (a 40-hex
   SHA, a Slack channel ID, a Slack timestamp) without independently
   checking that run's event or branch.
-- **Triage's issue policies are enforced on the agent's runner.** The
-  triage workflow's "Compose landing manifest" step reduces an issue's
-  labels to `auto` and its assignees to `ransomr`, keeps one issue action
-  per run and carries a failed agent step into the manifest's
-  `error.fail_run`. That step runs on the same runner as the agent, after
-  it. The `land` job's validator, on its fresh runner, independently
-  enforces the generic manifest contract: schema and known keys, body and
-  text file references, the allowed issue repository, and no bundle under
-  `refuse-bundle`; the Slack destination is a `land` input, not a manifest
-  field. It does not repeat those four triage policies. They hold against
-  a mistyped or hostile `manifest-extra.json`; after a separate compromise
-  of the agent runner (a shim on `$GITHUB_PATH`, a line in `$GITHUB_ENV`)
-  a forged manifest could reach `land` with other label or assignee
-  values, several issue actions or no `error`, within the one repository
-  the validator allows. It could not make an already failed agent job
-  green: the job result is the runner's, and `land` runs after a failure
-  either way. Repeating those policies in the validator is separate
-  hardening, not a fix for a demonstrated write primitive.
+- **Triage never authorizes autonomous implementation.** The issue the
+  triage workflow files carries no label. Until 2026-09-22 its composing
+  step forwarded the `auto` label on the agent's say-so, and on the
+  `inspect_ai` fork that label starts the autonomous coding agent; the
+  agent had just read test output anyone can shape, so the label was a
+  privilege the untrusted principal granted itself and the machine account
+  merely wrote (Claude Security finding 4628345). The machine account is
+  the writer of these issues, not the authority behind them: a maintainer
+  who reads the brief applies `auto` themselves, and the fork's kickoff
+  (the `claude.yml` stub, and the trigger check of the shared workflow it
+  calls) accepts a human labeler's write access and refuses a label the
+  machine account applied. The same holds for the ci-perf publisher in
+  upstream `inspect_ai`, which used to label its findings `auto`.
+- **Triage's issue policies are enforced twice, three of them on the land
+  runner.** The "Compose landing manifest" step on the agent's runner drops
+  every label, reduces assignees to `ransomr`, keeps one issue action per
+  run and carries a failed agent step into the manifest's
+  `error.fail_run`. The `land` job passes the first three to the validator
+  on its fresh runner as `allowed-issue-labels: ""`,
+  `allowed-issue-assignees` and `max-issues: "1"`, alongside the generic
+  manifest contract (schema and known keys, body and text file references,
+  the allowed issue repository, no bundle under `refuse-bundle`, and no
+  `pr` or `handback` field under `refuse-pr`: a `pr.open` needs no push,
+  it adopts or opens a PR for a branch already on origin and labels it,
+  and the `MARVIN_TOKEN` fallback reaches this repository's pull requests
+  where the minted token does not; the Slack destination is a `land`
+  input, not a manifest field), so a manifest forged past the composing
+  step after a separate compromise of the agent runner (a shim on
+  `$GITHUB_PATH`, a line in `$GITHUB_ENV`) is refused whole rather than
+  landed with a label, another owner, several issue actions, a labelled PR
+  or an `@review`. The fourth policy is the composer's alone: such a forged
+  manifest could drop its `error`, but could not make an already failed
+  agent job green, since the job result is the runner's and `land` runs
+  after a failure either way. This is enforcement of an authorization
+  boundary, not a response to a demonstrated write primitive: the
+  redirection route finding 4628349 described was replayed against the
+  real permission engine and refused (see "Verification notes"), and that
+  qualification stands.
 - **A built `.vsix` is repo output, not evidence.** In
   `release-please-vscode.yml` the `build` job runs the consuming repo's
   install hooks, scripts, tests and `vsce:package`, so the package it
@@ -161,7 +181,11 @@ and its satellites, and nothing that serves end users:
   passed on; the scheduled-test skip cache also checks its producer's event
   and branch (see the trust boundaries above for where that check stops).
 - The Slack destination of a triage reply comes from the validated context
-  of the failed run, never from the agent's manifest. The release-note
+  of the failed run, never from the agent's manifest. The issues triage
+  files carry no label, and the `land` job's validator refuses a manifest
+  that names one, names an owner other than `ransomr`, carries more than
+  one issue action, or carries a `pr` or `handback` field, whatever the
+  agent job uploaded. The release-note
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
@@ -220,6 +244,12 @@ and its satellites, and nothing that serves end users:
 - The reviewer stub runs on demand only, on an `@review` comment from a
   collaborator or the machine account's hand-back; nothing reviews a PR on
   open (decision: Ransom, 2026-09-14).
+- A triage-filed fix brief reaches the autonomous coding agent only when a
+  maintainer labels the issue `auto` after reading it. Triage could carry
+  an opt-in of its own (a `workflow_dispatch` input, an allow-list of
+  files), but a human's label after the fact is the decision Ransom
+  approved (2026-09-22): routine triage creates a reviewable issue and
+  authorizes nothing.
 
 ## Adding or changing a workflow here
 

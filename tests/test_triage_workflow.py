@@ -56,6 +56,18 @@ def load_workflow() -> dict:
     return yaml.safe_load(WORKFLOW.read_text())
 
 
+def workflow_env(name: str) -> str:
+    return load_workflow()["env"][name]
+
+
+def land_inputs() -> dict:
+    """The `with:` block of the land job's `land` step, with the workflow's
+    `env` expressions resolved — the per-caller policy the validator enforces."""
+    step = next(s for s in load_workflow()["jobs"]["land"]["steps"] if s.get("uses", "").startswith("meridianlabs-ai/agents/.github/actions/land@"))
+    env = load_workflow()["env"]
+    return {k: re.sub(r"\$\{\{ env\.(\w+) \}\}", lambda m: env[m.group(1)], str(v)) for k, v in step["with"].items()}
+
+
 def agent_step(name_or_id: str) -> dict:
     for step in load_workflow()["jobs"]["agent"]["steps"]:
         if step.get("id") == name_or_id or step.get("name") == name_or_id:
@@ -351,7 +363,7 @@ def compose(tmp_path: Path, manifest_extra, *, outcome="success", files=()) -> t
         "CLAUDE_OUTCOME": outcome,
         "RUN_URL": "https://example.test/run",
         "ISSUES_REPO": ISSUES_REPO,
-        "ASSIGNEE": step["env"]["ASSIGNEE"],
+        "ISSUE_ASSIGNEE": workflow_env("ISSUE_ASSIGNEE"),
     }
     r = run_bash(step["run"], cwd=tmp_path, env=env)
     assert r.returncode == 0, r.stderr
@@ -372,12 +384,42 @@ def test_compose_new_issue_with_slack_is_pinned_and_owned(tmp_path):
         },
         files=["issue.md", "slack.txt"],
     )
-    # repo pinned to the fork, labels reduced to `auto`, the owner always set on a create.
+    # repo pinned to the fork, every label dropped, the owner always set on a create.
     assert extra == {
-        "issues": [issue_entry(title="Triage: test_foo fails", body_file="issue.md", labels=["auto"], assignees=["ransomr"])],
+        "issues": [issue_entry(title="Triage: test_foo fails", body_file="issue.md", assignees=["ransomr"])],
         "slack": {"text_file": "slack.txt"},
     }
     assert "::error::" not in r.stdout
+
+
+@pytest.mark.parametrize("labels", [["auto"], ["Auto"], ["auto", "engine:codex"], ["claude"]])
+def test_compose_never_forwards_a_label_the_agent_asked_for(tmp_path, labels):
+    # Claude Security finding 4628345: `auto` on the fork issue started the
+    # autonomous coding agent, and this step used to keep it on the agent's
+    # say-so. No label the agent names lands, on a create or on a comment; a
+    # maintainer who reads the issue applies `auto` themselves.
+    extra, r = compose(
+        tmp_path,
+        {"issues": [{"title": "Triage: t", "body_file": "issue.md", "labels": labels}], "slack": {"text_file": "s.txt"}},
+        files=["issue.md", "s.txt"],
+    )
+    assert extra["issues"] == [issue_entry(title="Triage: t", body_file="issue.md", assignees=["ransomr"])]
+    assert "error" not in extra                              # a dropped label is not a failed triage
+    extra, _ = compose(
+        tmp_path,
+        {"issues": [{"comment_on": 444, "body_file": "c.md", "labels": labels}], "slack": {"text_file": "s.txt"}},
+        files=["c.md", "s.txt"],
+    )
+    assert extra["issues"] == [issue_entry(title="Comment on #444", body_file="c.md", comment_on=444)]
+
+
+def test_the_prompt_asks_for_no_label():
+    # The agent is told what a label means and that none it names lands; it
+    # is not told to ask for one (the old bucket-C instruction was the only
+    # first-party point where the untrusted agent decided on `auto`).
+    prompt = agent_step("claude")["with"]["prompt"]
+    assert '"labels"' not in prompt and '["auto"]' not in prompt
+    assert "No labels" in prompt and "Nothing you write commissions" in prompt
 
 
 def test_compose_comment_on_closed_unowned_issue(tmp_path):
@@ -555,26 +597,51 @@ def validator(tmp_path_factory) -> Path:
     if not all(f'"{key}"' in text for key in ("slack", "assignees", "reopen")):
         pytest.xfail(f"the agents validator at {override or ref} predates agents#102 (slack / assignees / reopen); "
                      "this workflow is blocked on that PR")
+    if "--allowed-issue-labels" not in text or "--refuse-pr" not in text:
+        pytest.xfail(f"the agents validator at {override or ref} predates the per-caller issue policy flags "
+                     "(--allowed-issue-labels / --allowed-issue-assignees / --max-issues / --refuse-pr, Claude "
+                     "Security finding 4628345); this workflow is blocked on that PR")
     return target
 
 
 def land_validate(validator: Path, tmp_path: Path, extra: dict) -> subprocess.CompletedProcess:
-    """emit-landing's merge (core fields win) and the land job's validator call."""
+    """emit-landing's merge (core fields win) and the land job's validator call,
+    with the policy inputs the workflow's land step actually passes."""
     core = {"schema": 1, "repo": "meridianlabs-ai/actions", "run_id": 42, "branch": "triage",
             "start_sha": SHA, "head_sha": SHA, "has_bundle": False, "pr_number": None, "issue_number": None}
+    (tmp_path / "landing").mkdir(exist_ok=True)
     (tmp_path / "landing" / "manifest.json").write_text(json.dumps({**extra, **core}))
+    inputs = land_inputs()
+    assert inputs["refuse-bundle"] == "true" and inputs["refuse-pr"] == "true" and inputs["branch-prefix"] == "triage"
     return subprocess.run(
         ["python3", str(validator), "--dir", str(tmp_path / "landing"), "--repo", "meridianlabs-ai/actions",
          "--run-id", "42", "--default-branch", "main", "--refused-branches", "main",
-         "--allowed-issue-repos", ISSUES_REPO, "--branch-prefix", "triage", "--refuse-bundle"],
+         "--allowed-issue-repos", inputs["allowed-issue-repos"], "--branch-prefix", "triage", "--refuse-bundle", "--refuse-pr",
+         "--allowed-issue-labels", inputs["allowed-issue-labels"],
+         "--allowed-issue-assignees", inputs["allowed-issue-assignees"],
+         "--max-issues", inputs["max-issues"]],
         text=True, capture_output=True, check=False,
     )
+
+
+def test_land_enforces_the_triage_policies_from_the_workflow_env():
+    # The three policies the compose step applies are passed to land, so the
+    # validator enforces them on its own runner; the owner comes from the one
+    # workflow env value the compose step reads too.
+    inputs = land_inputs()
+    assert inputs["allowed-issue-repos"] == ISSUES_REPO
+    assert inputs["allowed-issue-labels"] == ""
+    assert inputs["allowed-issue-assignees"] == workflow_env("ISSUE_ASSIGNEE") == "ransomr"
+    assert inputs["max-issues"] == "1"
+    assert inputs["refuse-pr"] == "true"
 
 
 @pytest.mark.parametrize(
     "manifest_extra, files",
     [
         ({"issues": [{"title": "Triage: t", "body_file": "issue.md", "labels": ["auto"]}], "slack": {"text_file": "slack.txt"}},
+         ["issue.md", "slack.txt"]),
+        ({"issues": [{"title": "Triage: t", "body_file": "issue.md", "assignees": ["evil"]}], "slack": {"text_file": "slack.txt"}},
          ["issue.md", "slack.txt"]),
         ({"issues": [{"comment_on": 444, "body_file": "c.md", "reopen": True, "assignees": ["ransomr"]}],
           "slack": {"text_file": "slack.txt"}}, ["c.md", "slack.txt"]),
@@ -585,6 +652,86 @@ def land_validate(validator: Path, tmp_path: Path, extra: dict) -> subprocess.Co
 def test_composed_manifest_passes_the_land_validator(validator, tmp_path, manifest_extra, files):
     extra, _ = compose(tmp_path, manifest_extra, files=files)
     r = land_validate(validator, tmp_path, extra)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def crafted(tmp_path: Path, issues, files) -> dict:
+    """A manifest-extra written past the compose step — the runner-compromise
+    case the land job's own policy exists for: the composer's normalization
+    never ran, so whatever is here reaches the validator as is."""
+    landing = tmp_path / "landing"
+    landing.mkdir(exist_ok=True)
+    for name in files:
+        (landing / name).write_text(f"body of {name}\n")
+    return {"issues": [{"repo": ISSUES_REPO, **it} for it in issues], "slack": {"text_file": files[-1]}}
+
+
+@pytest.mark.parametrize("issues, files, needle", [
+    # the finding's route: a create carrying `auto`, composer bypassed
+    ([{"title": "Triage: t", "body_file": "issue.md", "labels": ["auto"], "assignees": ["ransomr"]}], ["issue.md", "s.txt"],
+     "label 'auto' is not in the allowed issue labels (none)"),
+    ([{"title": "Triage: t", "body_file": "issue.md", "labels": ["AUTO"], "assignees": ["ransomr"]}], ["issue.md", "s.txt"],
+     "label 'AUTO' is not in the allowed issue labels (none)"),
+    # any other label a fork workflow might react to
+    ([{"title": "Triage: t", "body_file": "issue.md", "labels": ["claude"], "assignees": ["ransomr"]}], ["issue.md", "s.txt"],
+     "label 'claude' is not in the allowed issue labels (none)"),
+    # a label on an update of an existing issue
+    ([{"title": "Comment on #444", "body_file": "c.md", "comment_on": 444, "labels": ["auto"]}], ["c.md", "s.txt"],
+     "label 'auto' is not in the allowed issue labels (none)"),
+    # another owner, on a create and on an update
+    ([{"title": "Triage: t", "body_file": "issue.md", "assignees": ["evil"]}], ["issue.md", "s.txt"],
+     "assignee 'evil' is not in the allowed issue assignees (ransomr)"),
+    ([{"title": "Comment on #444", "body_file": "c.md", "comment_on": 444, "assignees": ["ransomr", "evil"]}], ["c.md", "s.txt"],
+     "assignee 'evil' is not in the allowed issue assignees (ransomr)"),
+    # more than one issue action
+    ([{"title": "Triage: a", "body_file": "a.md", "assignees": ["ransomr"]},
+      {"title": "Triage: b", "body_file": "b.md", "assignees": ["ransomr"]}], ["a.md", "b.md", "s.txt"],
+     "issues lists 2 entries; this land job allows at most 1"),
+])
+def test_land_refuses_a_manifest_crafted_past_the_composer(validator, tmp_path, issues, files, needle):
+    r = land_validate(validator, tmp_path, crafted(tmp_path, issues, files))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert needle in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("extra, needles", [
+    # Review round 1, B1: the composer ignores `pr` and `handback`, but a
+    # manifest forged past it could open or adopt a PR for a branch already
+    # on origin (`triage-fixture` carries the prefix), label it `auto` — a
+    # label the loop gates accept from the machine account — and post the
+    # live `@review`. refuse-bundle does not close this (no push is needed),
+    # and the PAT fallback reaches this repository's pull requests.
+    ({"branch": "triage-fixture", "pr": {"open": True, "title": "Fixture", "body_file": "body.md", "labels": ["auto"]},
+      "handback": True},
+     ["refuses pull-request fields (--refuse-pr) but the manifest carries `pr`",
+      "refuses pull-request fields (--refuse-pr) but the manifest sets handback"]),
+    ({"pr": {"open": True, "title": "Fixture", "body_file": "body.md"}},
+     ["refuses pull-request fields (--refuse-pr) but the manifest carries `pr`"]),
+    ({"handback": True},
+     ["refuses pull-request fields (--refuse-pr) but the manifest sets handback"]),
+])
+def test_land_refuses_pull_request_fields_forged_into_a_triage_manifest(validator, tmp_path, extra, needles):
+    (tmp_path / "landing").mkdir(exist_ok=True)
+    (tmp_path / "landing" / "body.md").write_text("Review fixture only.\n")
+    manifest = {**crafted(tmp_path, [], ["s.txt"]), **extra}
+    r = land_validate(validator, tmp_path, manifest)
+    assert r.returncode == 1, r.stdout + r.stderr
+    for needle in needles:
+        assert needle in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("issues, files", [
+    # what triage legitimately lands: an unlabelled, owned create...
+    ([{"title": "Triage: t", "body_file": "issue.md", "assignees": ["ransomr"]}], ["issue.md", "s.txt"]),
+    # ...a comment on an existing issue, reopened and adopted...
+    ([{"title": "Comment on #444", "body_file": "c.md", "comment_on": 444, "reopen": True, "assignees": ["ransomr"]}],
+     ["c.md", "s.txt"]),
+    # ...a bare comment, and no issue action at all
+    ([{"title": "Comment on #444", "body_file": "c.md", "comment_on": 444}], ["c.md", "s.txt"]),
+    ([], ["s.txt"]),
+])
+def test_land_accepts_what_triage_legitimately_lands(validator, tmp_path, issues, files):
+    r = land_validate(validator, tmp_path, crafted(tmp_path, issues, files))
     assert r.returncode == 0, r.stdout + r.stderr
 
 

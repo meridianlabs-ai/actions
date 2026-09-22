@@ -80,6 +80,11 @@ env:
   # token); the land job writes them as marvin, with a token minted for
   # that one repository, and refuses any other repo.
   ISSUES_REPO: meridianlabs-ai/inspect_ai
+  # Owner of every tracking issue: the board's working views filter on
+  # assignee, so an unassigned issue is invisible (inspect_ai#444). Read by
+  # the compose step (which sets it) and by the land job (whose validator
+  # admits no other assignee), so the two cannot drift.
+  ISSUE_ASSIGNEE: ransomr
 
 jobs:
   # UNTRUSTED once the agent has run: job token only; the Anthropic key is
@@ -479,9 +484,9 @@ jobs:
             with at most these two keys and nothing else:
             - `issues`: an array with AT MOST ONE entry, either
               - a new tracking issue: `{"title": "Triage: <short summary>",
-                "body_file": "issue.md", "labels": ["auto"]}` (`labels` only when the
-                bucket below says so; otherwise omit it). It is assigned to `ransomr`
-                and put on the Atlas board for you; do not add other assignees.
+                "body_file": "issue.md"}`. It is assigned to `ransomr` and put on the
+                Atlas board for you; do not add other assignees, and do not add
+                labels: no label you name lands (see below).
               - a comment on an existing issue: `{"comment_on": <issue number>,
                 "body_file": "comment.md", "reopen": true, "assignees": ["ransomr"]}`
                 — `reopen` only when the issue is closed (a regression), `assignees`
@@ -489,8 +494,11 @@ jobs:
                 only to an unowned issue, and puts a reopened or newly owned issue on
                 the board); omit both otherwise.
               Every entry targets ${{ env.ISSUES_REPO }}; the landing job refuses any
-              other repo, drops every label other than `auto` and every assignee other
-              than `ransomr`, and lands only the first entry.
+              other repo, drops every label and every assignee other than `ransomr`,
+              and lands only the first entry. Labels are not yours to give: the fork
+              reacts to some of them (`auto` starts an autonomous coding agent), and
+              whether an issue you describe is handed to automation is a decision the
+              maintainer takes after reading it, not one this run can make.
             - `slack`: `{"text_file": "slack.txt"}` — the reply to post in the Slack
               thread of the failed run's notification (the landing job knows the
               channel and thread; you do not choose them). Plain text with Slack
@@ -511,8 +519,10 @@ jobs:
             3. Write the manifest and body files for that bucket.
             4. Stop (take no further actions).
 
-            You do NOT have write access to inspect_ai — a human will apply any fix from
-            the tracking issue you describe.
+            You do NOT have write access to inspect_ai — a human reads the tracking
+            issue you describe and decides how its fix is made (by hand, or by handing
+            the issue to the autonomous coding agent). Nothing you write commissions
+            that agent.
 
             # Think carefully
             This triage has real downstream consequences: issues on the tracking repo,
@@ -686,13 +696,13 @@ jobs:
               1. Describe a new tracking issue in the issues repo (${{ env.ISSUES_REPO }}):
                  - Title: `Triage: <short summary>`
                  - Assignee: `ransomr` (the landing job adds it)
-                 - Labels: `["auto"]`. The label hands the issue to the autonomous
-                   pipeline: the fork's agent implements your Proposed fix and opens a
-                   PR into the automated review loop, so write the Proposed fix
-                   section as a brief the implementer can follow verbatim.
-                   Bucket C ONLY — this is the well-understood-fix bucket; if
-                   your confidence wavers while writing the issue, drop back
-                   to bucket D (no labels) instead.
+                 - No labels. The maintainer who reads the issue may hand it to the
+                   autonomous pipeline (the fork's agent implements the Proposed fix
+                   and opens a PR into the automated review loop) by labelling it
+                   themselves, so write the Proposed fix section as a brief an
+                   implementer can follow verbatim. Bucket C is the
+                   well-understood-fix bucket; if your confidence wavers while
+                   writing the issue, drop back to bucket D instead.
                  - Body (`issue.md`) structured as:
                    ## Summary
                    <one-line description>
@@ -713,10 +723,11 @@ jobs:
                     Reference absolute paths under inspect_ai/ so a human can apply it.>
 
                    ## Suggested follow-up
-                   This issue carries the `auto` label, so the autonomous agent
-                   will implement the proposed fix and open a PR into the
-                   automated review loop. If that doesn't engage (or the fix
-                   needs rework), a PR can be created manually:
+                   The fix above is written as a brief the autonomous agent can
+                   follow: a maintainer who agrees with it can apply the `auto`
+                   label to this issue, and the fork's agent implements it and
+                   opens a PR into the automated review loop. Otherwise a PR can
+                   be created manually:
                    ```
                    cd <path-to-inspect_ai-clone>
                    git checkout -b claude/triage-<UPSTREAM_RUN_ID>
@@ -736,10 +747,9 @@ jobs:
             more than ~30 lines, OR multiple tests failed for different reasons.
             Action: same dedup logic as bucket C (if `EXISTING_ISSUE` is set, a
             `comment_on` entry with `reopen` / `assignees` as needed; otherwise a new
-            issue) — but NEVER give the `auto`
-            label here: bucket D means the fix is not well understood, and the label
-            would hand a speculative brief to the autonomous pipeline. If describing a
-            new issue, body has:
+            issue). Say plainly in the body that the fix is not yet understood, so
+            nobody hands a speculative brief to the autonomous pipeline. If describing
+            a new issue, body has:
               ## Root cause
               <"not yet determined" + what you examined>
 
@@ -796,33 +806,40 @@ jobs:
       # normalized rather than passed through: a mistyped entry would make the
       # validator refuse the WHOLE manifest, so dropping it with a warning is
       # the proportionate failure. Every issue entry is pinned to ISSUES_REPO
-      # (the agent's `repo`, if any, is ignored), its labels are reduced to
-      # `auto`, its assignees to ASSIGNEE (a new issue is always assigned; an
-      # existing one only when the agent asks and the land job finds it
-      # unowned), `reopen` is kept only on a comment, and only the first
-      # entry survives — one issue action per run, the prompt's rule,
-      # enforced here. What is valid still lands, but a failed agent step,
+      # (the agent's `repo`, if any, is ignored), its labels are dropped
+      # entirely, its assignees reduced to ISSUE_ASSIGNEE (a new issue is
+      # always assigned; an existing one only when the agent asks and the
+      # land job finds it unowned), `reopen` is kept only on a comment, and
+      # only the first entry survives — one issue action per run, the
+      # prompt's rule, enforced here. No label because a label can be an
+      # authorization: `auto` on a fork issue starts the autonomous coding
+      # agent, and until 2026-09-22 this step forwarded it on the agent's
+      # say-so — an agent that had just read test output anyone can shape,
+      # so the label was a privilege the untrusted principal granted itself
+      # and marvin merely wrote (Claude Security finding 4628345). The
+      # maintainer who reads the issue applies `auto` if the brief deserves
+      # it; that human's label is what the fork's kickoff accepts.
+      # What is valid still lands, but a failed agent step,
       # an unparsable manifest, any entry or key that was dropped, or a run
       # without Slack text (every triage owes the thread a reply) becomes
       # the manifest's `error` (fail_run), so the land job fails loudly
       # instead of ending a triage green with part of it missing.
       #
-      # Those four triage policies — labels reduced to `auto`, assignees to
-      # ASSIGNEE, one issue action, a failed agent step carried into
-      # `error.fail_run` — are enforced here and only here, by a step on
-      # the agent's own runner. The land job's validator independently
-      # enforces the generic contract: the schema and known keys, the body
-      # and text file references, the allowed issue repository, no bundle
-      # under refuse-bundle; the Slack destination is a land input, not a
-      # manifest field. It does not repeat these four. So they hold against
-      # a mistyped or hostile manifest-extra.json, not against a separate
-      # compromise of this runner after the agent step (a shim on
-      # $GITHUB_PATH, a line in $GITHUB_ENV): a manifest forged past this
-      # step could reach land with other label or assignee values, several
-      # issue actions or no `error`, within the one repository the validator
-      # allows. It could not make an already failed agent job green: the job
-      # result is the runner's, not the manifest's, and land runs under
-      # always() either way.
+      # Three of the four triage policies — no labels, assignees limited to
+      # ISSUE_ASSIGNEE, one issue action — are enforced twice: here, for the
+      # proportionate warning-and-drop, and again by the land job's
+      # validator on its fresh runner, from land's `allowed-issue-labels`,
+      # `allowed-issue-assignees` and `max-issues` inputs, where a manifest
+      # forged past this step (a shim on $GITHUB_PATH, a line in
+      # $GITHUB_ENV after the agent ran) is refused whole rather than
+      # landed. The fourth — a failed agent step carried into
+      # `error.fail_run` — is enforced here only; a forged manifest could
+      # drop that `error`, but could not make an already failed agent job
+      # green: the job result is the runner's, not the manifest's, and land
+      # runs under always() either way. The validator also enforces the
+      # generic contract (schema and known keys, file references, the
+      # allowed issue repository, no bundle under refuse-bundle); the Slack
+      # destination is a land input, not a manifest field.
       - name: Compose landing manifest
         id: landing
         if: always()
@@ -835,9 +852,6 @@ jobs:
           # value but "success" makes this a failed triage that land reports.
           CLAUDE_OUTCOME: ${{ steps.claude.outputs.conclusion }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Owner of every tracking issue: the board's working views filter
-          # on assignee, so an unassigned issue is invisible (inspect_ai#444).
-          ASSIGNEE: ransomr
         run: |
           set -uo pipefail
           mkdir -p "$DIR"
@@ -851,7 +865,7 @@ jobs:
               agent='{}'
             fi
           fi
-          norm=$(jq -c --arg repo "$ISSUES_REPO" --arg owner "$ASSIGNEE" '{
+          norm=$(jq -c --arg repo "$ISSUES_REPO" --arg owner "$ISSUE_ASSIGNEE" '{
               issues: [((.issues // []) | if type == "array" then . else [] end)[] | select(type == "object"
                           and (.body_file | type) == "string" and (.body_file | test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$"))
                           and ((.comment_on == null)
@@ -860,13 +874,11 @@ jobs:
                         | {repo: $repo,
                            title: (if (.title | type) == "string" and .title != "" then .title[0:256] else "Comment on #\(.comment_on)" end),
                            body_file,
-                           labels: (if .comment_on == null then [(.labels // [])[]? | strings | select(. == "auto")] else [] end),
                            assignees: (if .comment_on == null then [$owner]
                                        else [(.assignees // [])[]? | strings | select(. == $owner)] | unique end),
                            reopen: (.comment_on != null and .reopen == true),
                            comment_on}
                         | if .comment_on == null then del(.comment_on) else . end
-                        | if .labels == [] then del(.labels) else . end
                         | if .assignees == [] then del(.assignees) else . end
                         | if .reopen then . else del(.reopen) end],
               slack: ((.slack.text_file? // "") | if type == "string" and test("^[A-Za-z0-9_-][A-Za-z0-9._-]*$") then . else "" end),
@@ -935,8 +947,10 @@ jobs:
 
   # TRUSTED, last: a fresh runner that checks out nothing and installs
   # nothing. The `land` composite is the whole landing — download, validate
-  # (refusing any manifest that carries commits: nothing here may push),
-  # create, comment on, reopen and assign the fork's tracking issues as
+  # (refusing any manifest that carries commits or pull-request fields:
+  # nothing here may push, open, adopt or label a PR, or post `@review`; or
+  # that names a label, another assignee or a second issue action, whatever
+  # the agent job uploaded), create, comment on, reopen and assign the fork's tracking issues as
   # marvin (created and adopted issues go on Atlas at Todo by node ID; the
   # assignee is added only to an unowned issue), post the Slack message to the
   # destination the agent job validated, report the manifest's error and
@@ -986,9 +1000,27 @@ jobs:
           # that names it.
           token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
           refuse-bundle: "true"
+          # No PR either: a manifest carrying `pr` (open or adopt a PR for
+          # a branch that already exists on origin and label it — `auto`
+          # opts a PR into the autonomous loops, whose gates accept the
+          # machine account as the labeler) or `handback` (the live
+          # `@review`) is refused whole. refuse-bundle alone does not close
+          # this: `pr.open` needs no push, and while the minted token
+          # reaches only the fork's issues, the MARVIN_TOKEN fallback above
+          # reaches this repository's pull requests (review round 1, B1).
+          refuse-pr: "true"
           # The one repo the manifest's issues[] may name; the validator
           # refuses every other.
           allowed-issue-repos: ${{ env.ISSUES_REPO }}
+          # The triage policies the compose step applies on the agent's
+          # runner, enforced again here where that runner cannot reach: no
+          # labels (an empty list — the agent job may not commission the
+          # fork's `auto` pipeline, or anything else a label triggers; a
+          # maintainer who reads the issue labels it), one owner, one issue
+          # action. A manifest naming anything else is refused whole.
+          allowed-issue-labels: ""
+          allowed-issue-assignees: ${{ env.ISSUE_ASSIGNEE }}
+          max-issues: "1"
           # The run names no PR; pin the manifest's (never pushed) branch to
           # the fixed name the agent job's emit-landing used.
           branch-prefix: triage
