@@ -400,22 +400,25 @@ jobs:
 
 
           def check_extra_fields(info):
-              # yauzl (vsce's reader) replaces an entry's name with the one in an
-              # Info-ZIP Unicode Path field (0x7075) when the entry's UTF-8 flag is
-              # off; Python and other readers keep the header name. An entry
-              # could thus be one file to this check and the manifest to vsce.
-              # vsce's own packager writes no such field, so reject any, and any
+              # An Info-ZIP Unicode Path extra field (0x7075) carries a second
+              # name for an entry. Some readers apply it (yauzl, vsce's reader;
+              # Python's zipfile from 3.12) and others keep the header name
+              # (Java's ZipFile, older Python), so an entry could be one file to
+              # one consumer and the manifest to another. vsce's own packager
+              # writes no such field: reject any, naming both the header name
+              # (orig_filename, on every Python) and the field's, and reject
               # extra data that does not parse as (id, length, data) records.
               extra, offset = info.extra, 0
               while offset < len(extra):
                   if offset + 4 > len(extra):
-                      raise Rejected(f"archive entry {info.filename!r} has malformed extra-field data")
+                      raise Rejected(f"archive entry {info.orig_filename!r} has malformed extra-field data")
                   field_id = int.from_bytes(extra[offset:offset + 2], "little")
                   length = int.from_bytes(extra[offset + 2:offset + 4], "little")
                   if offset + 4 + length > len(extra):
-                      raise Rejected(f"archive entry {info.filename!r} has malformed extra-field data")
+                      raise Rejected(f"archive entry {info.orig_filename!r} has malformed extra-field data")
                   if field_id == 0x7075:
-                      raise Rejected(f"archive entry {info.filename!r} carries a Unicode Path extra field that could rename it for some readers")
+                      alias = extra[offset + 9:offset + 4 + length].decode("utf-8", "replace")
+                      raise Rejected(f"archive entry {info.orig_filename!r} carries a Unicode Path extra field naming it {alias!r}, which some readers apply")
                   offset += 4 + length
 
 

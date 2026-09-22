@@ -293,10 +293,11 @@ def test_rejects_symlink_entry(tmp_path):
     [("extension/alternate.json", "extension/package.json"), ("alternate.vsixmanifest", "extension.vsixmanifest"), ("extension/dist/x.js", "extension/dist/y.js")],
 )
 def test_rejects_unicode_path_extra_field_that_renames_an_entry_for_yauzl(tmp_path, name, alias):
-    # yauzl applies the field; Python and the registries' readers keep the header name, so
-    # the entry is a stray file to this check and the manifest to vsce.
+    # yauzl applies the field (as does Python's zipfile from 3.12); Java's ZipFile and older
+    # Python keep the header name, so the entry is one file to one consumer and the manifest
+    # to another. The message names both, whichever Python runs the validator.
     message = rejected(tmp_path, entries() + [(unicode_path_alias(name, alias), package_json(name="other-extension"))])
-    assert f"archive entry {name!r} carries a Unicode Path extra field" in message
+    assert f"archive entry {name!r} carries a Unicode Path extra field naming it {alias!r}" in message
 
 
 def test_rejects_both_manifests_aliased_at_once(tmp_path):
