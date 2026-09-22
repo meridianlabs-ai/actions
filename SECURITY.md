@@ -76,6 +76,20 @@ and its satellites, and nothing that serves end users:
   green: the job result is the runner's, and `land` runs after a failure
   either way. Repeating those policies in the validator is separate
   hardening, not a fix for a demonstrated write primitive.
+- **A built `.vsix` is repo output, not evidence.** In
+  `release-please-vscode.yml` the `build` job runs the consuming repo's
+  install hooks, scripts, tests and `vsce:package`, so the package it
+  uploads, that file's name and any version it reports are repo-controlled,
+  and vsce and ovsx publish to whatever publisher, name and version the
+  package's own manifests declare. Separating build from publish confines
+  where that code runs; it does not bind the publisher-wide PATs to one
+  extension. The `publish` job's "Verify VSIX" step does that (see the
+  guarantees below); what it cannot do is stop a compromised release commit
+  from becoming the content of the one extension version it authorizes,
+  which is what building is. A Marketplace PAT covers every extension of
+  every publisher its account manages and an Open VSX token every namespace
+  of its account; tokens scoped to the one publisher, where a marketplace
+  allows it, are an administrative defence separate from this check.
 - **Release notes are contributor text.** The announce action reads notes
   assembled from merged commit subjects in the calling repo and treats them
   as untrusted when it builds Slack mrkdwn.
@@ -136,6 +150,22 @@ and its satellites, and nothing that serves end users:
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
+- The VS Code publish job publishes only a package it has bound to the
+  release: before any step holds a PAT, its inline validator opens the
+  downloaded `.vsix` without executing anything in it and fails the job
+  unless `extension/package.json` and `extension.vsixmanifest` agree and
+  name exactly the caller's `extension-id` at the version in the
+  release-please tag (`vX.Y.Z`, `X.Y.Z`, or either with a release-please
+  component prefix). The artifact directory must hold exactly one regular
+  file with a plain name; an archive with repeated or case-variant manifest
+  entries, unsafe entry names or symlinks, a manifest with duplicate JSON
+  keys or a DTD, or more than one `Identity` is rejected. Nothing the build
+  job output is used afterwards: the verified path and the tag's version
+  feed the publish commands, the already-published checks (exact JSON
+  comparison, a rerun convenience rather than a control) and the release
+  upload. The validator reads the zip's central directory as vsce, ovsx and
+  the registries do; it does not defend against parser differentials beyond
+  those it rejects by name.
 - Both agent jobs run under harden-runner's egress allow-list (Anthropic,
   reached only by the broker; GitHub; the action's installer; for ci-perf
   the Python package indexes). harden-runner does not disable sudo here: its
