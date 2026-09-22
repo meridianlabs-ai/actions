@@ -86,6 +86,18 @@ clean.
   `inspect-ai-ci-perf.yml`). Do not widen an agent job's permissions or allow
   list without a test for the write vector it closes, and put no secret in a
   step that runs after the agent.
+- A job that installs and runs the day's dependency closure (the scheduled
+  and nightly test suites) holds nothing that reaches beyond the job: the
+  workflow declares a read-only token, its checkouts set
+  `persist-credentials: false`, and it restores and saves no Actions cache.
+  An artifact a later trusted step consumes is bound to its producer, not to
+  its name: the scheduled run's `report` job refuses a name another job of
+  its attempt took (a re-run may upload the names again) and records the id
+  and digest of the `triage-context` it uploaded in its own log; triage
+  resolves the upstream attempt once, reads every part of the run at it, and
+  downloads that id or nothing; the skip cache takes the newest
+  `last-inspect-ai-sha` of a successful run (see the headers of
+  `inspect-ai-scheduled-tests.yml` and `triage-test-failures.yml`).
 
 ## PRs
 

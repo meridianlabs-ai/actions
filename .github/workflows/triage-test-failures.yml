@@ -3,10 +3,12 @@
 # boundary between them (the landing design in the agents repo,
 # design/architecture.md → "Landing job"; this repo's issue #106).
 #
-# agent downloads the failed run's logs and its triage-context artifact,
-# validates the artifact's fields before using any of them, checks out
-# UKGovernmentBEIS/inspect_ai at the tested commit and runs the Claude triage
-# agent. The agent's input is test output, which any code the tests exercise
+# agent downloads the failed run's logs and its triage-context artifact (only
+# the one the run's report job recorded in its own log, by id and digest: the
+# run's test jobs execute third-party code and could otherwise supply a
+# same-named artifact), validates the artifact's fields before using any of
+# them, checks out UKGovernmentBEIS/inspect_ai at the tested commit and runs
+# the Claude triage agent. The agent's input is test output, which any code the tests exercise
 # can shape, and public fork issues, which anyone can write, so this job
 # holds only the job token (read-only): no MARVIN_TOKEN, no Slack token, and
 # not the Anthropic key either. The key (TRIAGE_ANTHROPIC_API_KEY, a key from
@@ -158,17 +160,47 @@ jobs:
             registry.npmjs.org:443
             release-assets.githubusercontent.com:443
 
+      # Every read of the upstream run below is of one attempt, resolved here
+      # once: the attempt whose completion fired this run, or, for a dispatch
+      # that names a run, its latest. A triage that starts late or is re-run
+      # after the upstream run gained another attempt would otherwise read
+      # attempt 2's failures and installed packages (unqualified `gh run view`
+      # serves the latest attempt) beside attempt 1's tested SHA and Slack
+      # thread. The failed log, the run metadata, the failing run's install
+      # log and the trusted context all take this value; the passing baseline
+      # is a different run, selected on its own.
+      - name: Resolve the upstream run attempt
+        id: attempt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_ATTEMPT: ${{ github.event.workflow_run.run_attempt || '' }}
+        run: |
+          set -uo pipefail
+          attempt="$EVENT_ATTEMPT"
+          if [ -z "$attempt" ]; then
+            attempt=$(gh api "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID" --jq '.run_attempt' 2>/dev/null || true)
+          fi
+          if ! [[ "$attempt" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Could not resolve the attempt of run $UPSTREAM_RUN_ID to triage (got '$attempt')."
+            exit 1
+          fi
+          { echo "attempt<<EOF"; echo "$attempt"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          echo "Triaging attempt $attempt of run $UPSTREAM_RUN_ID"
+
       - name: Download failed logs from upstream run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
         run: |
           mkdir -p triage
-          echo "Fetching logs for run $UPSTREAM_RUN_ID"
-          gh run view "$UPSTREAM_RUN_ID" \
-            --repo "${{ github.repository }}" \
+          echo "Fetching logs for run $UPSTREAM_RUN_ID attempt $UPSTREAM_RUN_ATTEMPT"
+          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
+            --repo "$REPO" \
             --log-failed > triage/failed.log 2>&1 || echo "No failed-step logs available"
-          gh run view "$UPSTREAM_RUN_ID" \
-            --repo "${{ github.repository }}" \
+          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
+            --repo "$REPO" \
             --json jobs,conclusion,displayTitle,headBranch,headSha,url,createdAt \
             > triage/run.json
           # Truncate very long logs so we fit in the context window.
@@ -182,14 +214,96 @@ jobs:
             fi
           fi
 
-      - name: Download triage-context artifact
+      # The triage-context artifact is trusted for who produced it, not for
+      # its name. A run's artifact namespace is shared by all its jobs, and
+      # the scheduled run's slow-tests and static-analysis jobs execute
+      # third-party code (the day's dependency closure, upstream's tests)
+      # before the report job uploads: a process there can create an artifact
+      # named triage-context with a channel, thread and SHA of its choosing,
+      # after which the report job's own upload in that attempt fails on the
+      # name conflict (a later attempt may upload the name again).
+      # The run-level gate above (a failed scheduled run) does not see that,
+      # and shape checks on the fields do not either. So this step downloads
+      # nothing by name. It finds the report job of the attempt being triaged
+      # through the jobs API, requires its upload step to have succeeded,
+      # reads from that job's log (which no other job can write to) the
+      # artifact id and digest the report job recorded for what it uploaded
+      # (inspect-ai-scheduled-tests.yml, "Record the triage-context artifact
+      # identity"), checks that id against the run's artifact list and the
+      # downloaded bytes against the digest, and only then extracts
+      # slack_thread.json for the validation step below. Anything short of
+      # that is "no context": default Slack destination, inspect_ai main,
+      # exact=false. A report job whose upload step failed is reported as a
+      # possible squat; a same-named artifact with another id is named and
+      # ignored. The attempt matters: a re-run has its own report job and its
+      # own log, and the run's artifact list spans attempts (each attempt may
+      # upload the name again).
+      - name: Resolve the trusted triage context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # The attempt every other read of the upstream run uses (resolved above).
+          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
         run: |
-          gh run download "$UPSTREAM_RUN_ID" \
-            --repo "${{ github.repository }}" \
-            --name triage-context \
-            --dir triage 2>/dev/null || echo "No triage-context artifact (triage will post to the channel root)"
+          set -uo pipefail
+          mkdir -p triage
+          none() {
+            echo "$1"
+            echo "No trusted triage context: triage posts to the default Slack destination and investigates inspect_ai main (exact=false)."
+            exit 0
+          }
+          attempt="$UPSTREAM_RUN_ATTEMPT"
+          [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || none "No resolved attempt for run $UPSTREAM_RUN_ID (got '$attempt')."
+          # The producer: exactly one job named report in that attempt, whose
+          # upload step succeeded.
+          if ! raw=$(gh api --paginate "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID/attempts/$attempt/jobs?per_page=100" \
+                       --jq '.jobs[] | select(.name == "report")
+                             | {id, conclusion, upload: ([.steps[]? | select(.name == "Upload triage artifact") | .conclusion][0] // "absent")}' 2>/dev/null); then
+            none "Could not list the jobs of attempt $attempt of run $UPSTREAM_RUN_ID."
+          fi
+          jobs=$(jq -sc '.' <<<"$raw")
+          count=$(jq -r 'length' <<<"$jobs")
+          [ "$count" = "1" ] || none "Attempt $attempt of run $UPSTREAM_RUN_ID has $count jobs named report; the context needs exactly one producer."
+          job_id=$(jq -r '.[0].id' <<<"$jobs")
+          upload=$(jq -r '.[0].upload' <<<"$jobs")
+          [[ "$job_id" =~ ^[0-9]+$ ]] || none "The report job of attempt $attempt has no numeric id."
+          case "$upload" in
+            success) ;;
+            skipped | absent)
+              none "The report job (attempt $attempt) uploaded no triage context (upload step: $upload): the run passed, or its Slack notification failed." ;;
+            *)
+              echo "::warning::The report job's triage-context upload ended '$upload' in attempt $attempt of run $UPSTREAM_RUN_ID. If that was a name conflict, a job that ran third-party code created an artifact named triage-context before the report job could; that artifact is not the report job's and is ignored (SECURITY.md)."
+              none "The report job's upload did not succeed." ;;
+          esac
+          # What the report job says it uploaded, from its own log.
+          if ! log=$(gh api "repos/$REPO/actions/jobs/$job_id/logs" 2>/dev/null); then
+            none "Could not read the log of report job $job_id."
+          fi
+          recorded=$(tr -d '\r' <<<"$log" | grep -E '^[^ ]+ triage-context-artifact id=[0-9]+ digest=sha256:[0-9a-f]{64}$' \
+                     | sed -E 's/^[^ ]+ //' | sort -u || true)
+          lines=$(grep -c . <<<"$recorded" || true)
+          [ "$lines" = "1" ] || none "The report job's log (job $job_id) records $lines triage-context artifact identities; exactly one is needed."
+          id=$(sed -E 's/^triage-context-artifact id=([0-9]+) .*/\1/' <<<"$recorded")
+          digest=$(sed -E 's/.* digest=(sha256:[0-9a-f]{64})$/\1/' <<<"$recorded")
+          # That id must be in the run's artifact list, unexpired, under the
+          # expected name and with the recorded digest.
+          if ! raw=$(gh api --paginate "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID/artifacts?per_page=100" \
+                       --jq '.artifacts[] | {id, name, digest, expired}' 2>/dev/null); then
+            none "Could not list the artifacts of run $UPSTREAM_RUN_ID."
+          fi
+          artifacts=$(jq -sc '.' <<<"$raw")
+          match=$(jq -c --argjson id "$id" '[.[] | select(.id == $id)]' <<<"$artifacts")
+          [ "$(jq -r 'length' <<<"$match")" = "1" ] || none "Artifact $id, which the report job recorded, is no longer in run $UPSTREAM_RUN_ID (deleted or replaced); no other artifact is trusted."
+          jq -e --arg d "$digest" '.[0].name == "triage-context" and .[0].expired == false and .[0].digest == $d' <<<"$match" >/dev/null \
+            || none "Artifact $id is not the unexpired triage-context artifact with digest $digest that the report job recorded; ignoring it."
+          others=$(jq -r --argjson id "$id" '[.[] | select(.name == "triage-context" and .id != $id) | .id] | join(", ")' <<<"$artifacts")
+          [ -z "$others" ] || echo "::warning::Run $UPSTREAM_RUN_ID also carries triage-context artifact(s) $others that the report job of attempt $attempt did not produce (another job of the run, or a previous attempt); ignored."
+          zip=triage/triage-context.zip
+          gh api "repos/$REPO/actions/artifacts/$id/zip" > "$zip" 2>/dev/null || { rm -f "$zip"; none "Could not download artifact $id."; }
+          actual="sha256:$(shasum -a 256 "$zip" | cut -d' ' -f1)"
+          [ "$actual" = "$digest" ] || { rm -f "$zip"; none "Downloaded artifact $id has digest $actual, not the $digest the report job recorded; ignoring it."; }
+          unzip -o -q "$zip" slack_thread.json -d triage || { rm -f triage/slack_thread.json; none "Artifact $id holds no slack_thread.json."; }
+          echo "Trusted triage context: artifact $id ($digest), uploaded by report job $job_id in attempt $attempt of run $UPSTREAM_RUN_ID."
 
       # Dependency versions float in the scheduled tests (`pip install -e
       # ".[dev]"` resolves against PyPI on the day, not inspect_ai's uv.lock),
@@ -209,21 +323,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TESTS_WORKFLOW: Inspect AI Scheduled Tests
+          # The failed run is read at the attempt being triaged; a passing
+          # run's latest attempt is the one that passed.
+          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
         run: |
           set -uo pipefail
           export LC_ALL=C
           dir=triage/versions
           mkdir -p "$dir"
-          # The `Successfully installed ...` lines of a run's full log (job name first), into $2.
+          # The `Successfully installed ...` lines of a run's full log (job name
+          # first), into $2; further arguments go to `gh run view` (`--attempt N`).
           installed() {
-            gh run view "$1" --repo "$REPO" --log 2>/dev/null | grep -F "Successfully installed" > "$2" || true
-            [ -s "$2" ]
+            local run=$1 out=$2
+            shift 2
+            gh run view "$run" --repo "$REPO" "$@" --log 2>/dev/null | grep -F "Successfully installed" > "$out" || true
+            [ -s "$out" ]
           }
           # name<TAB>version per package named on those lines (the version follows the last `-`).
           packages() {
             sed 's/.*Successfully installed //' "$1" | tr ' ' '\n' | sed -E 's/^(.+)-([^-]+)$/\1\t\2/' | sort -u
           }
-          installed "$UPSTREAM_RUN_ID" "$dir/failing.txt" \
+          installed "$UPSTREAM_RUN_ID" "$dir/failing.txt" --attempt "$UPSTREAM_RUN_ATTEMPT" \
             || echo "No install log found for the failed run $UPSTREAM_RUN_ID" > "$dir/failing.txt"
           created=$(jq -r 'if type == "object" and (.createdAt | type) == "string" then .createdAt else "" end' triage/run.json 2>/dev/null || true)
           passing=""; passing_at=""; passing_sha=""
@@ -275,6 +395,8 @@ jobs:
       # that fails its check is dropped (the SHA falls back to main with
       # exact=false). Outputs are written with heredoc delimiters, never
       # `echo "key=$value"`, so a newline in a value cannot add an output.
+      # triage/slack_thread.json exists only when the step above proved the
+      # report job produced it; this step checks shape, not provenance.
       - name: Validate the triage context
         id: context
         run: |

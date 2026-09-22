@@ -1,4 +1,41 @@
 ---
+# The slow test suite of upstream inspect_ai against the provider APIs, every
+# two hours, with a Slack report and two artifacts for later trusted
+# consumers.
+#
+# slow-tests and static-analysis execute code this repository does not
+# control: `pip install -e ".[dev]"` resolves upstream's whole dev closure
+# against PyPI on the day (no lock file, on purpose: the point of the run is
+# the frontier resolution a new user would get), and pytest and mypy then
+# import it together with upstream's tests. SECURITY.md names that code as an
+# adversary that can take over its job's runner and read what is there (the
+# provider keys). What these jobs must not have is anything that reaches
+# beyond that one job:
+#
+# - The job token is declared read-only (workflow-level `permissions`), so
+#   its reach does not depend on the repository's default token setting, and
+#   no checkout persists it into .git/config (`persist-credentials: false`).
+#   The logs of runs before this hardening showed the token already read-only
+#   (Contents/Metadata/Packages: read); the declaration makes that a property
+#   of the file rather than of a setting.
+# - No Actions cache is restored or saved by a job that runs that code. A
+#   cache saved after the closure ran would be restored by every later
+#   scheduled run and installed from before the keys-bearing step, and it
+#   would outlive the offending release and a key rotation. Every job installs
+#   fresh; setup-python has no `cache:` input here.
+# - The two artifacts (`last-inspect-ai-sha`, `triage-context`) are uploaded
+#   by the report job, which runs only after those jobs have finished. Their
+#   names are claimable by any job of the run attempt (a re-run is a new
+#   attempt and legitimately uploads the names again), so the report job
+#   refuses a name taken since its attempt started (no `overwrite`), and the
+#   triage consumer trusts only the artifact id and digest this job records
+#   in its own log (triage-test-failures.yml, "Resolve the trusted triage
+#   context"). The skip-cache consumer (check-commit) takes
+#   `last-inspect-ai-sha` only from a run whose conclusion is success, which
+#   a refused upload prevents, and the newest of that name in it.
+#
+# tests/test_scheduled_workflows.py checks the permissions, checkout and
+# cache contract and runs the scripts below.
 name: Inspect AI Scheduled Tests
 
 "on":
@@ -37,12 +74,22 @@ name: Inspect AI Scheduled Tests
         default: ""
         type: string
 
+# Read-only job token everywhere; the jobs that read this repository's
+# run and artifact data add actions: read for themselves.
+permissions:
+  contents: read
+
 jobs:
   # Resolve the inspect_ai commit to test and skip if it was already tested
   # successfully (SHA recorded as an artifact by the report job below).
   check-commit:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'push' || inputs.run_slow_tests }}
     runs-on: ubuntu-latest
+    # actions: read lists this workflow's runs and downloads the
+    # last-inspect-ai-sha artifact with the job token.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       skip_tests: ${{ steps.check_commit_artifact.outputs.skip_tests }}
       sha: ${{ steps.inspect_commit.outputs.sha }}
@@ -57,22 +104,39 @@ jobs:
           # the report job uploads the artifact only on `schedule`, while a
           # push or dispatch run executes whatever copy of this workflow its
           # branch carries. The query narrows the page to such runs; the jq
-          # filter enforces it on what comes back.
+          # filter enforces it on what comes back. Within the run, a run's
+          # artifact list spans its attempts, so a re-run that passed can carry
+          # both its report job's artifact and an artifact of the same name a
+          # test job of an earlier, failed attempt made (the report job refuses
+          # the name only within its own attempt). The newest unexpired
+          # artifact of the name (highest id) is taken. That does not
+          # independently authenticate its producer: only the run's conclusion
+          # is checked here, and a later successful attempt that skips report
+          # (this job found the commit already tested) leaves an earlier
+          # attempt's artifact eligible. The report job's name check protects
+          # attempts whose report actually uploads (a name taken earlier in
+          # such an attempt fails it, so the run is not a success). A forged
+          # SHA can make later runs skip a commit for as long as that artifact
+          # stays selected; it cannot select triage's checkout or Slack
+          # destination, which come from the report job's recorded artifact.
           echo "Searching for a successful scheduled run on $DEFAULT_BRANCH with the 'last-inspect-ai-sha' artifact..."
 
           RUN_ID=""
+          ARTIFACT_ID=""
           for run_id in $(gh api "repos/${{ github.repository }}/actions/workflows/inspect-ai-scheduled-tests.yml/runs?event=schedule&branch=$DEFAULT_BRANCH&status=success" \
             | jq -r --arg branch "$DEFAULT_BRANCH" \
               '.workflow_runs[] | select(.conclusion == "success" and .event == "schedule" and .head_branch == $branch) | .id' \
             | head -10); do
 
             echo "Checking run $run_id for artifacts..."
-            artifact_count=$(gh api repos/${{ github.repository }}/actions/runs/$run_id/artifacts \
-              --jq '.artifacts[] | select(.name == "last-inspect-ai-sha") | .name' | wc -l)
+            artifact_id=$(gh api --paginate "repos/${{ github.repository }}/actions/runs/$run_id/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "last-inspect-ai-sha" and .expired == false) | .id] | max // empty' \
+              | sort -n | tail -1)
 
-            if [ "$artifact_count" -gt 0 ]; then
+            if [[ "$artifact_id" =~ ^[0-9]+$ ]]; then
               RUN_ID=$run_id
-              echo "Found run with artifact: $RUN_ID"
+              ARTIFACT_ID=$artifact_id
+              echo "Found run with artifact: $RUN_ID (artifact $ARTIFACT_ID)"
               break
             fi
           done
@@ -81,8 +145,9 @@ jobs:
             # Create directory for artifact
             mkdir -p .last-inspect-ai-sha
 
-            # Download the artifact from the actions repository (where this workflow runs)
-            if gh run download "$RUN_ID" --name last-inspect-ai-sha --dir .last-inspect-ai-sha --repo ${{ github.repository }}; then
+            # Download that artifact by id from the actions repository (where this workflow runs)
+            if gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > .last-inspect-ai-sha/artifact.zip \
+               && unzip -o -q .last-inspect-ai-sha/artifact.zip last_sha.txt -d .last-inspect-ai-sha; then
               echo "Successfully downloaded artifact from run $RUN_ID"
 
               # Read the SHA immediately and store it as output (before checkout wipes it).
@@ -134,6 +199,8 @@ jobs:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ inputs.inspect_ai_ref || '' }}
           fetch-depth: 0
+          # Public repository, local git only from here on.
+          persist-credentials: false
 
       - name: Get inspect_ai commit info
         id: inspect_commit
@@ -205,6 +272,10 @@ jobs:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.check-commit.outputs.sha }}
           fetch-depth: 0
+          # The dependency closure and upstream's tests run in this tree; the
+          # job token stays out of its .git/config (the `main` ref below and
+          # the install-state check are local git).
+          persist-credentials: false
 
       # Checking out a pinned SHA leaves a detached HEAD with no local `main`
       # branch. inspect_ai's sandbox-tools install-state check runs
@@ -218,26 +289,13 @@ jobs:
       - name: Create local main ref for inspect_ai install-state check
         run: git branch -f main "$(git merge-base HEAD origin/main)"
 
+      # No pip cache (`cache:` on setup-python, actions/cache on ~/.cache/pip
+      # or its wheels directory): see the header. The install below is a
+      # fresh resolution on a fresh runner every time.
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Cache built wheels
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip/wheels
-          key: ${{ runner.os }}-wheels-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-wheels-
 
       - name: Install dependencies
         # -e is required so that the tests can find dependent media files
@@ -326,19 +384,17 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           filter: "blob:none"
+          # The dependency closure runs under mypy in this tree; no token in
+          # its .git/config (setuptools_scm reads local tags).
+          persist-credentials: false
 
+      # No pip cache here either (see the header): this job runs the closure
+      # under mypy, and a cache it saved afterwards would be restored by
+      # slow-tests, which holds the provider keys.
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/setup.py', '**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
@@ -366,8 +422,84 @@ jobs:
     needs: [check-commit, slow-tests, static-analysis]
     if: always() && needs.check-commit.result == 'success' && needs.check-commit.outputs.skip_tests != 'true'
     runs-on: ubuntu-latest
+    # actions: read for the artifact-name check below (this run's own
+    # artifact list). The uploads use the runner's artifact service, not the
+    # job token.
+    permissions:
+      contents: read
+      actions: read
 
     steps:
+      # This job is the only intended producer of `last-inspect-ai-sha` and
+      # `triage-context`, but an artifact name is claimable by any job of the
+      # run attempt, and slow-tests and static-analysis, which run third-party
+      # code, finish before this job starts. Names are unique within an
+      # attempt: actions/upload-artifact refuses a name that already exists
+      # (409) unless `overwrite` is set, which it deliberately is not, while a
+      # re-run is a new attempt and may upload the names again, so a run's
+      # artifact list can legitimately hold one of each name per attempt
+      # (@actions/artifact documents reruns as a source of same-named
+      # artifacts). So the policy is per attempt: an artifact with one of
+      # these names created since this attempt started can only be another
+      # job's, and is refused as tampering before the upload would fail on
+      # it; one created before this attempt started is a previous attempt's
+      # and is noted, not refused. What the consumers make of it differs:
+      # triage is fail-closed, accepting only the `triage-context` artifact
+      # whose id and digest the step after the upload records in this job's
+      # log; check-commit accepts `last-inspect-ai-sha` from a run whose
+      # conclusion is success (which this step's failure prevents for the
+      # attempt it runs in) and takes the newest of that name, which does not
+      # authenticate the producer when a later successful attempt skipped
+      # this job (see the check-commit comment). The Slack report below still
+      # goes out (always()); only the uploads are withheld.
+      - name: Refuse an artifact name another job of this attempt took
+        id: names
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          UPLOAD_TESTED_SHA: ${{ needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule' }}
+          UPLOAD_TRIAGE_CONTEXT: ${{ needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success' }}
+        run: |
+          set -uo pipefail
+          names=()
+          [ "$UPLOAD_TESTED_SHA" != "true" ] || names+=(last-inspect-ai-sha)
+          [ "$UPLOAD_TRIAGE_CONTEXT" != "true" ] || names+=(triage-context)
+          if [ "${#names[@]}" = 0 ]; then
+            echo "This run uploads no artifact."
+            exit 0
+          fi
+          if ! existing=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+                            --jq '.artifacts[] | select(.expired == false) | "\(.name) \(.id) \(.created_at)"'); then
+            echo "::error::Could not list this run's artifacts, so the artifact names cannot be checked; uploading nothing."
+            exit 1
+          fi
+          # The current attempt's start (run_started_at is the latest
+          # attempt's): an artifact created before it is a previous attempt's,
+          # one created since was made during this attempt by a job that ran
+          # before this one. Both timestamps are the API's, ISO 8601 UTC, so
+          # they compare as strings.
+          if ! started=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.run_started_at' 2>/dev/null) \
+             || ! [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "::error::Could not read when attempt $RUN_ATTEMPT started, so an existing artifact cannot be told from a squat; uploading nothing."
+            exit 1
+          fi
+          conflict=0
+          for name in "${names[@]}"; do
+            while read -r n id created; do
+              [ "$n" = "$name" ] || continue
+              if [[ "$created" < "$started" ]]; then
+                echo "An artifact named $name (id $id, created $created) exists from before attempt $RUN_ATTEMPT started ($started): a previous attempt's. This attempt uploads its own; its consumer takes this job's recorded one, or the newest."
+              else
+                conflict=1
+                echo "::error::An artifact named $name (id $id, created $created) already exists in this run, created during attempt $RUN_ATTEMPT (started $started) before this job ran. Only this job uploads that name, and the jobs before it execute third-party code (SECURITY.md), so treat this as tampering. The consumers ignore an artifact this job did not produce, and this job uploads nothing under that name."
+              fi
+            done <<<"$existing"
+          done
+          [ "$conflict" = 0 ] || exit 1
+          echo "No job of attempt $RUN_ATTEMPT has taken the name(s) ${names[*]}."
+
       - name: Save tested inspect_ai SHA as artifact
         if: needs.slow-tests.result == 'success' && needs.static-analysis.result == 'success' && github.event_name == 'schedule'
         env:
@@ -455,7 +587,7 @@ jobs:
             }
 
       - name: Upload Slack thread info for triage
-        if: always() && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
+        if: always() && steps.names.outcome == 'success' && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
         env:
           CHANNEL: ${{ steps.slack_notification.outputs.channel_id || secrets.SLACK_CHANNEL_ID }}
           THREAD_TS: ${{ steps.slack_notification.outputs.ts }}
@@ -469,12 +601,35 @@ jobs:
             > .triage/slack_thread.json
 
       - name: Upload triage artifact
-        if: always() && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
+        id: triage_context
+        if: always() && steps.names.outcome == 'success' && (needs.slow-tests.result != 'success' || needs.static-analysis.result != 'success') && steps.slack_notification.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: triage-context
           path: .triage/slack_thread.json
           retention-days: 7
+
+      # Triage's proof that this job produced the context: the id and digest
+      # of the artifact the step above uploaded, on one line of this job's log,
+      # which no other job of the run can write to. Triage
+      # (triage-test-failures.yml, "Resolve the trusted triage context") finds
+      # this job through the jobs API for the attempt it triages, reads the
+      # line from the job's log, downloads that artifact id and checks the
+      # digest of what it got; a same-named artifact with another id, or a
+      # run whose report job wrote no line, gives it no context. The runner
+      # echoes this script into the log too, with `$ARTIFACT_ID` unexpanded,
+      # which the consumer's pattern (digits, 64 hex) does not match.
+      - name: Record the triage-context artifact identity
+        if: always() && steps.triage_context.outcome == 'success'
+        env:
+          ARTIFACT_ID: ${{ steps.triage_context.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.triage_context.outputs.artifact-digest }}
+        run: |
+          if ! [[ "$ARTIFACT_ID" =~ ^[0-9]+$ && "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::upload-artifact returned no artifact id and digest (id '$ARTIFACT_ID'); triage will run without this context."
+            exit 1
+          fi
+          echo "triage-context-artifact id=$ARTIFACT_ID digest=sha256:$ARTIFACT_DIGEST"
 
   test-slack-access:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_slack_access }}
