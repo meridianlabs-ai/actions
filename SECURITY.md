@@ -115,10 +115,13 @@ and its satellites, and nothing that serves end users:
   list those directories; no recursive or other-user change), then verifies
   as the agent that those paths, the check script and the Claude Code
   install are reachable. Files under a granted directory keep their own
-  modes, so what the runner keeps private stays private. The isolated-agent
-  action runs an isolation check as the agent user and fails the job before
-  the agent if any of that does not hold, including if the runner's own
-  registration credentials in its install directory are readable. The
+  modes, so what the runner keeps private stays private, and what it leaves
+  world-readable under its home (its install directory, whose
+  `.credentials` holds the OAuth client id and token URL) is reachable by
+  name. The isolated-agent action runs an isolation check as the agent user
+  and fails the job before the agent if any of that does not hold, including
+  if the runner's registration private key (`.credentials_rsaparams`, 0600
+  on hosted runners) is readable. The
   triage agent's tools are reads plus file writes under the landing
   directory; the writes it wants are a manifest that the `land` job validates
   and performs. Claude Code checks the target of a shell output redirect

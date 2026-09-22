@@ -23,7 +23,7 @@ description: >-
   runs AS THE AGENT and fails the job unless the whole boundary holds (no
   sudo/Docker, Yama scope 1+, the broker's and every other user's process and
   files closed, no .NET diagnostic socket reachable, the runner command files
-  unwritable, the runner's own registration credentials unreadable). (3) RUN —
+  unwritable, the runner's own registration private key unreadable). (3) RUN —
   the agent runs `claude` as the agent user under `env -i`: its environment
   carries only the broker base URL and per-run token, the job's GitHub token,
   the model flags and an explicit allow-list of non-secret variables the
@@ -137,8 +137,11 @@ runs:
         # and this step's is the workspace, which the agent cannot reach until
         # the traversal grants below (the 2026-09-22 hosted runs died here with
         # "fatal: failed to stat '/home/runner/work/actions/actions':
-        # Permission denied").
-        (cd / && sudo -n -u "$AGENT_USER" -H git config --global --add safe.directory '*')
+        # Permission denied"). Under env -i like every other agent process:
+        # sudo passes the runner's XDG_CONFIG_HOME through, and git then tries
+        # the runner's own /home/runner/.config/git/config.
+        (cd / && sudo -n -u "$AGENT_USER" -H -- env -i "HOME=$home" "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+          git config --global --add safe.directory '*')
         # Claude Code installed as root, globally: the agent executes it, it
         # cannot modify it.
         if ! command -v claude >/dev/null 2>&1; then
@@ -234,13 +237,13 @@ runs:
         BROKER_HOME: ${{ inputs.broker-home }}
       run: |
         set -euo pipefail
-        # The runner's install directory, where its registration credentials
-        # (.credentials, .credentials_rsaparams) live, from the runner's own
-        # Worker/Listener process: setup may have granted the agent search
-        # access through the runner's home to reach the workspace, so the
-        # check confirms those files' own modes still keep them from the
-        # agent. Empty when no runner process is visible (the tests), and the
-        # check then skips that probe.
+        # The runner's install directory (/home/runner/actions-runner/cached/
+        # <version> on a hosted runner), where its registration private key
+        # .credentials_rsaparams lives, from the runner's own Worker/Listener
+        # process: setup may have granted the agent search access through the
+        # runner's home to reach the workspace, so the check confirms that
+        # file's own mode still keeps it from the agent. Empty when no runner
+        # process is visible (the tests), and the check then skips that probe.
         runner_root=""
         for p in $(pgrep -x Runner.Worker 2>/dev/null || true; pgrep -x Runner.Listener 2>/dev/null || true); do
           exe="$(readlink -f "/proc/$p/exe" 2>/dev/null || true)"

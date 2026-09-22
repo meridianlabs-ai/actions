@@ -489,14 +489,16 @@ def container():
         # umask 022 (world-readable, like a checkout): the workspace holding
         # this repo's actions as `actions-repo`, RUNNER_TEMP, the runner's
         # install directory with a Runner.Worker (a python3 copy that runs the
-        # sentinel below) and 0600 registration credentials, and a private
-        # 0600 file and 0700 directory the traversal grants must not open.
+        # sentinel below), its registration files as a hosted runner keeps
+        # them (.credentials 0644: OAuth client id and token URL;
+        # .credentials_rsaparams 0600: the private key), and a private 0600
+        # file and 0700 directory the traversal grants must not open.
         c.run("sh", "-c",
               f"umask 022 && mkdir -p {WORKSPACE}/actions-repo/.github {RUNNER_TEMP} {RUNNER_ROOT}/bin"
               f" && cp -r /actions {WORKSPACE}/actions-repo/.github/actions"
               f" && cp -L /usr/bin/python3 {RUNNER_ROOT}/bin/Runner.Worker"
-              f" && (umask 077 && echo '{{\"scheme\":\"OAuth\"}}' > {RUNNER_ROOT}/.credentials"
-              f"     && echo 'rsa-private-key' > {RUNNER_ROOT}/.credentials_rsaparams"
+              f" && echo '{{\"scheme\":\"OAuth\",\"data\":{{\"clientId\":\"c\"}}}}' > {RUNNER_ROOT}/.credentials"
+              f" && (umask 077 && echo 'rsa-private-key' > {RUNNER_ROOT}/.credentials_rsaparams"
               f"     && echo runner-private > {RUNNER_HOME}/.private && mkdir {RUNNER_HOME}/private-dir"
               f"     && echo runner-private > {RUNNER_HOME}/private-dir/x)",
               user="runner")
@@ -649,12 +651,15 @@ def test_agent_reaches_exactly_the_paths_it_needs_and_not_the_runners_private_fi
     assert as_agent(container, "test", "-w", WRITE_DIR).returncode == 0
     # ...but cannot list the home itself (search is not read), write the
     # runner-owned workspace, or open what the runner keeps private: a 0600
-    # file, a 0700 directory, and the runner's registration credentials.
+    # file, a 0700 directory, and the runner's registration private key.
     assert as_agent(container, "ls", RUNNER_HOME).returncode != 0
     assert as_agent(container, "touch", f"{WORKSPACE}/agent-was-here").returncode != 0
-    for closed in (f"{RUNNER_HOME}/.private", f"{RUNNER_HOME}/private-dir/x",
-                   f"{RUNNER_ROOT}/.credentials", f"{RUNNER_ROOT}/.credentials_rsaparams"):
+    for closed in (f"{RUNNER_HOME}/.private", f"{RUNNER_HOME}/private-dir/x", f"{RUNNER_ROOT}/.credentials_rsaparams"):
         assert as_agent(container, "cat", closed).returncode != 0, closed
+    # What the runner leaves world-readable under its home is reachable by
+    # name: the documented residual, here the runner's non-secret OAuth
+    # client record (the check above passed with it so).
+    assert as_agent(container, "cat", f"{RUNNER_ROOT}/.credentials").returncode == 0
 
 
 def test_setup_fails_closed_when_a_needed_path_is_still_unreadable(container):
@@ -714,20 +719,20 @@ def test_check_isolation_holds_for_the_agent(env, container):
         assert len(errors) == 1 and "ptrace_scope" in errors[0], r.stdout
 
 
-def test_check_flags_a_runner_credential_the_agent_can_read(env, container):
+def test_check_flags_a_runner_private_key_the_agent_can_read(env, container):
     # The check step located the runner's install directory from the
     # Runner.Worker process (there is no other way this probe could fire), and
-    # a registration credential there that the traversal grant made reachable
-    # AND whose own mode lets the agent read it fails the check.
+    # a registration private key there that the traversal grant made
+    # reachable AND whose own mode lets the agent read it fails the check.
     container.run("chmod", "0644", f"{RUNNER_ROOT}/.credentials_rsaparams", user="runner")
     try:
         r = run_check(container)
         assert r.returncode == 1
-        assert any(f"{RUNNER_ROOT}/.credentials_rsaparams (the runner's registration credential) is readable" in e for e in check_errors(r)), r.stdout
+        assert any(f"{RUNNER_ROOT}/.credentials_rsaparams (the runner's registration private key) is readable" in e for e in check_errors(r)), r.stdout
     finally:
         container.run("chmod", "0600", f"{RUNNER_ROOT}/.credentials_rsaparams", user="runner")
-    # Back at 0600 the probe is quiet again.
-    assert not any("registration credential" in e for e in check_errors(run_check(container)))
+    # Back at 0600 the probe is quiet again (with .credentials still 0644).
+    assert not any("registration private key" in e for e in check_errors(run_check(container)))
 
 
 def test_agent_cannot_escalate_or_reach_docker(env, container):
@@ -1052,7 +1057,19 @@ def hosted() -> dict:
         p = p.parent
     lines = ["### isolated-agent bootstrap on this runner", "", "Ancestors of the workspace (mode owner:group):", ""]
     lines += [f"- `{a}`: `{host.run('stat', '-c', '%A %U:%G', str(a)).stdout.strip()}`" for a in reversed(ancestors)]
-    lines += ["", "Setup granted search-only access on:", ""] + [f"- `{d}` (was `{mode}`)" for d, mode in granted] + [""]
+    lines += ["", "Setup granted search-only access on:", ""] + [f"- `{d}` (was `{mode}`)" for d, mode in granted]
+    # The runner's registration files: modes, and the key names (never the
+    # values) of the world-readable .credentials, so the record shows what
+    # the traversal grant leaves reachable there.
+    worker = host.run("sh", "-c", "for p in $(pgrep -x Runner.Worker; pgrep -x Runner.Listener); do readlink -f /proc/$p/exe && break; done", check=False).stdout.strip()
+    if worker:
+        root = Path(worker).parent.parent
+        lines += ["", f"Runner install directory `{root}`:", ""]
+        for name in (".credentials", ".credentials_rsaparams", ".runner"):
+            lines.append(f"- `{name}`: `{host.run('stat', '-c', '%A %U:%G', str(root / name), check=False).stdout.strip() or 'absent'}`")
+        keys = host.run("sh", "-c", f"python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(\"scheme\"), sorted((d.get(\"data\") or {{}}).keys()))' {root / '.credentials'}", check=False)
+        lines.append(f"- `.credentials` scheme and data keys: `{keys.stdout.strip() or keys.stderr.strip()}`")
+    lines.append("")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
             f.write("\n".join(lines) + "\n")
