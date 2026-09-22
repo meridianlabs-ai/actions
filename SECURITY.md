@@ -158,12 +158,15 @@ and its satellites, and nothing that serves end users:
   release-please tag (`vX.Y.Z`, `X.Y.Z`, or either with a release-please
   component prefix). The artifact directory must hold exactly one regular
   file with a plain name; an archive with repeated or case-variant manifest
-  entries, unsafe entry names or symlinks, a manifest with duplicate JSON
-  keys or a DTD, or more than one `Identity` is rejected. Nothing the build
-  job output is used afterwards: the verified path and the tag's version
-  feed the publish commands, the already-published checks (exact JSON
-  comparison, a rerun convenience rather than a control) and the release
-  upload. The validator reads the zip's central directory as vsce, ovsx and
+  entries, unsafe entry names, symlinks or Info-ZIP Unicode Path fields
+  (which rename an entry for vsce's reader only), a `package.json` with
+  duplicate keys or the `NaN`/`Infinity` constants JavaScript rejects, or a
+  `vsixmanifest` with a DTD or with more than one `Metadata` or `Identity`
+  element in any namespace is rejected. Nothing the build job output is
+  used afterwards: the verified path, identity and version feed the publish
+  commands, the already-published checks (exact JSON comparison of the
+  listing's publisher, name and versions, a rerun convenience rather than a
+  control) and the release upload. The validator reads the zip's central directory as vsce, ovsx and
   the registries do; it does not defend against parser differentials beyond
   those it rejects by name.
 - Both agent jobs run under harden-runner's egress allow-list (Anthropic,

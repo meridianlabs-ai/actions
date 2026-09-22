@@ -29,11 +29,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import types
 import warnings
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -96,15 +98,15 @@ def package_json(publisher: str = PUBLISHER, name: str = NAME, version: str = VE
     return json.dumps(manifest, indent=2).encode()
 
 
-def vsixmanifest(publisher: str = PUBLISHER, id: str = NAME, version: str = VERSION, *, identity_attrs: str | None = None) -> bytes:
+def vsixmanifest(publisher: str = PUBLISHER, id: str = NAME, version: str = VERSION, *, identity_attrs: str | None = None, before_metadata: str = "", before_identity: str = "", installation_extra: str = "") -> bytes:
     attrs = identity_attrs if identity_attrs is not None else f'Language="en-US" Id="{id}" Version="{version}" Publisher="{publisher}"'
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="{VSX_NS}" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
-  <Metadata>
-    <Identity {attrs}/>
+  {before_metadata}<Metadata>
+    {before_identity}<Identity {attrs}/>
     <DisplayName>Inspect AI</DisplayName>
   </Metadata>
-  <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/></Installation>
+  <Installation><InstallationTarget Id="Microsoft.VisualStudio.Code"/>{installation_extra}</Installation>
   <Assets><Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/></Assets>
 </PackageManifest>
 """.encode()
@@ -138,6 +140,28 @@ def write_vsix(directory: Path, items: list[tuple[str | zipfile.ZipInfo, bytes]]
 def consistent(publisher: str = PUBLISHER, name: str = NAME, version: str = VERSION) -> list[tuple[str, bytes]]:
     """A well-formed package whose two manifests agree on the given identity."""
     return entries(package_json(publisher, name, version), vsixmanifest(publisher, name, version))
+
+
+def with_extra(name: str, extra: bytes) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name)
+    info.extra = extra
+    return info
+
+
+def unicode_path_alias(name: str, alias: str) -> zipfile.ZipInfo:
+    """An entry named `name` in its headers that yauzl (vsce's reader) renames to `alias` via an Info-ZIP Unicode Path field."""
+    payload = b"\x01" + struct.pack("<I", zlib.crc32(name.encode())) + alias.encode()
+    return with_extra(name, struct.pack("<HH", 0x7075, len(payload)) + payload)
+
+
+# The intended package plus a second copy of each manifest, named differently in
+# the zip headers but carrying Unicode Path fields that alias the manifest names.
+ALIASED_ENTRIES = entries() + [
+    (unicode_path_alias("extension/alternate.json", "extension/package.json"), package_json(name="other-extension")),
+    (unicode_path_alias("alternate.vsixmanifest", "extension.vsixmanifest"), vsixmanifest(id="other-extension")),
+]
+FOREIGN_METADATA = vsixmanifest(before_metadata='<Metadata xmlns="urn:other"><Identity Id="other-extension" Version="0.9.20" Publisher="ukaisi"/></Metadata>')
+FOREIGN_IDENTITY = vsixmanifest(before_identity='<Identity xmlns="urn:other" Id="other-extension" Version="0.9.20" Publisher="ukaisi"/>')
 
 
 def rejected(tmp_path: Path, items=None, *, extension_id: str = EXTENSION_ID, tag: str = TAG, filename: str = FILENAME) -> str:
@@ -264,6 +288,34 @@ def test_rejects_symlink_entry(tmp_path):
     assert "is a symlink" in rejected(tmp_path, entries() + [(link, b"../../outside")])
 
 
+@pytest.mark.parametrize(
+    "name, alias",
+    [("extension/alternate.json", "extension/package.json"), ("alternate.vsixmanifest", "extension.vsixmanifest"), ("extension/dist/x.js", "extension/dist/y.js")],
+)
+def test_rejects_unicode_path_extra_field_that_renames_an_entry_for_yauzl(tmp_path, name, alias):
+    # yauzl applies the field; Python and the registries' readers keep the header name, so
+    # the entry is a stray file to this check and the manifest to vsce.
+    message = rejected(tmp_path, entries() + [(unicode_path_alias(name, alias), package_json(name="other-extension"))])
+    assert f"archive entry {name!r} carries a Unicode Path extra field" in message
+
+
+def test_rejects_both_manifests_aliased_at_once(tmp_path):
+    assert "Unicode Path extra field" in rejected(tmp_path, ALIASED_ENTRIES)
+
+
+@pytest.mark.parametrize("extra", [b"\x75\x70", struct.pack("<HH", 0x5455, 9) + b"\x01\x00\x00\x00\x00"])
+def test_rejects_extra_field_data_that_does_not_parse(tmp_path, extra):
+    # Python's zipfile refuses some corrupt extra fields itself while listing the archive; the validator refuses the rest.
+    message = rejected(tmp_path, entries() + [(with_extra("extension/dist/x.js", extra), b"")])
+    assert "malformed extra-field data" in message or "not a readable zip archive" in message
+
+
+def test_accepts_ordinary_extra_fields(tmp_path):
+    timestamp = struct.pack("<HHBI", 0x5455, 5, 1, 1_700_000_000)  # Info-ZIP extended timestamp
+    write_vsix(tmp_path / "vsix", entries() + [(with_extra("extension/dist/x.js", timestamp), b"")])
+    assert validator.verify(str(tmp_path / "vsix"), EXTENSION_ID, TAG)[1] == VERSION
+
+
 @pytest.mark.parametrize("missing", ["extension/package.json", "extension.vsixmanifest"])
 def test_rejects_missing_manifest(tmp_path, missing):
     assert f"{missing} is missing" in rejected(tmp_path, [(n, d) for n, d in entries() if n != missing])
@@ -299,6 +351,10 @@ def test_rejects_oversized_manifest(tmp_path):
         (package_json(publisher="uk.aisi"), "publisher 'uk.aisi' is missing or malformed"),
         (package_json(name="inspect ai"), "name 'inspect ai' is missing or malformed"),
         (package_json(name=""), "malformed"),
+        # Python's json accepts these; JSON.parse (vsce, ovsx) does not, so they must not reach a publisher
+        (package_json().replace(b'"displayName": "Inspect AI"', b'"extra": NaN'), "NaN is not JSON"),
+        (package_json().replace(b'"displayName": "Inspect AI"', b'"extra": Infinity'), "Infinity is not JSON"),
+        (package_json().replace(b'"displayName": "Inspect AI"', b'"extra": -Infinity'), "-Infinity is not JSON"),
     ],
 )
 def test_rejects_malformed_package_json(tmp_path, pkg, reason):
@@ -315,8 +371,15 @@ ENTITY_MANIFEST = vsixmanifest().replace(b"<PackageManifest", b'<!DOCTYPE x [<!E
         (ENTITY_MANIFEST, "declares a DTD or entities"),
         (vsixmanifest().replace(b"<PackageManifest", b"<!DOCTYPE PackageManifest><PackageManifest", 1), "declares a DTD or entities"),
         (vsixmanifest().replace(VSX_NS.encode(), b"http://example.com/other", 1), "not PackageManifest"),
-        (vsixmanifest().replace(b"<Metadata>", b"<Metadata><Identity Id=\"other-extension\" Version=\"0.9.19\" Publisher=\"ukaisi\"/>", 1), "expected one Identity element, found 2"),
-        (vsixmanifest().replace(b"</Metadata>", b"</Metadata><Metadata/>", 1), "expected one Metadata element, found 2"),
+        (vsixmanifest().replace(b"<Metadata>", b"<Metadata><Identity Id=\"other-extension\" Version=\"0.9.19\" Publisher=\"ukaisi\"/>", 1), "expected one Identity element under Metadata"),
+        (vsixmanifest().replace(b"</Metadata>", b"</Metadata><Metadata/>", 1), "expected one Metadata element under the root"),
+        # vsce's xml2js reader ignores namespaces and takes the first Metadata / Identity it meets
+        (FOREIGN_METADATA, "expected one Metadata element under the root, found ['{urn:other}Metadata'"),
+        (FOREIGN_IDENTITY, "expected one Identity element under Metadata, found ['{urn:other}Identity'"),
+        (vsixmanifest(installation_extra='<Identity Id="other-extension" Version="0.9.20" Publisher="ukaisi"/>'), "expected one Identity element under Metadata"),
+        (vsixmanifest(installation_extra="<Metadata/>"), "expected one Metadata element under the root"),
+        (vsixmanifest(before_metadata='<Installation xmlns="urn:other"><Metadata/></Installation>'), "expected one Metadata element under the root"),
+        (vsixmanifest(identity_attrs='Id="inspect-ai" Version="0.9.19" Publisher="ukaisi" d:Id="other-extension"'), "Identity has namespaced attributes"),
         (vsixmanifest(identity_attrs='Id="inspect-ai" Version="0.9.19"'), "publisher None is missing"),
         (vsixmanifest(identity_attrs='Id="inspect-ai" Publisher="ukaisi"'), "version None is missing"),
         (vsixmanifest(version="0.9.19-rc.1"), "malformed"),
@@ -406,7 +469,7 @@ def test_step_writes_its_outputs_with_heredocs_and_uses_the_step_env(tmp_path):
     env = {**s["env"], "EXTENSION_ID": EXTENSION_ID, "TAG": TAG, "GITHUB_OUTPUT": str(output)}
     result = run_bash(s["run"], cwd=tmp_path, env=env)
     assert result.returncode == 0, result.stderr
-    assert read_outputs(output) == {"vsix": f"vsix/{FILENAME}", "version": VERSION}
+    assert read_outputs(output) == {"vsix": f"vsix/{FILENAME}", "version": VERSION, "publisher": PUBLISHER, "name": NAME}
     assert f"Verified vsix/{FILENAME}: {EXTENSION_ID} {VERSION} (tag {TAG})" in result.stdout
 
 
@@ -551,8 +614,12 @@ def test_intended_release_is_verified_then_published_and_uploaded(tmp_path):
         consistent(version="0.9.20"),
         entries(pkg=package_json(name="other-extension")),  # manifests disagree
         entries() + [("EXTENSION/PACKAGE.JSON", package_json(name="other-extension"))],
+        ALIASED_ENTRIES,
+        entries(manifest=FOREIGN_METADATA),
+        entries(manifest=FOREIGN_IDENTITY),
+        entries(pkg=package_json().replace(b'"displayName": "Inspect AI"', b'"extra": NaN')),
     ],
-    ids=["other-name", "other-publisher", "other-version", "disagreeing-manifests", "case-variant-manifest"],
+    ids=["other-name", "other-publisher", "other-version", "disagreeing-manifests", "case-variant-manifest", "unicode-path-aliases", "foreign-namespace-metadata", "foreign-namespace-identity", "nan-in-package-json"],
 )
 def test_hostile_package_fails_verify_and_no_publisher_or_installer_runs(tmp_path, items):
     run = run_publish_job(tmp_path, items=items)
@@ -586,17 +653,25 @@ def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
         assert step(name)["env"]["VSIX"] == "${{ steps.verify.outputs.vsix }}"
     for name in (MARKETPLACE, OPENVSX):
         assert step(name)["env"]["VERSION"] == "${{ steps.verify.outputs.version }}"
+        assert step(name)["env"]["PUBLISHER"] == "${{ steps.verify.outputs.publisher }}"
+        assert step(name)["env"]["NAME"] == "${{ steps.verify.outputs.name }}"
     assert job["env"]["EXTENSION_ID"] == "${{ inputs.extension-id }}"
     assert job["env"]["TAG"] == "${{ needs.release-please.outputs.tag_name }}"
     assert not any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"])
 
 
-def vsce_listing(*versions: str) -> str:
-    return json.dumps({"publisher": {"publisherName": PUBLISHER}, "extensionName": NAME, "versions": [{"version": v, "flags": "validated"} for v in versions]}, indent="\t")
+def vsce_listing(*versions: str, publisher: str | None = PUBLISHER, name: str | None = NAME) -> str:
+    listing = {"publisher": {"publisherName": publisher, "displayName": "UK AISI"}, "extensionName": name, "versions": [{"version": v, "flags": "validated"} for v in versions]}
+    if publisher is None:
+        del listing["publisher"]
+    if name is None:
+        del listing["extensionName"]
+    return json.dumps(listing, indent="\t")
 
 
-def ovsx_listing(latest: str, *others: str) -> str:
-    return json.dumps({"namespace": PUBLISHER, "name": NAME, "version": latest, "allVersions": {v: f"https://open-vsx.org/api/{PUBLISHER}/{NAME}/{v}" for v in (latest, *others)}}, indent=4)
+def ovsx_listing(latest: str, *others: str, namespace: str | None = PUBLISHER, name: str | None = NAME) -> str:
+    listing = {"namespace": namespace, "name": name, "version": latest, "allVersions": {v: f"https://open-vsx.org/api/{PUBLISHER}/{NAME}/{v}" for v in (latest, *others)}}
+    return json.dumps({k: v for k, v in listing.items() if v is not None}, indent=4)
 
 
 @pytest.mark.parametrize(
@@ -609,9 +684,15 @@ def ovsx_listing(latest: str, *others: str) -> str:
         ("undefined\n", True),  # what `vsce show --json` prints for an unknown extension
         ('{"versions": "0.9.19"}\n', True),  # not the documented shape
         ("", True),
+        # a listing for anything but the verified identity never skips
+        (vsce_listing("0.9.19", publisher="other-publisher"), True),
+        (vsce_listing("0.9.19", name="other-extension"), True),
+        (vsce_listing("0.9.19", publisher=None), True),
+        (vsce_listing("0.9.19", name=None), True),
+        (vsce_listing("0.9.19", publisher=PUBLISHER.upper()), True),
     ],
 )
-def test_marketplace_skip_check_compares_the_exact_version_from_the_listing(tmp_path, vsce_show, published):
+def test_marketplace_skip_check_compares_the_exact_identity_and_version_from_the_listing(tmp_path, vsce_show, published):
     run = run_publish_job(tmp_path, vsce_show=vsce_show)
     assert run.outcomes[MARKETPLACE] == "success"
     assert (["publish", "--packagePath", f"vsix/{FILENAME}", "--pat", "fake-vsce-pat"] in run.argv("vsce")) is published
@@ -627,9 +708,13 @@ def test_marketplace_skip_check_compares_the_exact_version_from_the_listing(tmp_
         (ovsx_listing("0.9.20", "0.9.190"), True),
         (None, True),  # `ovsx get` fails for an unknown extension
         ("not json\n", True),
+        (ovsx_listing("0.9.19", namespace="other-publisher"), True),
+        (ovsx_listing("0.9.19", name="other-extension"), True),
+        (ovsx_listing("0.9.19", namespace=None), True),
+        (ovsx_listing("0.9.19", name=None), True),
     ],
 )
-def test_openvsx_skip_check_compares_the_exact_version_from_the_metadata(tmp_path, ovsx_get, published):
+def test_openvsx_skip_check_compares_the_exact_identity_and_version_from_the_metadata(tmp_path, ovsx_get, published):
     run = run_publish_job(tmp_path, ovsx_get=ovsx_get)
     assert run.outcomes[OPENVSX] == "success"
     assert (["publish", f"vsix/{FILENAME}", "--pat", "fake-ovsx-pat"] in run.argv("ovsx")) is published
