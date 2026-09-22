@@ -12,11 +12,17 @@ tested too, against a fake `gh` on PATH. The job's other boundary, that the
 agent never holds the Anthropic key (the model broker of
 .github/actions/model-broker, tested in test_model_broker.py, holds it and
 the agent gets a per-run token), is a fact of the YAML and is asserted from
-the YAML at the end of this file. The `run:` blocks are lifted from
-the workflow and executed under bash exactly as the runner would; the rules
-are matched with the glob semantics Claude Code documents for Bash rules
-(`*` matches any text, a compound command is checked one subcommand at a
-time).
+the YAML at the end of this file. The `run:` blocks are lifted from the
+workflow and executed under bash exactly as the runner would. The rules are
+matched with an approximation of the glob semantics Claude Code documents
+for Bash rules (`*` matches any text, a compound command is checked one
+subcommand at a time): enough to show that no rule shape grants a listed
+write vector, not a model of the installed CLI's decision, which also
+involves its command parser, a separate check of redirect targets against
+the file rules, its protected paths and the effective settings. An `allow`
+from these helpers is therefore not proof that Claude Code runs the
+command; SECURITY.md → "Verification notes" records the checks of the real
+permission engine.
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI). The composed manifests
@@ -518,10 +524,10 @@ def test_compose_slack_without_text_file_fails_the_run(tmp_path):
 def validator(tmp_path_factory) -> Path:
     """The land job's validator. Fetched from meridianlabs-ai/agents at `main`
     unless TRIAGE_VALIDATOR names a file (or TRIAGE_VALIDATOR_REF another ref).
-    While that ref predates the schema this workflow relies on (agents#102:
-    `slack`, `issues[].assignees`, `issues[].reopen`) the cross-check is
-    xfailed, not failed: the composed manifests are right and the dependency
-    is unmerged — the PR is blocked by it. Once it merges the checks run."""
+    When that ref predates the schema this workflow relies on (agents#102:
+    `slack`, `issues[].assignees`, `issues[].reopen`, merged 2026-09-15) the
+    cross-check is xfailed, not failed: the composed manifests are right and
+    the validator is the one that is behind. At `main` the checks run."""
     override = os.environ.get("TRIAGE_VALIDATOR")
     ref = os.environ.get("TRIAGE_VALIDATOR_REF", "main")
     if override:
@@ -591,8 +597,12 @@ def permissions() -> dict:
 
 
 def bash_rule_matches(rule: str, command: str) -> bool:
-    """Claude Code's Bash rule matching: `*` matches any text (spaces included);
-    `Bash(ls *)` also matches bare `ls`; the legacy `prefix:*` form is a prefix."""
+    """Approximate Bash-pattern matching for the test cases below: `*` matches
+    any text (spaces included); `Bash(ls *)` also matches bare `ls`; the legacy
+    `prefix:*` form is a prefix. It is not Claude Code's rule matching: it has
+    no command parser (quoting, substitutions and redirects are plain text to
+    it) and knows nothing of the separate redirect-target file check,
+    protected paths or the effective runtime settings."""
     if not rule.startswith("Bash(") or not rule.endswith(")"):
         return False
     pattern = rule[5:-1]
@@ -608,7 +618,12 @@ def subcommands(command: str) -> list[str]:
 
 
 def decision(command: str) -> str:
-    """deny > allow > ask, per subcommand; `ask` is a denial in a headless run."""
+    """deny > allow > ask, per subcommand; `ask` is a denial in a headless run.
+
+    The rule-list step of the decision only, over the workflow's own lists:
+    an `allow` here means no deny rule matches and an allow rule does, not
+    that the installed CLI would run the command (its redirect-target and
+    protected-path checks are outside this approximation)."""
     perms = permissions()
     verdicts = []
     for part in subcommands(command):

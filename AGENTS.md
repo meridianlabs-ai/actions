@@ -37,6 +37,16 @@ So a change to a workflow script is not done until:
 - the workflow's path is in the `paths:` lists of `tests.yml` if it is new;
 - the checks below pass.
 
+The permission-rule tests match commands against the agent's allow and deny
+lists with an approximation of Claude Code's Bash-pattern matching. They
+show that no rule shape grants a listed write vector; they do not model the
+installed CLI's decision, which also involves its command parser, its
+separate check of redirect targets against the file rules, protected paths
+and the effective settings. An `allow` from that helper is not proof that
+Claude Code runs the command, and a redirect the helper passes still
+requires the CLI's separate file-write check; `SECURITY.md` → "Verification notes" records the checks of
+the real permission engine and when to repeat them.
+
 ## Checks
 
 ```
