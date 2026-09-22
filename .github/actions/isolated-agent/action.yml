@@ -14,11 +14,18 @@ description: >-
   group), install Claude Code globally as root so the agent can execute but
   not modify it, add the checkout to the agent's git safe.directory, write the
   prompt and settings to runner-owned files the agent can read but not write,
-  and hand the agent write access to exactly the one output/landing
-  directory. (2) CHECK — check_isolation.sh runs AS THE AGENT and fails the
-  job unless the whole boundary holds (no sudo/Docker, Yama scope 1+, the
-  broker's and every other user's process and files closed, no .NET
-  diagnostic socket reachable, the runner command files unwritable). (3) RUN —
+  hand the agent write access to exactly the one output/landing directory,
+  and give it search-only (--x, never read) ACL entries on exactly the
+  ancestors of those paths that deny it traversal, keeping each directory's
+  ACL mask so no other principal's effective rights change — a hosted
+  runner's home is private (0750), so the runner-owned, world-readable
+  checkout under it is unreachable for any other user until then — and then
+  verify, as the agent,
+  that every path it will use is reachable. (2) CHECK — check_isolation.sh
+  runs AS THE AGENT and fails the job unless the whole boundary holds (no
+  sudo/Docker, Yama scope 1+, the broker's and every other user's process and
+  files closed, no .NET diagnostic socket reachable, the runner command files
+  unwritable, the runner's own registration private key unreadable). (3) RUN —
   the agent runs `claude` as the agent user under `env -i`: its environment
   carries only the broker base URL and per-run token, the job's GitHub token,
   the model flags and an explicit allow-list of non-secret variables the
@@ -128,12 +135,23 @@ runs:
         sudo -n chmod 0700 "$home"
         # git run as the agent over the runner-owned checkout would hit the
         # dubious-ownership refusal; the agent cannot add this exemption itself.
-        sudo -n -u "$AGENT_USER" -H git config --global --add safe.directory '*'
+        # Run it from /: git stats its working directory before anything else,
+        # and this step's is the workspace, which the agent cannot reach until
+        # the traversal grants below (the 2026-09-22 hosted runs died here with
+        # "fatal: failed to stat '/home/runner/work/actions/actions':
+        # Permission denied"). Under env -i like every other agent process:
+        # sudo passes the runner's XDG_CONFIG_HOME through, and git then tries
+        # the runner's own /home/runner/.config/git/config.
+        (cd / && sudo -n -u "$AGENT_USER" -H -- env -i "HOME=$home" "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+          git config --global --add safe.directory '*')
         # Claude Code installed as root, globally: the agent executes it, it
         # cannot modify it.
         if ! command -v claude >/dev/null 2>&1; then
           sudo -n env "PATH=$PATH" npm install -g @anthropic-ai/claude-code >/dev/null
         fi
+        claude_bin="$(readlink -f "$(command -v claude)")"
+        node_bin=""
+        if command -v node >/dev/null 2>&1; then node_bin="$(readlink -f "$(command -v node)")"; fi
         # The one directory the agent may write. Owned by the runner user with
         # the agent's group and setgid+group-write (2775), so the agent writes
         # its manifest/body/report files (group) AND the trusted runner steps
@@ -155,7 +173,89 @@ runs:
           python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$stage/settings.json" \
             || { echo "::error::isolated-agent: settings is not valid JSON"; exit 1; }
         fi
-        echo "isolated agent user '$AGENT_USER' ready ($(id "$AGENT_USER")); claude at $(command -v claude)"
+        # Traversal. Every path above is runner-owned and world-readable, and
+        # the agent still cannot open any of them if one ancestor denies it
+        # search (x) permission: on a hosted runner /home/runner is the
+        # runner's private home (Ubuntu's useradd default is 0750), so the
+        # workspace, RUNNER_TEMP (the staged prompt, this write-dir) and the
+        # action's own check script under it are all out of the agent's reach
+        # however they are owned or moded. So walk the ancestors of each path
+        # the agent needs, top down, and where the agent cannot pass, give it
+        # (and only it, by a named-user ACL entry) search permission and
+        # nothing else: no read, so it cannot list that directory and learns
+        # no sibling's name; no write; nothing recursive; nothing for other
+        # users. Files below a granted directory keep their own modes, so
+        # what was private to the runner (0600, or under a 0700 directory)
+        # stays private; a world-readable file there becomes reachable by
+        # name, which is why the check step probes the runner's credential
+        # files afterwards and why nothing here is granted blindly or
+        # widened to o+x. Each grant is logged with the mode it worked
+        # around, so a run's log says which directory blocked the agent.
+        #
+        # The grant must not change anyone else's effective permissions
+        # either. A directory that already carries an ACL has a mask, and
+        # every group-class entry (the owning group, named users, named
+        # groups) is effective only within it; `setfacl -m` alone
+        # recalculates that mask as the union of all such entries, so on a
+        # directory with `user:other:rwx` masked down to `r-x` it would hand
+        # `other` write access (review round 1, Blocking). So the mask is
+        # written explicitly and kept as it is (for a plain mode, the mask
+        # setfacl would create equals the group bits). When that mask has no
+        # x, the agent's --x would be masked to nothing, so x is added to the
+        # mask only if no existing entry carries an x it would newly gain;
+        # otherwise the step fails closed rather than widen a stranger.
+        grant_traverse() {
+          local target="$1" dir="" part parts acl mask was
+          [ -d "$target" ] || target="$(dirname "$target")"
+          target="$(readlink -f "$target")"
+          IFS=/ read -r -a parts <<< "$target"
+          for part in "${parts[@]}"; do
+            [ -n "$part" ] || continue
+            dir="$dir/$part"
+            if ! sudo -n -u "$AGENT_USER" -- test -x "$dir"; then
+              if ! command -v setfacl >/dev/null 2>&1 || ! command -v getfacl >/dev/null 2>&1; then
+                echo "::error::isolated-agent: $dir is not searchable by $AGENT_USER and setfacl/getfacl (package acl) are not installed to grant it"
+                exit 1
+              fi
+              was="$(stat -c '%A %U:%G' "$dir")"
+              acl="$(getfacl -c -p -E "$dir")"
+              mask="$(sed -n 's/^mask::\(...\)$/\1/p' <<< "$acl")"
+              [ -n "$mask" ] || mask="$(sed -n 's/^group::\(...\)$/\1/p' <<< "$acl")"
+              if [[ "$mask" != *x* ]]; then
+                if grep -Eq '^(group::|user:[^:]+:|group:[^:]+:)..x$' <<< "$acl"; then
+                  echo "::error::isolated-agent: cannot grant $AGENT_USER search access on $dir without widening another principal: its ACL mask is '$mask' and an existing entry carries x that the mask currently denies ($(tr '\n' ' ' <<< "$acl"))"
+                  exit 1
+                fi
+                mask="${mask:0:2}x"
+              fi
+              sudo -n setfacl -m "u:$AGENT_USER:--x,m::$mask" "$dir"
+              echo "isolated-agent: granted $AGENT_USER search-only (--x) access on $dir, which was $was, keeping its ACL mask $mask"
+            fi
+          done
+        }
+        grant_traverse "$WORK_DIR"
+        grant_traverse "$WRITE_DIR"
+        grant_traverse "$stage"
+        grant_traverse "$GITHUB_ACTION_PATH"
+        grant_traverse "$claude_bin"
+        [ -z "$node_bin" ] || grant_traverse "$node_bin"
+        # Then prove, as the agent, that every path the check and run steps
+        # use is reachable, so a remaining gap names itself here instead of
+        # surfacing as an opaque failure inside git or claude.
+        as_agent() { sudo -n -u "$AGENT_USER" -H -- "$@"; }
+        missing=""
+        as_agent test -r "$WORK_DIR" && as_agent test -x "$WORK_DIR" || missing="$missing workdir=$WORK_DIR"
+        as_agent test -w "$WRITE_DIR" || missing="$missing write-dir=$WRITE_DIR"
+        as_agent test -r "$stage/prompt.txt" || missing="$missing prompt=$stage/prompt.txt"
+        [ ! -f "$stage/settings.json" ] || as_agent test -r "$stage/settings.json" || missing="$missing settings=$stage/settings.json"
+        as_agent test -r "$GITHUB_ACTION_PATH/check_isolation.sh" || missing="$missing check=$GITHUB_ACTION_PATH/check_isolation.sh"
+        as_agent test -x "$claude_bin" || missing="$missing claude=$claude_bin"
+        [ -z "$node_bin" ] || as_agent test -x "$node_bin" || missing="$missing node=$node_bin"
+        if [ -n "$missing" ]; then
+          echo "::error::isolated-agent: not reachable by $AGENT_USER after the traversal grants:$missing"
+          exit 1
+        fi
+        echo "isolated agent user '$AGENT_USER' ready ($(id "$AGENT_USER")); claude at $claude_bin; can reach $WORK_DIR, $WRITE_DIR and $stage"
 
     # (2) CHECK — as the agent, fail closed.
     - name: Check the agent is isolated from the key
@@ -165,10 +265,25 @@ runs:
         BROKER_HOME: ${{ inputs.broker-home }}
       run: |
         set -euo pipefail
+        # The runner's install directory (/home/runner/actions-runner/cached/
+        # <version> on a hosted runner), where its registration private key
+        # .credentials_rsaparams lives, from the runner's own Worker/Listener
+        # process: setup may have granted the agent search access through the
+        # runner's home to reach the workspace, so the check confirms that
+        # file's own mode still keeps it from the agent. Empty when no runner
+        # process is visible (the tests), and the check then skips that probe.
+        runner_root=""
+        for p in $(pgrep -x Runner.Worker 2>/dev/null || true; pgrep -x Runner.Listener 2>/dev/null || true); do
+          exe="$(readlink -f "/proc/$p/exe" 2>/dev/null || true)"
+          [ -n "$exe" ] || continue
+          runner_root="$(dirname "$(dirname "$exe")")"
+          break
+        done
         sudo -n -u "$AGENT_USER" -H -- env -i \
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
           EXPECT_AGENT_USER="$AGENT_USER" \
           BROKER_HOME="$BROKER_HOME" \
+          RUNNER_ROOT="$runner_root" \
           TMPDIR="${TMPDIR:-/tmp}" \
           RUNNER_COMMAND_FILES="${GITHUB_ENV:-} ${GITHUB_PATH:-} ${GITHUB_OUTPUT:-}" \
           bash "$GITHUB_ACTION_PATH/check_isolation.sh"
