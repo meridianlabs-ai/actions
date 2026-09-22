@@ -339,7 +339,8 @@ def test_no_expression_inside_a_publish_run_script():
 # --- Failure before or inside the publisher: a seeded result is never reported -------------
 
 
-@pytest.mark.parametrize("failure", [{"tampered": True}, {"validate": False}, {"conclusion": "failure"}], ids=["hash-mismatch", "findings-rejected", "analysis-not-success"])
+@pytest.mark.parametrize("failure", [{"tampered": True}, {"validate": False}, {"conclusion": "failure"}, {"conclusion": ""}],
+                         ids=["hash-mismatch", "findings-rejected", "analysis-not-success", "analysis-never-ran"])
 def test_a_seeded_result_is_not_reported_when_validation_fails(tmp_path, failure):
     run = run_publish_job(tmp_path, **failure)
     assert outcome(run, VALIDATE) == "failure"

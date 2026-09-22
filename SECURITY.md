@@ -114,24 +114,58 @@ and its satellites, and nothing that serves end users:
   administration), and no write exploit was observed: the job logs of runs
   before the declaration already listed Contents, Metadata and Packages as
   read-only, so the declaration fixes in the file what a setting provided.
-- **Triage's issue policies are enforced on the agent's runner.** The
-  triage workflow's "Compose landing manifest" step reduces an issue's
-  labels to `auto` and its assignees to `ransomr`, keeps one issue action
-  per run and carries a failed agent step into the manifest's
-  `error.fail_run`. That step runs on the same runner as the agent, after
-  it. The `land` job's validator, on its fresh runner, independently
-  enforces the generic manifest contract: schema and known keys, body and
-  text file references, the allowed issue repository, and no bundle under
-  `refuse-bundle`; the Slack destination is a `land` input, not a manifest
-  field. It does not repeat those four triage policies. They hold against
-  a mistyped or hostile `manifest-extra.json`; after a separate compromise
-  of the agent runner (a shim on `$GITHUB_PATH`, a line in `$GITHUB_ENV`)
-  a forged manifest could reach `land` with other label or assignee
-  values, several issue actions or no `error`, within the one repository
-  the validator allows. It could not make an already failed agent job
-  green: the job result is the runner's, and `land` runs after a failure
-  either way. Repeating those policies in the validator is separate
-  hardening, not a fix for a demonstrated write primitive.
+- **Triage never authorizes autonomous implementation.** The issue the
+  triage workflow files carries no label. Until 2026-09-22 its composing
+  step forwarded the `auto` label on the agent's say-so, and on the
+  `inspect_ai` fork that label starts the autonomous coding agent; the
+  agent had just read test output anyone can shape, so the label was a
+  privilege the untrusted principal granted itself and the machine account
+  merely wrote (Claude Security finding 4628345). The machine account is
+  the writer of these issues, not the authority behind them: a maintainer
+  who reads the brief applies `auto` themselves, and the fork's kickoff
+  (the `claude.yml` stub, and the trigger check of the shared workflow it
+  calls) accepts a human labeler's write access and refuses a label the
+  machine account applied. The same holds for the ci-perf publisher in
+  upstream `inspect_ai`, which used to label its findings `auto`.
+- **Triage's issue policies are enforced twice, three of them on the land
+  runner.** The "Compose landing manifest" step on the agent's runner drops
+  every label, reduces assignees to `ransomr`, keeps one issue action per
+  run and carries a failed agent step into the manifest's
+  `error.fail_run`. The `land` job passes the first three to the validator
+  on its fresh runner as `allowed-issue-labels: ""`,
+  `allowed-issue-assignees` and `max-issues: "1"`, alongside the generic
+  manifest contract (schema and known keys, body and text file references,
+  the allowed issue repository, no bundle under `refuse-bundle`, and no
+  `pr` or `handback` field under `refuse-pr`: a `pr.open` needs no push,
+  it adopts or opens a PR for a branch already on origin and labels it,
+  and the `MARVIN_TOKEN` fallback reaches this repository's pull requests
+  where the minted token does not; the Slack destination is a `land`
+  input, not a manifest field), so a manifest forged past the composing
+  step after a separate compromise of the agent runner (a shim on
+  `$GITHUB_PATH`, a line in `$GITHUB_ENV`) is refused whole rather than
+  landed with a label, another owner, several issue actions, a labelled PR
+  or an `@review`. The fourth policy is the composer's alone: such a forged
+  manifest could drop its `error`, but could not make an already failed
+  agent job green, since the job result is the runner's and `land` runs
+  after a failure either way. This is enforcement of an authorization
+  boundary, not a response to a demonstrated write primitive: the
+  redirection route finding 4628349 described was replayed against the
+  real permission engine and refused (see "Verification notes"), and that
+  qualification stands.
+- **A built `.vsix` is repo output, not evidence.** In
+  `release-please-vscode.yml` the `build` job runs the consuming repo's
+  install hooks, scripts, tests and `vsce:package`, so the package it
+  uploads, that file's name and any version it reports are repo-controlled,
+  and vsce and ovsx publish to whatever publisher, name and version the
+  package's own manifests declare. Separating build from publish confines
+  where that code runs; it does not bind the publisher-wide PATs to one
+  extension. The `publish` job's "Verify VSIX" step does that (see the
+  guarantees below); what it cannot do is stop a compromised release commit
+  from becoming the content of the one extension version it authorizes,
+  which is what building is. A Marketplace PAT covers every extension of
+  every publisher its account manages and an Open VSX token every namespace
+  of its account; tokens scoped to the one publisher, where a marketplace
+  allows it, are an administrative defence separate from this check.
 - **Release notes are contributor text.** The announce action reads notes
   assembled from merged commit subjects in the calling repo and treats them
   as untrusted when it builds Slack mrkdwn.
@@ -164,8 +198,23 @@ and its satellites, and nothing that serves end users:
   every job secret for masking; cannot `sudo` or reach Docker; and runs under
   `env -i` with no runner command-file variables (so it cannot rewrite a
   later trusted step) and no OIDC request variables (so it cannot mint
-  tokens). The isolated-agent action runs an isolation check as the agent
-  user and fails the job before the agent if any of that does not hold. The
+  tokens). Its reach into the filesystem is explicit: the runner's home is
+  private, so the action gives the agent user search-only (`--x`) ACL entries
+  on the ancestors of the workspace, the staged prompt and the output
+  directory that deny it traversal, and nothing else (no read, so it cannot
+  list those directories; no recursive or other-user change, and a
+  directory's existing ACL mask is kept so no other entry's effective rights
+  move; the step fails instead where that mask would have to widen another
+  principal), then verifies
+  as the agent that those paths, the check script and the Claude Code
+  install are reachable. Files under a granted directory keep their own
+  modes, so what the runner keeps private stays private, and what it leaves
+  world-readable under its home (its install directory, whose
+  `.credentials` holds the OAuth client id and token URL) is reachable by
+  name. The isolated-agent action runs an isolation check as the agent user
+  and fails the job before the agent if any of that does not hold, including
+  if the runner's registration private key (`.credentials_rsaparams`, 0600
+  on hosted runners) is readable. The
   triage agent's tools are reads plus file writes under the landing
   directory; the writes it wants are a manifest that the `land` job validates
   and performs. Claude Code checks the target of a shell output redirect
@@ -195,10 +244,32 @@ and its satellites, and nothing that serves end users:
 - The Slack destination of a triage reply comes from the context of the
   failed run that its `report` job produced, never from the agent's
   manifest and never from a same-named artifact another job of that run
-  supplied. The release-note
+  supplied. The issues triage files carry no label, and the `land` job's
+  validator refuses a manifest that names one, names an owner other than
+  `ransomr`, carries more than one issue action, or carries a `pr` or
+  `handback` field, whatever the agent job uploaded. The release-note
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
+- The VS Code publish job publishes only a package it has bound to the
+  release: before any step holds a PAT, its inline validator opens the
+  downloaded `.vsix` without executing anything in it and fails the job
+  unless `extension/package.json` and `extension.vsixmanifest` agree and
+  name exactly the caller's `extension-id` at the version in the
+  release-please tag (`vX.Y.Z`, `X.Y.Z`, or either with a release-please
+  component prefix). The artifact directory must hold exactly one regular
+  file with a plain name; an archive with repeated or case-variant manifest
+  entries, unsafe entry names, symlinks or Info-ZIP Unicode Path fields
+  (which rename an entry for vsce's reader only), a `package.json` with
+  duplicate keys or the `NaN`/`Infinity` constants JavaScript rejects, or a
+  `vsixmanifest` with a DTD or with more than one `Metadata` or `Identity`
+  element in any namespace is rejected. Nothing the build job output is
+  used afterwards: the verified path, identity and version feed the publish
+  commands, the already-published checks (exact JSON comparison of the
+  listing's publisher, name and versions, a rerun convenience rather than a
+  control) and the release upload. The validator reads the zip's central directory as vsce, ovsx and
+  the registries do; it does not defend against parser differentials beyond
+  those it rejects by name.
 - Both agent jobs run under harden-runner's egress allow-list (Anthropic,
   reached only by the broker; GitHub; the action's installer; for ci-perf
   the Python package indexes). harden-runner does not disable sudo here: its
@@ -235,6 +306,12 @@ and its satellites, and nothing that serves end users:
 - The reviewer stub runs on demand only, on an `@review` comment from a
   collaborator or the machine account's hand-back; nothing reviews a PR on
   open (decision: Ransom, 2026-09-14).
+- A triage-filed fix brief reaches the autonomous coding agent only when a
+  maintainer labels the issue `auto` after reading it. Triage could carry
+  an opt-in of its own (a `workflow_dispatch` input, an allow-list of
+  files), but a human's label after the fact is the decision Ransom
+  approved (2026-09-22): routine triage creates a reviewable issue and
+  authorizes nothing.
 
 ## Adding or changing a workflow here
 
