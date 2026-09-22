@@ -408,3 +408,91 @@ def test_the_publisher_result_is_still_reported_when_atlas_fails(tmp_path):
     assert run.upload == json.dumps(TWO)
     # The failure stopped Atlas at the first mutation: no assignment happened.
     assert not any("--method" in c["argv"] for c in run.gh_calls)
+
+
+# --- The analyze job: the model key never reaches the agent -----------------
+#
+# The whole-agent isolation of the security work: the key reaches only the
+# broker step, harden-runner keeps sudo (B1), and the analysis runs the entire
+# Claude process as a dedicated unprivileged user through the isolated-agent
+# action rather than as the runner user through claude-code-action.
+
+
+def analyze_steps() -> list[dict]:
+    return yaml.safe_load(CI_PERF.read_text())["jobs"]["analyze"]["steps"]
+
+
+def analyze_step(name: str) -> dict:
+    for s in analyze_steps():
+        if s.get("id") == name or str(s.get("name", "")).startswith(name):
+            return s
+    raise KeyError(name)
+
+
+def test_analyze_key_reaches_only_the_broker():
+    for s in analyze_steps():
+        if s.get("id") == "broker":
+            assert set(re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(s))) == {"CI_PERF_ANTHROPIC_API_KEY"}
+        else:
+            assert "ANTHROPIC_API_KEY" not in yaml.safe_dump(s), s.get("name")
+    broker = analyze_step("broker")
+    assert broker["uses"] == "./actions-repo/.github/actions/model-broker"
+    assert broker["with"]["api-key"] == "${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}"
+    checkout = analyze_step("Check out the isolation actions")
+    assert checkout["with"]["sparse-checkout"] == ".github/actions"
+
+
+def test_analyze_harden_runner_blocks_egress_and_does_not_disable_sudo():
+    with_ = analyze_step("Harden runner")["with"]
+    assert with_["egress-policy"] == "block"
+    # B1: the pre hook would drop sudo before the broker/agent-user bootstrap.
+    assert "disable-sudo-and-containers" not in with_ and "disable-sudo" not in with_
+    endpoints = with_["allowed-endpoints"].split()
+    assert all(e.endswith(":443") for e in endpoints)
+    assert "api.anthropic.com:443" in endpoints  # the broker's upstream
+
+
+def test_analyze_runs_the_whole_agent_as_the_isolated_user():
+    agent = analyze_step("analysis")
+    assert agent["uses"] == "./actions-repo/.github/actions/isolated-agent"
+    w = agent["with"]
+    assert w["token"] == "${{ steps.broker.outputs.token }}"
+    assert w["base-url"] == "${{ steps.broker.outputs.base-url }}"
+    assert w["github-token"] == "${{ github.token }}"
+    assert w["write-dir"] == "${{ env.CI_PERF_OUTPUT_DIR }}"
+    assert "--model fable" in w["claude-args"]
+    # forward-env carries only non-secret values the prompt names.
+    forwarded = {ln.split("=", 1)[0] for ln in w["forward-env"].splitlines() if "=" in ln}
+    assert forwarded == {"CI_PERF_OUTPUT_DIR", "CI_PERF_RUN_URL"}
+    assert "ANTHROPIC" not in w["forward-env"] and "secrets." not in w["forward-env"]
+    assert "secrets." not in yaml.safe_dump(agent)
+    # The job output that gates publish comes from the action's conclusion.
+    outputs = yaml.safe_load(CI_PERF.read_text())["jobs"]["analyze"]["outputs"]
+    assert outputs["analysis_conclusion"] == "${{ steps.analysis.outputs.conclusion }}"
+    assert "anthropics/claude-code-action" not in yaml.safe_dump(yaml.safe_load(CI_PERF.read_text())["jobs"]["analyze"])
+
+
+def test_analyze_has_no_runner_side_secret_scan_and_publishes_unconditionally():
+    names = [s.get("name") for s in analyze_steps()]
+    # The removed control: no post-agent secret scan (there is no reusable
+    # secret to screen for, and it would run where the agent could shim it).
+    assert not any("Refuse to publish" in (n or "") for n in names)
+    after = analyze_steps()[[s.get("id") for s in analyze_steps()].index("analysis") + 1:]
+    assert [s["name"] for s in after] == ["Stop the model broker", "Show report", "Retain CI evidence outside Git"]
+    for s in after:
+        assert set(re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(s))) == set(), s["name"]
+    assert analyze_step("Show report")["if"] == "always()"
+    assert analyze_step("Retain CI evidence outside Git")["if"] == "always()"
+
+
+def test_analyze_holds_read_permissions_and_no_marvin_identity():
+    job = yaml.safe_load(CI_PERF.read_text())["jobs"]["analyze"]
+    assert set(job["permissions"].values()) == {"read"}
+    text = yaml.safe_dump(job)
+    assert "MARVIN" not in text and "create-github-app-token" not in text and "steps.mint" not in text
+
+
+def test_no_secret_input_or_step_output_expression_inside_an_analyze_run_script():
+    for s in analyze_steps():
+        hit = re.search(r"\$\{\{\s*(inputs|steps|needs|secrets|github\.event)\b", s.get("run") or "")
+        assert hit is None, f"{s.get('name')}: {hit.group(0)} inside run:"
