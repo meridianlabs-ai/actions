@@ -6,7 +6,7 @@ Global GitHub actions. To report a vulnerability, or to see what these workflows
 Shared release automation for Meridian repos. **See the [release runbook](https://github.com/meridianlabs-ai/meridian-docs/tree/main/releases) in meridian-docs** — how releases work, cadence, who-can-release, hotfixes, and per-repo specifics. Standardized on Release Please, authed by the "Meridian Release Bot" GitHub App (org secrets `RELEASE_PLEASE_APP_ID` / `RELEASE_PLEASE_APP_PRIVATE_KEY`). Pin callers to `@v1`.
 
 - **`.github/workflows/pr-title-lint.yml`** — enforce Conventional Commits on PR titles (we squash-merge, so the PR title becomes the commit). Allowed types are read from `conventional-commit-types.json`.
-- **`.github/workflows/release-please-vscode.yml`** — Release Please + publish for a VS Code extension (Marketplace + Open VSX + `.vsix` release asset).
+- **`.github/workflows/release-please-vscode.yml`** — Release Please + publish for a VS Code extension (Marketplace + Open VSX + `.vsix` release asset). The publish job verifies that the built `.vsix` names exactly `extension-id` at the release tag's version before any PAT is used; see the header comment and [SECURITY.md](SECURITY.md).
 - **`.github/workflows/release-please-python.yml`** — Release Please for Python packages (release-please only; publishing stays in the repo's `publish.yaml`, auto-triggered by the GitHub Release — PyPI trusted publishing can't run from a cross-repo reusable workflow).
 - **`conventional-commit-types.json`** — single source of truth for commit types, feeding both PR-title lint and the release-please changelog sections.
 - **`scripts/gen-release-please-config.sh`** — generate a repo's committed `.release-please-config.json` from the shared type list.
