@@ -112,7 +112,10 @@ and its satellites, and nothing that serves end users:
   private, so the action gives the agent user search-only (`--x`) ACL entries
   on the ancestors of the workspace, the staged prompt and the output
   directory that deny it traversal, and nothing else (no read, so it cannot
-  list those directories; no recursive or other-user change), then verifies
+  list those directories; no recursive or other-user change, and a
+  directory's existing ACL mask is kept so no other entry's effective rights
+  move; the step fails instead where that mask would have to widen another
+  principal), then verifies
   as the agent that those paths, the check script and the Claude Code
   install are reachable. Files under a granted directory keep their own
   modes, so what the runner keeps private stays private, and what it leaves

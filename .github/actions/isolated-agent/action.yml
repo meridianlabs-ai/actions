@@ -16,9 +16,11 @@ description: >-
   prompt and settings to runner-owned files the agent can read but not write,
   hand the agent write access to exactly the one output/landing directory,
   and give it search-only (--x, never read) ACL entries on exactly the
-  ancestors of those paths that deny it traversal — a hosted runner's home is
-  private (0750), so the runner-owned, world-readable checkout under it is
-  unreachable for any other user until then — and then verify, as the agent,
+  ancestors of those paths that deny it traversal, keeping each directory's
+  ACL mask so no other principal's effective rights change — a hosted
+  runner's home is private (0750), so the runner-owned, world-readable
+  checkout under it is unreachable for any other user until then — and then
+  verify, as the agent,
   that every path it will use is reachable. (2) CHECK — check_isolation.sh
   runs AS THE AGENT and fails the job unless the whole boundary holds (no
   sudo/Docker, Yama scope 1+, the broker's and every other user's process and
@@ -189,8 +191,21 @@ runs:
         # files afterwards and why nothing here is granted blindly or
         # widened to o+x. Each grant is logged with the mode it worked
         # around, so a run's log says which directory blocked the agent.
+        #
+        # The grant must not change anyone else's effective permissions
+        # either. A directory that already carries an ACL has a mask, and
+        # every group-class entry (the owning group, named users, named
+        # groups) is effective only within it; `setfacl -m` alone
+        # recalculates that mask as the union of all such entries, so on a
+        # directory with `user:other:rwx` masked down to `r-x` it would hand
+        # `other` write access (review round 1, Blocking). So the mask is
+        # written explicitly and kept as it is (for a plain mode, the mask
+        # setfacl would create equals the group bits). When that mask has no
+        # x, the agent's --x would be masked to nothing, so x is added to the
+        # mask only if no existing entry carries an x it would newly gain;
+        # otherwise the step fails closed rather than widen a stranger.
         grant_traverse() {
-          local target="$1" dir="" part parts
+          local target="$1" dir="" part parts acl mask was
           [ -d "$target" ] || target="$(dirname "$target")"
           target="$(readlink -f "$target")"
           IFS=/ read -r -a parts <<< "$target"
@@ -198,10 +213,23 @@ runs:
             [ -n "$part" ] || continue
             dir="$dir/$part"
             if ! sudo -n -u "$AGENT_USER" -- test -x "$dir"; then
-              command -v setfacl >/dev/null 2>&1 \
-                || { echo "::error::isolated-agent: $dir is not searchable by $AGENT_USER and setfacl (package acl) is not installed to grant it"; exit 1; }
-              sudo -n setfacl -m "u:$AGENT_USER:--x" "$dir"
-              echo "isolated-agent: granted $AGENT_USER search-only (--x) access on $dir, which was $(stat -c '%A %U:%G' "$dir")"
+              if ! command -v setfacl >/dev/null 2>&1 || ! command -v getfacl >/dev/null 2>&1; then
+                echo "::error::isolated-agent: $dir is not searchable by $AGENT_USER and setfacl/getfacl (package acl) are not installed to grant it"
+                exit 1
+              fi
+              was="$(stat -c '%A %U:%G' "$dir")"
+              acl="$(getfacl -c -p -E "$dir")"
+              mask="$(sed -n 's/^mask::\(...\)$/\1/p' <<< "$acl")"
+              [ -n "$mask" ] || mask="$(sed -n 's/^group::\(...\)$/\1/p' <<< "$acl")"
+              if [[ "$mask" != *x* ]]; then
+                if grep -Eq '^(group::|user:[^:]+:|group:[^:]+:)..x$' <<< "$acl"; then
+                  echo "::error::isolated-agent: cannot grant $AGENT_USER search access on $dir without widening another principal: its ACL mask is '$mask' and an existing entry carries x that the mask currently denies ($(tr '\n' ' ' <<< "$acl"))"
+                  exit 1
+                fi
+                mask="${mask:0:2}x"
+              fi
+              sudo -n setfacl -m "u:$AGENT_USER:--x,m::$mask" "$dir"
+              echo "isolated-agent: granted $AGENT_USER search-only (--x) access on $dir, which was $was, keeping its ACL mask $mask"
             fi
           done
         }

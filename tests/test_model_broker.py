@@ -633,9 +633,12 @@ def test_setup_grants_search_only_on_the_ancestor_that_denies_traversal_and_noth
     # named-user ACL entry with search permission only, and the setup log
     # names it with the mode it worked around. Directories that already
     # allowed traversal (755) get no entry.
-    assert f"granted {AGENT_USER} search-only (--x) access on {RUNNER_HOME}, which was drwxr-x--- runner:runner" in env["setup_log"], env["setup_log"]
+    assert f"granted {AGENT_USER} search-only (--x) access on {RUNNER_HOME}, which was drwxr-x--- runner:runner, keeping its ACL mask r-x" in env["setup_log"], env["setup_log"]
     assert env["setup_log"].count("granted") == 1, env["setup_log"]
-    assert f"user:{AGENT_USER}:--x" in container.run("getfacl", "-c", "-p", RUNNER_HOME).stdout
+    acl = container.run("getfacl", "-c", "-p", "-E", RUNNER_HOME).stdout.split()
+    # The one new entry, and the mask setfacl would have derived anyway (the
+    # group bits), written explicitly so nothing else's effective rights move.
+    assert f"user:{AGENT_USER}:--x" in acl and "mask::r-x" in acl and "group::r-x" in acl, acl
     for untouched in (f"{RUNNER_HOME}/work", WORKSPACE, RUNNER_TEMP, ACTION_PATH, WRITE_DIR):
         assert f"user:{AGENT_USER}" not in container.run("getfacl", "-c", "-p", untouched).stdout, untouched
     # Other users gained nothing: the home's other-bits are still ---.
@@ -660,6 +663,67 @@ def test_agent_reaches_exactly_the_paths_it_needs_and_not_the_runners_private_fi
     # name: the documented residual, here the runner's non-secret OAuth
     # client record (the check above passed with it so).
     assert as_agent(container, "cat", f"{RUNNER_ROOT}/.credentials").returncode == 0
+
+
+def masked_dir(container: Container, path: str, acl: str) -> None:
+    # A root-owned 0750 ancestor (no search for others, as /home/runner)
+    # carrying an ACL with a named entry for `nobody` that its mask holds
+    # down; the workdir below is runner-owned 755.
+    container.run("sudo", "-n", "sh", "-c",
+                  f"rm -rf {path} && install -d -o root -g root -m 0750 {path} && install -d -o runner -g runner -m 0755 {path}/work"
+                  f" && setfacl -m {acl} {path}", user="runner")
+
+
+def test_grant_keeps_the_existing_acl_mask_so_another_principal_gains_nothing(container):
+    # Review round 1 (Blocking): an ancestor with `user:nobody:rwx` masked to
+    # `r-x`. A bare `setfacl -m u:agent:--x` would recalculate the mask to rwx
+    # and hand `nobody` write access to the directory. The actual setup must
+    # leave nobody unable to write, keep the mask, and still let the agent
+    # through to the workdir below.
+    masked_dir(container, "/srv/masked", "u:nobody:rwx,m::r-x")
+    try:
+        assert as_user(container, "nobody", "touch", "/srv/masked/before").returncode != 0, "fixture: nobody must start out masked"
+        r = run_setup(container, AGENT_USER, WRITE_DIR, workdir="/srv/masked/work", runner_temp=f"{RUNNER_HOME}/work/_temp-masked")
+        assert f"access on /srv/masked, which was drwxr-x--- root:root, keeping its ACL mask r-x" in r.stdout, r.stdout
+        acl = container.run("getfacl", "-c", "-p", "-E", "/srv/masked").stdout.split()
+        assert "mask::r-x" in acl and "user:nobody:rwx" in acl and f"user:{AGENT_USER}:--x" in acl, acl
+        assert as_user(container, "nobody", "touch", "/srv/masked/after").returncode != 0, "nobody gained write access"
+        assert as_agent(container, "test", "-x", "/srv/masked/work").returncode == 0
+        assert as_agent(container, "ls", "/srv/masked/work").returncode == 0
+    finally:
+        container.run("sudo", "-n", "rm", "-rf", "/srv/masked", user="runner")
+
+
+def test_grant_fails_closed_when_raising_the_mask_would_widen_another_principal(container):
+    # The mask has no x, so the agent's --x would be ineffective, and raising
+    # the mask would give `nobody` (entry rwx, effective r--) search access it
+    # does not have. Setup refuses and leaves the ACL as it found it.
+    masked_dir(container, "/srv/nox", "u:nobody:rwx,m::r--")
+    try:
+        r = run_setup(container, AGENT_USER, WRITE_DIR, workdir="/srv/nox/work", runner_temp=f"{RUNNER_HOME}/work/_temp-nox", check=False)
+        assert r.returncode != 0
+        assert "cannot grant claude-agent search access on /srv/nox without widening another principal: its ACL mask is 'r--'" in r.stdout, r.stdout + r.stderr
+        acl = container.run("getfacl", "-c", "-p", "-E", "/srv/nox").stdout.split()
+        assert "mask::r--" in acl and f"user:{AGENT_USER}:--x" not in acl, acl
+        assert as_user(container, "nobody", "test", "-x", "/srv/nox").returncode != 0
+    finally:
+        container.run("sudo", "-n", "rm", "-rf", "/srv/nox", user="runner")
+
+
+def test_grant_raises_a_mask_without_x_only_when_no_entry_would_gain(container):
+    # A plain 0700 root-owned ancestor: its implied mask is --- and the only
+    # group-class entry (the owning group, ---) carries no x, so adding x to
+    # the mask widens nobody; the agent traverses, the group still cannot.
+    container.run("sudo", "-n", "sh", "-c",
+                  "rm -rf /srv/seven && install -d -o root -g root -m 0700 /srv/seven && install -d -o runner -g runner -m 0755 /srv/seven/work", user="runner")
+    try:
+        r = run_setup(container, AGENT_USER, WRITE_DIR, workdir="/srv/seven/work", runner_temp=f"{RUNNER_HOME}/work/_temp-seven")
+        assert "access on /srv/seven, which was drwx------ root:root, keeping its ACL mask --x" in r.stdout, r.stdout
+        acl = container.run("getfacl", "-c", "-p", "-E", "/srv/seven").stdout.split()
+        assert "mask::--x" in acl and "group::---" in acl, acl
+        assert as_agent(container, "ls", "/srv/seven/work").returncode == 0
+    finally:
+        container.run("sudo", "-n", "rm", "-rf", "/srv/seven", user="runner")
 
 
 def test_setup_fails_closed_when_a_needed_path_is_still_unreadable(container):
