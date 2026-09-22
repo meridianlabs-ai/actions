@@ -96,6 +96,20 @@ and its satellites, and nothing that serves end users:
   redirection route finding 4628349 described was replayed against the
   real permission engine and refused (see "Verification notes"), and that
   qualification stands.
+- **A built `.vsix` is repo output, not evidence.** In
+  `release-please-vscode.yml` the `build` job runs the consuming repo's
+  install hooks, scripts, tests and `vsce:package`, so the package it
+  uploads, that file's name and any version it reports are repo-controlled,
+  and vsce and ovsx publish to whatever publisher, name and version the
+  package's own manifests declare. Separating build from publish confines
+  where that code runs; it does not bind the publisher-wide PATs to one
+  extension. The `publish` job's "Verify VSIX" step does that (see the
+  guarantees below); what it cannot do is stop a compromised release commit
+  from becoming the content of the one extension version it authorizes,
+  which is what building is. A Marketplace PAT covers every extension of
+  every publisher its account manages and an Open VSX token every namespace
+  of its account; tokens scoped to the one publisher, where a marketplace
+  allows it, are an administrative defence separate from this check.
 - **Release notes are contributor text.** The announce action reads notes
   assembled from merged commit subjects in the calling repo and treats them
   as untrusted when it builds Slack mrkdwn.
@@ -128,8 +142,23 @@ and its satellites, and nothing that serves end users:
   every job secret for masking; cannot `sudo` or reach Docker; and runs under
   `env -i` with no runner command-file variables (so it cannot rewrite a
   later trusted step) and no OIDC request variables (so it cannot mint
-  tokens). The isolated-agent action runs an isolation check as the agent
-  user and fails the job before the agent if any of that does not hold. The
+  tokens). Its reach into the filesystem is explicit: the runner's home is
+  private, so the action gives the agent user search-only (`--x`) ACL entries
+  on the ancestors of the workspace, the staged prompt and the output
+  directory that deny it traversal, and nothing else (no read, so it cannot
+  list those directories; no recursive or other-user change, and a
+  directory's existing ACL mask is kept so no other entry's effective rights
+  move; the step fails instead where that mask would have to widen another
+  principal), then verifies
+  as the agent that those paths, the check script and the Claude Code
+  install are reachable. Files under a granted directory keep their own
+  modes, so what the runner keeps private stays private, and what it leaves
+  world-readable under its home (its install directory, whose
+  `.credentials` holds the OAuth client id and token URL) is reachable by
+  name. The isolated-agent action runs an isolation check as the agent user
+  and fails the job before the agent if any of that does not hold, including
+  if the runner's registration private key (`.credentials_rsaparams`, 0600
+  on hosted runners) is readable. The
   triage agent's tools are reads plus file writes under the landing
   directory; the writes it wants are a manifest that the `land` job validates
   and performs. Claude Code checks the target of a shell output redirect
@@ -160,6 +189,25 @@ and its satellites, and nothing that serves end users:
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
+- The VS Code publish job publishes only a package it has bound to the
+  release: before any step holds a PAT, its inline validator opens the
+  downloaded `.vsix` without executing anything in it and fails the job
+  unless `extension/package.json` and `extension.vsixmanifest` agree and
+  name exactly the caller's `extension-id` at the version in the
+  release-please tag (`vX.Y.Z`, `X.Y.Z`, or either with a release-please
+  component prefix). The artifact directory must hold exactly one regular
+  file with a plain name; an archive with repeated or case-variant manifest
+  entries, unsafe entry names, symlinks or Info-ZIP Unicode Path fields
+  (which rename an entry for vsce's reader only), a `package.json` with
+  duplicate keys or the `NaN`/`Infinity` constants JavaScript rejects, or a
+  `vsixmanifest` with a DTD or with more than one `Metadata` or `Identity`
+  element in any namespace is rejected. Nothing the build job output is
+  used afterwards: the verified path, identity and version feed the publish
+  commands, the already-published checks (exact JSON comparison of the
+  listing's publisher, name and versions, a rerun convenience rather than a
+  control) and the release upload. The validator reads the zip's central directory as vsce, ovsx and
+  the registries do; it does not defend against parser differentials beyond
+  those it rejects by name.
 - Both agent jobs run under harden-runner's egress allow-list (Anthropic,
   reached only by the broker; GitHub; the action's installer; for ci-perf
   the Python package indexes). harden-runner does not disable sudo here: its

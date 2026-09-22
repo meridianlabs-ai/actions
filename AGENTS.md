@@ -24,8 +24,12 @@ where the script calls them (`tests/test_triage_workflow.py`,
 `.github/actions/model-broker` in-process and, when a Docker daemon is
 available, the whole `.github/actions/isolated-agent` lifecycle — the agent
 user's isolation from the broker and from a runner/.NET-diagnostic sentinel,
-and the `env -i` launch — end to end in an Ubuntu container). Both actions
-live under the `.github/actions/**` path `tests.yml` lists.
+the bootstrap's reach into a workspace under the runner's private home, and
+the `env -i` launch — end to end in an Ubuntu container laid out like a
+hosted runner; and, when the suite itself runs on a GitHub-hosted runner,
+the same three step scripts in place against that runner's real layout,
+Runner.Worker, Yama and command files). Both actions live under the
+`.github/actions/**` path `tests.yml` lists.
 `.github/workflows/tests.yml` runs them in CI on every push and pull request
 that touches a path it lists.
 
