@@ -5,12 +5,13 @@ Each stub is a copy of the matching file in meridianlabs-ai/agents
 recorded deviations. The YAML is the only place these facts live, so this
 file asserts the ones a resync must not lose: the machine account reaches the
 reusable workflows as the GitHub App's two secrets, named one by one (never
-`secrets: inherit`, never the retired PAT); the reviewer runs on demand only
-(decision: Ransom, 2026-09-14, actions#112); and the `@auto` loop's
-`workflow_run` trigger names CI workflows that exist here and run on pull
-requests, since a name that matches nothing fires nothing; and the `auto`
-label kickoff admits no bot and not the machine account (Claude Security
-finding 4628345).
+`secrets: inherit`, never the retired PAT); every agent job restores the
+Actions cache and never saves it (Claude Security finding 4629157); the
+reviewer runs on demand only (decision: Ransom, 2026-09-14, actions#112); and
+the `@auto` loop's `workflow_run` trigger names CI workflows that exist here
+and run on pull requests, since a name that matches nothing fires nothing; and
+the `auto` label kickoff admits no bot and not the machine account (Claude
+Security finding 4628345).
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
@@ -47,6 +48,15 @@ def test_every_job_passes_the_app_secrets_one_by_one_and_not_the_pat(stub):
         assert "MARVIN_TOKEN" not in secrets, name
         for key, value in secrets.items():
             assert value == "${{ secrets.%s }}" % key, (name, key, value)
+
+
+@pytest.mark.parametrize("stub", STUBS)
+def test_every_job_reads_the_actions_cache_and_never_writes_it(stub):
+    # Claude Security finding 4629157: an agent job that saves to the Actions
+    # cache writes entries the default branch's trusted jobs later restore.
+    # `cache-mode: read` is the caller's half of the fix (agents#146).
+    for name, job in load(stub)["jobs"].items():
+        assert job.get("cache-mode") == "read", (name, job.get("cache-mode"))
 
 
 def test_the_reviewer_runs_on_demand_only():
