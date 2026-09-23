@@ -1052,6 +1052,16 @@ def test_agent_job_holds_no_secret_but_the_job_token_and_the_brokers_key():
     assert "checkout" not in land
 
 
+def test_every_job_restores_caches_but_cannot_save_them():
+    # Workflow-level cache-mode: read (meridianlabs-ai/agents
+    # design/agent-cache-scope.md). A job-level key would override it, so the
+    # file carries exactly one, at column 0.
+    wf = load_workflow()
+    assert wf["cache-mode"] == "read"
+    keys = [l for l in WORKFLOW.read_text().splitlines() if re.match(r"\s*cache-mode\s*:", l)]
+    assert keys == ["cache-mode: read"], keys
+
+
 # --- The model key stays in the broker -----------------------------------------
 
 

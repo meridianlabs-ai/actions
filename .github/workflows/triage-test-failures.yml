@@ -76,6 +76,10 @@ name: Triage Test Failures
         required: true
         type: string
 
+# Agent runs restore caches, never save them: the platform enforces this on
+# every job's token (meridianlabs-ai/agents design/agent-cache-scope.md).
+cache-mode: read
+
 env:
   # Tracking issues are created in the meridianlabs-ai fork of inspect_ai,
   # not in this repo. The agent job only reads them (public repo, job

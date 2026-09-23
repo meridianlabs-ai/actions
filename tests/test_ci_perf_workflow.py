@@ -496,6 +496,16 @@ def test_analyze_holds_read_permissions_and_no_marvin_identity():
     assert "MARVIN" not in text and "create-github-app-token" not in text and "steps.mint" not in text
 
 
+def test_every_job_restores_caches_but_cannot_save_them():
+    # Workflow-level cache-mode: read (meridianlabs-ai/agents
+    # design/agent-cache-scope.md). A job-level key would override it, so the
+    # file carries exactly one, at column 0.
+    wf = yaml.safe_load(CI_PERF.read_text())
+    assert wf["cache-mode"] == "read"
+    keys = [l for l in CI_PERF.read_text().splitlines() if re.match(r"\s*cache-mode\s*:", l)]
+    assert keys == ["cache-mode: read"], keys
+
+
 def test_no_secret_input_or_step_output_expression_inside_an_analyze_run_script():
     for s in analyze_steps():
         hit = re.search(r"\$\{\{\s*(inputs|steps|needs|secrets|github\.event)\b", s.get("run") or "")
