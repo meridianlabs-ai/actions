@@ -533,11 +533,11 @@ jobs:
           token: ${{ steps.broker.outputs.token }}
           github-token: ${{ github.token }}
           write-dir: ${{ runner.temp }}/landing
-          # `fable` is the Claude Code alias for the best current Claude
-          # family; Claude Code resolves it to that family's latest release, so
-          # triage follows new models without a PR per release. Default
-          # reasoning effort on purpose: no effort flag.
-          claude-args: "--model fable"
+          # `opus` is the Claude Code alias for the Opus family; Claude Code
+          # resolves it to that family's latest release, so triage follows new
+          # models without a PR per release. Default reasoning effort on
+          # purpose: no effort flag.
+          claude-args: "--model opus"
           settings: |
             {
               "permissions": {

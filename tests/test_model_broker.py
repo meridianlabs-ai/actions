@@ -882,7 +882,7 @@ def test_run_step_launches_claude_as_the_agent_under_env_i(env, container):
     out = container.bash_step(ia_step("Run the agent"), {
         "AGENT_USER": AGENT_USER, "WORK_DIR": WORKSPACE,
         "BASE_URL": env["base-url"], "TOKEN": env["token"], "GH_TOKEN_IN": "job-token-123",
-        "CLAUDE_ARGS": "--model fable --allowedTools Bash,Read", "FORWARD_ENV": f"AGENT_RECORD_DIR={WRITE_DIR}",
+        "CLAUDE_ARGS": "--model opus --allowedTools Bash,Read", "FORWARD_ENV": f"AGENT_RECORD_DIR={WRITE_DIR}",
         "RUNNER_TEMP": RUNNER_TEMP, "GITHUB_OUTPUT": "/tmp/run_output", "PATH": SYSTEM_PATH,
         # Vars that MUST be stripped by env -i, planted in the runner step's env:
         "CI_PERF_ANTHROPIC_API_KEY": REAL_KEY, "GITHUB_ENV": "/tmp/ghenv",
@@ -910,7 +910,7 @@ def test_run_step_launches_claude_as_the_agent_under_env_i(env, container):
     # --settings was passed, pointing at the runner-owned settings file.
     argv = container.run("cat", f"{WRITE_DIR}/argv").stdout
     assert "--settings" in argv and f"{RUNNER_TEMP}/isolated-agent/settings.json" in argv
-    assert "--model" in argv and "fable" in argv
+    assert "--model" in argv and "opus" in argv
 
 
 def test_the_agent_output_carries_no_reusable_key(env, container):
@@ -1028,7 +1028,7 @@ def test_run_records_failure_and_the_gate_fails_the_job(env, container):
     run = container.bash_step(ia_step("Run the agent"), {
         "AGENT_USER": AGENT_USER, "WORK_DIR": WORKSPACE,
         "BASE_URL": "http://127.0.0.1:8317", "TOKEN": "t", "GH_TOKEN_IN": "g",
-        "CLAUDE_ARGS": "--model fable", "FORWARD_ENV": "",
+        "CLAUDE_ARGS": "--model opus", "FORWARD_ENV": "",
         "RUNNER_TEMP": RUNNER_TEMP, "GITHUB_OUTPUT": "/tmp/failout",
         "PATH": f"/tmp/failbin:{SYSTEM_PATH}",
     }, cwd=WORKSPACE, check=False)
@@ -1175,7 +1175,7 @@ def test_hosted_run_step_runs_claude_as_the_agent_in_the_workspace(hosted):
     out.touch()
     host.bash_step(ia_step("Run the agent"), {
         "AGENT_USER": AGENT_USER, "WORK_DIR": hosted["workspace"], "BASE_URL": hosted["base-url"], "TOKEN": hosted["token"],
-        "GH_TOKEN_IN": "job-token-123", "CLAUDE_ARGS": "--model fable", "FORWARD_ENV": f"AGENT_RECORD_DIR={hosted['write_dir']}",
+        "GH_TOKEN_IN": "job-token-123", "CLAUDE_ARGS": "--model opus", "FORWARD_ENV": f"AGENT_RECORD_DIR={hosted['write_dir']}",
         "GITHUB_OUTPUT": str(out), "PATH": hosted["path"],
     }, cwd=hosted["workspace"])
     assert parse_outputs_file(out.read_text())["conclusion"] == "success"

@@ -49,7 +49,7 @@ inputs:
     required: false
     default: ""
   claude-args:
-    description: 'Extra `claude` flags, space-separated (e.g. "--model fable --allowedTools Bash,Read,Edit,Write,Grep,Glob").'
+    description: 'Extra `claude` flags, space-separated (e.g. "--model opus --allowedTools Bash,Read,Edit,Write,Grep,Glob").'
     required: false
     default: ""
   base-url:
