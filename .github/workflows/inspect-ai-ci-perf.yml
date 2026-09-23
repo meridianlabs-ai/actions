@@ -118,6 +118,10 @@ name: Inspect AI CI Perf
         default: true
         type: boolean
 
+# Agent runs restore caches, never save them: the platform enforces this on
+# every job's token (meridianlabs-ai/agents design/agent-cache-scope.md).
+cache-mode: read
+
 concurrency:
   group: inspect-ai-ci-perf
   cancel-in-progress: false
