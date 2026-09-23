@@ -461,7 +461,10 @@ def test_analyze_runs_the_whole_agent_as_the_isolated_user():
     assert w["base-url"] == "${{ steps.broker.outputs.base-url }}"
     assert w["github-token"] == "${{ github.token }}"
     assert w["write-dir"] == "${{ env.CI_PERF_OUTPUT_DIR }}"
-    assert "--model fable" in w["claude-args"]
+    args = w["claude-args"].split()
+    # The Opus alias, not a dated model id, at default reasoning effort.
+    assert args[args.index("--model") + 1] == "opus"
+    assert not any(a.startswith("--effort") for a in args)
     # forward-env carries only non-secret values the prompt names.
     forwarded = {ln.split("=", 1)[0] for ln in w["forward-env"].splitlines() if "=" in ln}
     assert forwarded == {"CI_PERF_OUTPUT_DIR", "CI_PERF_RUN_URL"}

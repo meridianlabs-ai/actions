@@ -1125,6 +1125,8 @@ def test_the_agent_runs_as_the_isolated_user_pointed_at_the_broker():
     assert w["base-url"] == "${{ steps.broker.outputs.base-url }}"
     assert w["github-token"] == "${{ github.token }}"
     assert w["write-dir"] == "${{ runner.temp }}/landing"
+    # The Opus alias, not a dated model id, at default reasoning effort.
+    assert w["claude-args"] == "--model opus"
     # The agent step names no secret at all (the broker holds the key).
     assert "secrets." not in yaml.safe_dump(claude)
     # The compose step reads the action's conclusion output, not a step outcome.

@@ -232,9 +232,9 @@ jobs:
       # per-run token as ANTHROPIC_API_KEY; the reusable key is never in this
       # agent's environment, files or reachable processes. The action's own
       # isolation check fails the job before the agent if that does not hold.
-      # `conclusion` (success/failure) drives the publish job. --model fable
-      # pins the model to the current-best Claude family (was the action's
-      # default). CI_PERF_OUTPUT_DIR and CI_PERF_RUN_URL are non-secret values
+      # `conclusion` (success/failure) drives the publish job. --model opus
+      # pins the model to the Opus alias, which Claude Code resolves to the
+      # latest Opus release (was the action's default). CI_PERF_OUTPUT_DIR and CI_PERF_RUN_URL are non-secret values
       # the prompt refers to, forwarded into the agent's otherwise-empty
       # environment.
       - name: Analyze CI performance
@@ -245,7 +245,7 @@ jobs:
           token: ${{ steps.broker.outputs.token }}
           github-token: ${{ github.token }}
           write-dir: ${{ env.CI_PERF_OUTPUT_DIR }}
-          claude-args: "--model fable --allowedTools Bash,Read,Edit,Write,Grep,Glob"
+          claude-args: "--model opus --allowedTools Bash,Read,Edit,Write,Grep,Glob"
           forward-env: |
             CI_PERF_OUTPUT_DIR=${{ env.CI_PERF_OUTPUT_DIR }}
             CI_PERF_RUN_URL=${{ env.CI_PERF_RUN_URL }}
