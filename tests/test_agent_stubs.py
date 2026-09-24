@@ -11,7 +11,10 @@ reviewer runs on demand only (decision: Ransom, 2026-09-14, actions#112); and
 the `@auto` loop's `workflow_run` trigger names CI workflows that exist here
 and run on pull requests, since a name that matches nothing fires nothing; and
 the `auto` label kickoff admits no bot and not the machine account (Claude
-Security finding 4628345).
+Security finding 4628345); and the dev-agent and `@auto` jobs opt in to
+landing build and dependency configuration, which the reviewer's workflow
+takes no input for (agents#173: no other automation here runs agent-landed
+branches as the runner).
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
@@ -57,6 +60,22 @@ def test_every_job_reads_the_actions_cache_and_never_writes_it(stub):
     # `cache-mode: read` is the caller's half of the fix (agents#146).
     for name, job in load(stub)["jobs"].items():
         assert job.get("cache-mode") == "read", (name, job.get("cache-mode"))
+
+
+def test_the_dev_and_auto_jobs_opt_in_to_build_config_and_the_reviewer_does_not():
+    # agents design/executed-paths-residual.md -> Land: tier-2 opt-in: a
+    # caller sets `allow_build_config` only when no automation besides CI runs
+    # its agent-landed branches as the runner, which holds here (agents#173's
+    # companion). claude-review.yml declares no such input, so passing it
+    # would fail the call.
+    opted = {"claude.yml", "claude-auto.yml", "claude-auto-review.yml"}
+    for stub in STUBS:
+        for name, job in load(stub)["jobs"].items():
+            reusable = job["uses"].split("/")[-1].split("@")[0]
+            if reusable in opted:
+                assert job["with"].get("allow_build_config") is True, (stub, name)
+            else:
+                assert "allow_build_config" not in job.get("with", {}), (stub, name)
 
 
 def test_the_reviewer_runs_on_demand_only():
@@ -107,6 +126,7 @@ def test_the_ci_fix_job_forwards_the_events_own_fields_and_names_the_association
         "head_branch": "${{ github.event.workflow_run.head_branch }}",
         "pr_number": "${{ github.event.workflow_run.pull_requests[0].number }}",
         "ci_run_id": "${{ github.event.workflow_run.id }}",
+        "allow_build_config": True,
     }
     assert "github.event.workflow_run.head_repository.full_name == github.repository" in job["if"]
     text = (WORKFLOWS / "claude-auto.yml").read_text()
