@@ -115,6 +115,16 @@ jobs:
     #   provision: |
     #     uv venv --python 3.11
     #     uv sync --dev
+    with:
+      # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
+      # pyproject.toml, so without a recipe nothing is provisioned and the
+      # agent has no pytest or PyYAML to run tests/. It installs what
+      # tests.yml installs, on tests.yml's Python; the venv's bin leads the
+      # agent's PATH, so `python3 -m pytest -q tests` (AGENTS.md → Checks)
+      # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
+      provision: |
+        uv venv --python 3.12
+        uv pip install pytest pyyaml
     uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
     # The machine account's secrets, for the gate's deterministic ack/stage
     # steps (eyes reaction + board stage) and the land job's posts (the
