@@ -86,6 +86,15 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
+      # pyproject.toml, so without a recipe nothing is provisioned and the
+      # agent has no pytest or PyYAML to run tests/. It installs what
+      # tests.yml installs, on tests.yml's Python; the venv's bin leads the
+      # agent's PATH, so `python3 -m pytest -q tests` (AGENTS.md → Checks)
+      # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
+      provision: |
+        uv venv --python 3.12
+        uv pip install pytest pyyaml
       head_branch: ${{ github.event.workflow_run.head_branch }}
       pr_number: ${{ github.event.workflow_run.pull_requests[0].number }}
       ci_run_id: ${{ github.event.workflow_run.id }}
@@ -144,6 +153,15 @@ jobs:
       # provision: |
       #   uv venv --python 3.11
       #   uv sync --dev
+      # This repo's own recipe (decision: Ransom, 2026-09-24): it has no
+      # pyproject.toml, so without a recipe nothing is provisioned and the
+      # agent has no pytest or PyYAML to run tests/. It installs what
+      # tests.yml installs, on tests.yml's Python; the venv's bin leads the
+      # agent's PATH, so `python3 -m pytest -q tests` (AGENTS.md → Checks)
+      # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
+      provision: |
+        uv venv --python 3.12
+        uv pip install pytest pyyaml
       pr_number: ${{ github.event.issue.number }}
       comment_author: ${{ github.event.comment.user.login }}
       # allow_build_config (optional, default false; agents repo:

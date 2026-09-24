@@ -14,7 +14,10 @@ the `auto` label kickoff admits no bot and not the machine account (Claude
 Security finding 4628345); and the dev-agent and `@auto` jobs opt in to
 landing build and dependency configuration, which the reviewer's workflow
 takes no input for (agents#173: no other automation here runs agent-landed
-branches as the runner).
+branches as the runner); and every job sets a `provision` recipe that installs
+what tests.yml installs, on its Python, since this repo has no pyproject.toml
+and the reusable workflows otherwise provision nothing (decision: Ransom,
+2026-09-24).
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
@@ -78,6 +81,33 @@ def test_the_dev_and_auto_jobs_opt_in_to_build_config_and_the_reviewer_does_not(
                 assert "allow_build_config" not in job.get("with", {}), (stub, name)
 
 
+def ci_recipe() -> str:
+    """The recipe that gives an agent what tests.yml gives CI: a venv on its
+    Python with the packages its `pip install` step installs."""
+    steps = load("tests.yml")["jobs"]["pytest"]["steps"]
+    (python,) = [s["with"]["python-version"] for s in steps if s.get("uses", "").startswith("actions/setup-python@")]
+    (install,) = [s["run"] for s in steps if s.get("run", "").startswith("pip install ")]
+    assert "\n" not in install.strip() and install.split()[2:], install
+    return f"uv venv --python {python}\nuv pip install {' '.join(install.split()[2:])}\n"
+
+
+def test_the_ci_recipe_is_what_tests_yml_installs():
+    # Pin the derivation, so a tests.yml change that the helper misreads
+    # (a second install step, a moved Python pin) fails here, not silently.
+    assert ci_recipe() == "uv venv --python 3.12\nuv pip install pytest pyyaml\n"
+
+
+@pytest.mark.parametrize("stub", STUBS)
+def test_every_job_provisions_what_the_tests_workflow_installs(stub):
+    # No pyproject.toml here, so without a recipe the reusable workflows'
+    # provisioning step is skipped and the agent has no pytest or PyYAML;
+    # every job runs an agent (the reviewer runs pytest too), so each sets
+    # it, under the current input name.
+    for name, job in load(stub)["jobs"].items():
+        assert job.get("with", {}).get("provision") == ci_recipe(), (stub, name)
+        assert "codex_provision" not in job.get("with", {}), (stub, name)
+
+
 def test_the_reviewer_runs_on_demand_only():
     assert triggers(load("claude-review.yml")) == {"issue_comment": {"types": ["created"]}}
 
@@ -127,6 +157,7 @@ def test_the_ci_fix_job_forwards_the_events_own_fields_and_names_the_association
         "pr_number": "${{ github.event.workflow_run.pull_requests[0].number }}",
         "ci_run_id": "${{ github.event.workflow_run.id }}",
         "allow_build_config": True,
+        "provision": ci_recipe(),
     }
     assert "github.event.workflow_run.head_repository.full_name == github.repository" in job["if"]
     text = (WORKFLOWS / "claude-auto.yml").read_text()
