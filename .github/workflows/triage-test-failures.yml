@@ -276,7 +276,7 @@ jobs:
             skipped | absent)
               none "The report job (attempt $attempt) uploaded no triage context (upload step: $upload): the run passed, or its Slack notification failed." ;;
             *)
-              echo "::warning::The report job's triage-context upload ended '$upload' in attempt $attempt of run $UPSTREAM_RUN_ID. If that was a name conflict, a job that ran third-party code created an artifact named triage-context before the report job could; that artifact is not the report job's and is ignored (SECURITY.md)."
+              echo "::warning::The report job's triage-context upload ended '$upload' in attempt $attempt of run $UPSTREAM_RUN_ID. If that was a name conflict, a job that ran third-party code created an artifact named triage-context before the report job could; that artifact is not the report job's and is ignored (THREAT_MODEL.md)."
               none "The report job's upload did not succeed." ;;
           esac
           # What the report job says it uploaded, from its own log.
@@ -517,7 +517,7 @@ jobs:
       # release the action installs — the revision `@v1` resolves to pins
       # one internally, and the tag moves. The rule matcher in
       # tests/test_triage_workflow.py approximates only the Bash-pattern
-      # step of this decision; SECURITY.md → "Verification notes" records
+      # step of this decision; THREAT_MODEL.md → "Verification notes" records
       # which releases were checked against these settings and when to
       # recheck.
       #

@@ -48,7 +48,7 @@ installed CLI's decision, which also involves its command parser, its
 separate check of redirect targets against the file rules, protected paths
 and the effective settings. An `allow` from that helper is not proof that
 Claude Code runs the command, and a redirect the helper passes still
-requires the CLI's separate file-write check; `SECURITY.md` → "Verification notes" records the checks of
+requires the CLI's separate file-write check; `THREAT_MODEL.md` → "Verification notes" records the checks of
 the real permission engine and when to repeat them.
 
 ## Checks
@@ -69,9 +69,10 @@ clean.
 
 - Untrusted text is never parsed as syntax: `workflow_dispatch` inputs,
   artifacts from earlier runs, test output and agent-written files reach
-  bash through `env:` or files, are validated against a shape (a 40-hex
-  SHA, a Slack channel ID) before they become a ref, an output or a
-  destination, and step outputs are written with heredoc delimiters.
+  bash through `env:` or files as quoted variables, are validated against
+  a shape (a 40-hex SHA, a Slack channel ID) before they become a ref, an
+  output or a destination, and step outputs are written with heredoc
+  delimiters.
 - A job that runs an agent over untrusted input holds only the job token;
   the model key is held by the model broker (`.github/actions/model-broker`,
   a separate Unix user) and the whole Claude process runs as a third,
@@ -98,6 +99,11 @@ clean.
   downloads that id or nothing; the skip cache takes the newest
   `last-inspect-ai-sha` of a successful run (see the headers of
   `inspect-ai-scheduled-tests.yml` and `triage-test-failures.yml`).
+- Write credentials (app secrets, tokens, webhooks) stay out of any job
+  that runs an agent or third-party code; such a job gets the job token and
+  nothing else, and its writes land in a separate job from what it
+  produced. Mint the narrowest token for a write: one repository, only the
+  permissions the job uses, in the job that writes.
 
 ## PRs
 

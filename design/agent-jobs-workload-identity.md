@@ -22,6 +22,11 @@ Security findings and an unreported gap in full detail. Ransom chose that
 pull request about a security problem.
 
 Line numbers are from `main` at 3916d26 unless another tree is named.
+The trust boundaries, guarantees, by-design entries and verification
+notes cited here have since moved from SECURITY.md to THREAT_MODEL.md,
+and the workflow checklist to AGENTS.md, in this repository and in
+meridianlabs-ai/agents. References name the file that now holds the
+text; `THREAT_MODEL.md:` line numbers are those of SECURITY.md at 3916d26.
 meridianlabs-ai/agents was read at c23eb39 (the merge of agents #178,
 `design/untrusted-agent-job.md`, called "the agents design" below).
 anthropics/claude-code-action was read at `v1` = fd1c128 (2026-09-29,
@@ -37,7 +42,7 @@ long-lived Anthropic API key (`CI_PERF_ANTHROPIC_API_KEY`,
 running as the `model-broker` user. The agent runs as a third user,
 `claude-agent`, and gets only the broker's per-run loopback token.
 
-SECURITY.md → Guarantees (SECURITY.md:182-224, 273-289) rests on that. It
+THREAT_MODEL.md → Guarantees (THREAT_MODEL.md:182-224, 273-289) rests on that. It
 says the agent never holds a reusable credential, so the job summary,
 artifact, issue body and Slack text the jobs publish unscreened "carry
 nothing worth leaking". That premise is already broken, in two ways,
@@ -45,12 +50,12 @@ before any agent-to-runner escape:
 
 - **Runner.Worker holds the key from job start.** The key is a secret that
   a step references, so GitHub puts it in the job message and the runner
-  keeps it in memory for masking (SECURITY.md:295-302). Any process running
+  keeps it in memory for masking (THREAT_MODEL.md:295-302). Any process running
   as `runner` can ask the .NET runtime to dump that memory through its
   same-uid diagnostic socket. The agent is kept from that socket only by
   being another uid.
 - **`runner` has passwordless sudo**, which harden-runner deliberately
-  leaves on (SECURITY.md:273-279). So root reads the broker's memory as
+  leaves on (THREAT_MODEL.md:273-279). So root reads the broker's memory as
   well.
 
 So any code that runs as `runner` in these jobs holds the key. Three open
@@ -81,7 +86,7 @@ fork pull request's head as `refs/pull/<n>/head`: a fetch of
 2026-09-30, and 4,430 such refs are listed. A raw commit SHA from a fork PR
 is fetchable the same way. So a write-access dispatcher who names an
 outsider's PR ref runs outsider code in the job that holds the key. The
-2026-09-08 decision to allow any ref (SECURITY.md:303-305, By design)
+2026-09-08 decision to allow any ref (THREAT_MODEL.md:303-305, By design)
 reasoned from "the agent job holds no write token and publication requires
 `main`". It did not consider the key.
 
@@ -112,7 +117,7 @@ Goals:
   job, its `runner` uid, root and every output it reports as untrusted.
 - ci-perf runs only trusted upstream code in a job that holds a
   credential. Third-party code runs where it holds nothing.
-- SECURITY.md says what is true afterwards, including what the unscreened
+- THREAT_MODEL.md says what is true afterwards, including what the unscreened
   outputs can now carry.
 - Each implementation step ships alone, in an order that fits the agents
   rollout.
@@ -120,7 +125,7 @@ Goals:
 Non-goals:
 
 - **Keeping the model credential from the agent.** It is the declared
-  exception (decision: Ransom, 2026-09-30, and agents' SECURITY.md →
+  exception (decision: Ransom, 2026-09-30, and agents' AGENTS.md →
   Adding or changing a workflow, decision: Ransom, 2026-09-23).
 - **Changing what the agents do**: the prompts, the triage manifest
   contract, the land and publish jobs' writes. Paths in the prompts change
@@ -151,7 +156,7 @@ Non-goals:
   Docker away", and that `check_isolation.sh` is "also next to this file"
   (:14-24). Its sudo error says it "must run before harden-runner disables
   it" (:86). The workflows (ci-perf :170-177, triage :148-153) and
-  SECURITY.md (:275-279) say harden-runner deliberately does not disable
+  THREAT_MODEL.md (:275-279) say harden-runner deliberately does not disable
   sudo, and `check_isolation.sh` lives in `isolated-agent`. Deleting the
   action removes this text.
 
@@ -353,7 +358,7 @@ destination, a checkout or code to run:
 | `publish` checks the three data files against `analyze`'s hashes | pass or fail | hygiene against the agent user editing the data; a `runner` compromise can forge them, which buys false numbers in a fork issue, as the agent could already write false findings |
 | `land` skips on `needs.agent.result` skipped or cancelled | land nothing | the agent can already make its run land nothing |
 | The `ci-perf-*` artifact | any content | already validated as untrusted data by `publish_ci_findings.py`, which writes only fork issues |
-| The triage `landing` artifact | any manifest, written after the composer ran | `land`'s validator refuses a label, another assignee, a second issue action, a foreign issue repository, a bundle and every PR, reply, thread and hand-back field (SECURITY.md:130-154). It does **not** today refuse generic `comments[]` on arbitrary numbers of **this** repository (validate_manifest.py:663-680 checks shape only). With `comment-numbers: event` and no event number (P4) it refuses them too |
+| The triage `landing` artifact | any manifest, written after the composer ran | `land`'s validator refuses a label, another assignee, a second issue action, a foreign issue repository, a bundle and every PR, reply, thread and hand-back field (THREAT_MODEL.md:130-154). It does **not** today refuse generic `comments[]` on arbitrary numbers of **this** repository (validate_manifest.py:663-680 checks shape only). With `comment-numbers: event` and no event number (P4) it refuses them too |
 
 The checkout SHA `publish` runs code from comes from a new trusted `resolve`
 job, and the Slack destination from a new trusted triage `context` job. The
@@ -484,7 +489,7 @@ branch trusted code: upstream has about 422 branches, and some look like
 maintainer-pushed copies of outside contributors' PR branches, named
 after the contributor (422 by `git ls-remote --heads` on 2026-09-30).
 Upstream `main`
-is what SECURITY.md trusts (:172-176), and it is the only ref this job
+is what THREAT_MODEL.md trusts (:172-176), and it is the only ref this job
 checks out.
 
 **`tooling`** (new; `needs: resolve`; `permissions: contents: read`; no
@@ -493,7 +498,7 @@ Python and runs `Test CI tooling` as today. `pip install pytest` from PyPI
 is third-party code, and here it holds only the read-only token. That
 closes 4773275 before WIF ships, while the key still exists. After WIF it
 keeps third-party code out of the credentialed job (the tier-2 rule in
-agents' SECURITY.md). `analyze` needs `tooling`: its result decides only
+agents' THREAT_MODEL.md). `analyze` needs `tooling`: its result decides only
 whether the analysis runs, and both outcomes are safe.
 
 **`analyze`** (`needs: [resolve, tooling]`; permissions as today plus
@@ -846,7 +851,7 @@ exists and runs in every agents Claude job, so the cost is one step.
   keeps its unpinned `npm install -g`; steps 3 and 4 remove its callers and
   step 5 deletes it.
 
-### SECURITY.md after the change
+### THREAT_MODEL.md after the change
 
 The text lands with the step that makes it true.
 
@@ -900,10 +905,11 @@ The text lands with the step that makes it true.
 - **By design, second bullet (:303-305)**, step 1: the 2026-09-08
   unrestricted-ref entry is replaced by "ci-perf analyzes upstream `main`
   only (decision: Ransom, 2026-09-30)", with the reason: the job that runs
-  the analyzed commit's scripts holds a credential (agents' SECURITY.md
+  the analyzed commit's scripts holds a credential (agents' THREAT_MODEL.md
   tier-2 rule, "restricted to trusted refs"), and upstream branches are
   not trusted code merely because a write-access holder pushed them.
-- **Adding or changing a workflow, item 2 (:321-328)**, step 5: the model
+- **Adding or changing a workflow, item 2 (:321-328)**, now in AGENTS.md
+  ("Rules the tests enforce", bullet 2), step 5: the model
   credential is Anthropic WIF through claude-code-action with
   `github_token: ${{ github.token }}`, launched through agents'
   `claude-agent-launcher`. The job requests `id-token: write` for that
@@ -1215,7 +1221,7 @@ test needs network, Docker or a model: `gh` and `git` are stand-ins on
      - For P1, the scratch-branch canary's App exchange fails.
      - For P3, agents' rule reads the narrowed condition, and a dispatch of
        the unchanged agents stubs still succeeds.
-  3. **The redirect-target verification** (SECURITY.md → Verification
+  3. **The redirect-target verification** (THREAT_MODEL.md → Verification
      notes) is repeated with the triage settings of step 3 and the CLI
      release the action pins.
 
@@ -1223,7 +1229,7 @@ test needs network, Docker or a model: `gh` and `git` are stand-ins on
 
 Each step is one PR in this repository unless it says otherwise. Each runs
 `python3 -m pytest -q tests` and `actionlint` on the changed files, and
-updates the SECURITY.md text it makes true.
+updates the THREAT_MODEL.md text it makes true.
 
 No step is an interim patch (decision: Ransom, 2026-09-30: the work will
 land quickly, so no temporary patches). Steps 1 and 2 ship before WIF only
@@ -1237,14 +1243,14 @@ jobs, not stopgaps, and they stay after steps 3-5.
      is where every job's SHA comes from, and `tooling` keeps third-party
      code out of the credentialed job.
    - Files: `.github/workflows/inspect-ai-ci-perf.yml`,
-     `tests/test_ci_perf_workflow.py`, SECURITY.md (trust boundaries;
+     `tests/test_ci_perf_workflow.py`, THREAT_MODEL.md (trust boundaries;
      By design, second bullet; the two-job guarantee).
    - Independent of agents.
 2. **triage: the `context` job, and `land` reading from it.** This fixes
    4773277's consequence, and is what lets `land` stop believing the agent
    job's outputs after WIF.
    - Files: `.github/workflows/triage-test-failures.yml`,
-     `tests/test_triage_workflow.py`, SECURITY.md (the Slack-destination
+     `tests/test_triage_workflow.py`, THREAT_MODEL.md (the Slack-destination
      sentence of the two-job guarantee).
    - Independent of agents.
    - *Prerequisites, before steps 3 and 4 (not PRs here):*
@@ -1252,7 +1258,7 @@ jobs, not stopgaps, and they stay after steps 3-5.
        the scratch-branch canary;
      - P2: Ransom creates the two service accounts and rules;
      - P3: Ransom narrows agents' rule to its seven workflows (decided), with
-       a line in agents' design and SECURITY.md recording it;
+       a line in agents' design and THREAT_MODEL.md recording it;
      - P4 (before step 3 only): agents step 3 has shipped land's
        `comment-numbers` input, and the agents design's sentence that
        triage keeps `*` is corrected. It is met with P1, since agents step
@@ -1262,13 +1268,13 @@ jobs, not stopgaps, and they stay after steps 3-5.
      the prompt paths, the settings, `id-token: write`, `land`'s
      `comment-numbers: event` and the new comments.
    - Tests: `tests/test_triage_workflow.py`.
-   - SECURITY.md: the split first guarantee, the Slack and validator
+   - THREAT_MODEL.md: the split first guarantee, the Slack and validator
      bullet, and Verification notes re-checked.
    - After a green run: revoke `TRIAGE_ANTHROPIC_API_KEY` in the Console.
 4. **ci-perf on WIF and the launcher.**
    - The shape under Design → ci-perf, with its egress list.
    - Tests: `tests/test_ci_perf_workflow.py`.
-   - SECURITY.md: ci-perf's half of the first guarantee.
+   - THREAT_MODEL.md: ci-perf's half of the first guarantee.
    - After a green run: revoke `CI_PERF_ANTHROPIC_API_KEY`.
    - Steps 3 and 4 can ship in either order.
 5. **Retire the broker.**
@@ -1276,9 +1282,10 @@ jobs, not stopgaps, and they stay after steps 3-5.
      and `tests/test_model_broker.py`.
    - `tests.yml`: drop `.github/actions/**`.
    - Add the repository-wide test.
-   - Rewrite SECURITY.md (Guarantees merged, egress and unscreened output,
-     By design first bullet, Adding a workflow item 2) and AGENTS.md (the
-     test paragraph, "Rules the tests enforce" bullet 2).
+   - Rewrite THREAT_MODEL.md (Guarantees merged, egress and unscreened
+     output, By design first bullet) and AGENTS.md (the test paragraph,
+     "Rules the tests enforce" bullet 2, which now holds Adding a workflow
+     item 2).
    - Delete the two secrets, after the organization-wide search.
 
 ## Decisions

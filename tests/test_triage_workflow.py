@@ -23,7 +23,7 @@ write vector, not a model of the installed CLI's decision, which also
 involves its command parser, a separate check of redirect targets against
 the file rules, its protected paths and the effective settings. An `allow`
 from these helpers is therefore not proof that Claude Code runs the
-command; SECURITY.md → "Verification notes" records the checks of the real
+command; THREAT_MODEL.md → "Verification notes" records the checks of the real
 permission engine.
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;

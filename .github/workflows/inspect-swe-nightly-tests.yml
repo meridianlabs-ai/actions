@@ -11,7 +11,7 @@ name: Inspect SWE Nightly Tests
 # nightly-tests runs code this repository does not control: `pip install -e
 # ".[dev]"` resolves inspect_swe's dev closure against PyPI on the day (no
 # lock file, on purpose), sdist build hooks included, and pytest imports it
-# with the provider keys in env. SECURITY.md names that code as an adversary
+# with the provider keys in env. THREAT_MODEL.md names that code as an adversary
 # that can take over its job's runner. So the job holds nothing that reaches
 # beyond the job: the token is declared read-only (workflow-level
 # `permissions`) rather than left to the repository's default setting, the
