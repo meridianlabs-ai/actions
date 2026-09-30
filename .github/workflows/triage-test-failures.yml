@@ -1,14 +1,19 @@
 ---
-# Triage of a failed scheduled inspect_ai test run, in two jobs with a runner
-# boundary between them (the landing design in the agents repo,
-# design/architecture.md → "Landing job"; this repo's issue #106).
+# Triage of a failed scheduled inspect_ai test run, in three jobs, with a
+# runner boundary between the agent and the writes (the landing design in the
+# agents repo, design/architecture.md → "Landing job"; this repo's issue #106;
+# the context job is step 2 of design/agent-jobs-workload-identity.md).
 #
-# agent downloads the failed run's logs and its triage-context artifact (only
-# the one the run's report job recorded in its own log, by id and digest: the
-# run's test jobs execute third-party code and could otherwise supply a
-# same-named artifact), validates the artifact's fields before using any of
-# them, checks out UKGovernmentBEIS/inspect_ai at the tested commit and runs
-# the Claude triage agent. The agent's input is test output, which any code the tests exercise
+# context checks that the run to triage is a scheduled run of this
+# repository's default branch, resolves its attempt, takes its triage-context
+# artifact (only the one the run's report job recorded in its own log, by id
+# and digest: the run's test jobs execute third-party code and could
+# otherwise supply a same-named artifact) and validates the artifact's fields
+# before any becomes an output. It runs no agent and no third-party code.
+#
+# agent downloads the failed run's logs at the attempt context resolved,
+# checks out UKGovernmentBEIS/inspect_ai at the tested commit context
+# validated and runs the Claude triage agent. The agent's input is test output, which any code the tests exercise
 # can shape, and public fork issues, which anyone can write, so this job
 # holds only the job token (read-only): no MARVIN_TOKEN, no Slack token, and
 # not the Anthropic key either. The key (TRIAGE_ANTHROPIC_API_KEY, a key from
@@ -51,10 +56,10 @@
 # `land` composite validates the manifest and only then creates, comments
 # on, reopens and assigns the fork's tracking issues as marvin — putting
 # each issue it creates or adopts on Atlas at Todo by node ID — and posts
-# the Slack message to the channel and thread the agent job validated
-# (never to a destination the manifest names). The marvin identity (the
-# app secrets MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY, the token they
-# mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
+# the Slack message to the channel and thread the context job validated
+# (never to a destination the manifest names; land reads no output of the
+# agent job). The marvin identity (the app secrets MARVIN_APP_CLIENT_ID /
+# MARVIN_APP_PRIVATE_KEY, the token they mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
 # `land` only.
 #
 # The manifest's `slack` field, `issues[].assignees` / `issues[].reopen`,
@@ -91,86 +96,84 @@ env:
   # the compose step (which sets it) and by the land job (whose validator
   # admits no other assignee), so the two cannot drift.
   ISSUE_ASSIGNEE: ransomr
+  # The run to triage. The context job checks it before any job reads it.
+  UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+  UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url || format('https://github.com/{0}/actions/runs/{1}', github.repository, inputs.run_id) }}
 
 jobs:
-  # UNTRUSTED once the agent has run: job token only; the Anthropic key is
-  # in the model broker, not in this job's environment.
-  agent:
+  # TRUSTED: resolves what triage believes about the failed run before any
+  # agent runs, on a runner the agent never has. No agent, no checkout, no
+  # third-party code; job token only. agent and land read its outputs, and
+  # land reads nothing from the agent job but its manifest artifact, so
+  # nothing the agent job prints or reports (an `::add-mask::` of the
+  # channel ID, a forged job output) can move the Slack reply.
+  context:
     # Only triage failed scheduled runs (not push/dev runs, not successes).
-    # workflow_dispatch lets humans re-run triage against a specific run_id.
+    # workflow_dispatch lets humans re-run triage against a specific run_id,
+    # which the first step below holds to the same kind of run.
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'failure' &&
        github.event.workflow_run.event == 'schedule')
     runs-on: ubuntu-latest
-    # Matches the broker's lifetime-minutes below, so the job cannot outlive
-    # its model access (a wedged agent would otherwise hold the runner for
-    # GitHub's six-hour default with no model). Triage runs took 2 to 12
-    # minutes over 47 runs, 2026-09-03 to 2026-09-22; 60 is a wide margin.
-    timeout-minutes: 60
     permissions:
       contents: read
       actions: read
     outputs:
+      attempt: ${{ steps.attempt.outputs.attempt }}
       # Validated in "Validate the triage context" below; the land job's
-      # Slack destination comes from here, never from the manifest.
+      # Slack destination comes from here, never from the manifest or the
+      # agent job.
+      sha: ${{ steps.context.outputs.sha }}
+      exact: ${{ steps.context.outputs.exact }}
       channel: ${{ steps.context.outputs.channel }}
       thread_ts: ${{ steps.context.outputs.thread_ts }}
 
-    env:
-      UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
-      UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url || format('https://github.com/{0}/actions/runs/{1}', github.repository, inputs.run_id) }}
-
     steps:
-      # This repo's own code at the workflow's commit, for the local
-      # model-broker and isolated-agent actions. The fetch is to github.com,
-      # which the egress allow-list permits.
-      - name: Check out the isolation actions
-        uses: actions/checkout@v6
-        with:
-          path: actions-repo
-          sparse-checkout: .github/actions
-          persist-credentials: false
+      # The producer checks below trust a run's own report job, which is
+      # only as trusted as the workflow file the run executed. A pull
+      # request's run executes the copy on its head branch, and a fork's
+      # head is anyone's code: its "report" job can record any artifact. So
+      # triage takes a run only when it is a scheduled run of this
+      # repository's default branch. A completion event already implies
+      # that; a dispatch names any run ID, so both are checked here, against
+      # the API's record of the run (Claude Security finding 4773278).
+      - name: Check the run is a scheduled run of the default branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          if ! [[ "$UPSTREAM_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The run to triage is not a numeric run ID."
+            exit 1
+          fi
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            echo "::error::The event names no default branch for $REPO."
+            exit 1
+          fi
+          if ! run=$(gh api "repos/$REPO/actions/runs/$UPSTREAM_RUN_ID" \
+                       --jq '{event: (.event // ""), repo: (.head_repository.full_name // ""), branch: (.head_branch // "")}' 2>/dev/null); then
+            echo "::error::Could not read run $UPSTREAM_RUN_ID of $REPO."
+            exit 1
+          fi
+          event=$(jq -r '.event' <<<"$run")
+          head_repo=$(jq -r '.repo' <<<"$run")
+          head_branch=$(jq -r '.branch' <<<"$run")
+          if [ "$event" != "schedule" ] || [ "$head_repo" != "$REPO" ] || [ "$head_branch" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Run $UPSTREAM_RUN_ID is not a scheduled run of $REPO on $DEFAULT_BRANCH (event '$event', head $head_repo branch $head_branch). Triage takes its context only from such a run."
+            exit 1
+          fi
+          echo "Run $UPSTREAM_RUN_ID is a scheduled run of $REPO on $DEFAULT_BRANCH."
 
-      - name: Start the model broker
-        id: broker
-        uses: ./actions-repo/.github/actions/model-broker
-        with:
-          api-key: ${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}
-          lifetime-minutes: "60"   # = the job's timeout-minutes above
-
-      # Egress allow-list for the rest of the job. The endpoints are ci-perf's
-      # observed set (inspect-ai-ci-perf.yml, "Egress") minus the Python
-      # package indexes, which triage does not use: Anthropic for the broker,
-      # GitHub for gh and the checkout, the action's Claude Code installer and
-      # its npm install. GitHub Actions infrastructure (artifact downloads
-      # included) is allowed without listing. A blocked call shows in the
-      # harden-runner step summary and as a job annotation. sudo and containers
-      # are deliberately NOT disabled: harden-runner does that in its `pre`
-      # hook, which runs before the broker start and the agent-user setup, both
-      # of which need sudo (review round 1, B1). The untrusted agent instead
-      # runs as its own unprivileged user (the isolated-agent action), which
-      # cannot alter the firewall or read another user's files as root.
-      - name: Harden runner
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            api.anthropic.com:443
-            api.github.com:443
-            github.com:443
-            claude.ai:443
-            downloads.claude.ai:443
-            registry.npmjs.org:443
-            release-assets.githubusercontent.com:443
-
-      # Every read of the upstream run below is of one attempt, resolved here
-      # once: the attempt whose completion fired this run, or, for a dispatch
-      # that names a run, its latest. A triage that starts late or is re-run
-      # after the upstream run gained another attempt would otherwise read
-      # attempt 2's failures and installed packages (unqualified `gh run view`
-      # serves the latest attempt) beside attempt 1's tested SHA and Slack
-      # thread. The failed log, the run metadata, the failing run's install
+      # Every read of the upstream run, here and in the agent job, is of one
+      # attempt, resolved here once: the attempt whose completion fired this
+      # run, or, for a dispatch that names a run, its latest. A triage that
+      # starts late or is re-run after the upstream run gained another
+      # attempt would otherwise read attempt 2's failures and installed
+      # packages (unqualified `gh run view` serves the latest attempt) beside
+      # attempt 1's tested SHA and Slack thread. The failed log, the run metadata, the failing run's install
       # log and the trusted context all take this value; the passing baseline
       # is a different run, selected on its own.
       - name: Resolve the upstream run attempt
@@ -191,32 +194,6 @@ jobs:
           fi
           { echo "attempt<<EOF"; echo "$attempt"; echo "EOF"; } >> "$GITHUB_OUTPUT"
           echo "Triaging attempt $attempt of run $UPSTREAM_RUN_ID"
-
-      - name: Download failed logs from upstream run
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
-        run: |
-          mkdir -p triage
-          echo "Fetching logs for run $UPSTREAM_RUN_ID attempt $UPSTREAM_RUN_ATTEMPT"
-          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
-            --repo "$REPO" \
-            --log-failed > triage/failed.log 2>&1 || echo "No failed-step logs available"
-          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
-            --repo "$REPO" \
-            --json jobs,conclusion,displayTitle,headBranch,headSha,url,createdAt \
-            > triage/run.json
-          # Truncate very long logs so we fit in the context window.
-          # Keep the last 2MB — failures are almost always near the end.
-          if [ -f triage/failed.log ]; then
-            size=$(wc -c < triage/failed.log)
-            if [ "$size" -gt 2000000 ]; then
-              echo "Log is $size bytes; truncating to last 2MB"
-              tail -c 2000000 triage/failed.log > triage/failed.log.trimmed
-              mv triage/failed.log.trimmed triage/failed.log
-            fi
-          fi
 
       # The triage-context artifact is trusted for who produced it, not for
       # its name. A run's artifact namespace is shared by all its jobs, and
@@ -309,6 +286,149 @@ jobs:
           unzip -o -q "$zip" slack_thread.json -d triage || { rm -f triage/slack_thread.json; none "Artifact $id holds no slack_thread.json."; }
           echo "Trusted triage context: artifact $id ($digest), uploaded by report job $job_id in attempt $attempt of run $UPSTREAM_RUN_ID."
 
+      # Every field of the artifact is data until it matches its shape:
+      # inspect_ai_sha becomes a checkout ref, channel and thread_ts select
+      # the Slack destination, and all three become step outputs. A value
+      # that fails its check is dropped (the SHA falls back to main with
+      # exact=false). Outputs are written with heredoc delimiters, never
+      # `echo "key=$value"`, so a newline in a value cannot add an output.
+      # triage/slack_thread.json exists only when the step above proved the
+      # report job produced it; this step checks shape, not provenance.
+      - name: Validate the triage context
+        id: context
+        run: |
+          set -uo pipefail
+          sha=""; channel=""; thread_ts=""
+          # Only the slack_thread.json artifact carries the inspect_ai SHA.
+          # run.json.headSha is the *actions* repo SHA and must not be used.
+          if [ -f triage/slack_thread.json ]; then
+            field() {
+              jq -r --arg k "$1" 'if type == "object" and (.[$k] | type) == "string" then .[$k] else "" end' \
+                triage/slack_thread.json 2>/dev/null || true
+            }
+            sha=$(field inspect_ai_sha)
+            channel=$(field channel)
+            thread_ts=$(field thread_ts)
+          fi
+          if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            exact="true"
+          else
+            if [ -n "$sha" ]; then
+              echo "::warning::triage-context inspect_ai_sha is not a 40-hex SHA; ignoring it."
+            else
+              echo "No tested inspect_ai SHA available."
+            fi
+            echo "Falling back to main (not the exact tested commit)."
+            sha="main"
+            exact="false"
+          fi
+          if ! [[ "$channel" =~ ^[CG][A-Z0-9]{8,}$ ]]; then
+            [ -z "$channel" ] || echo "::warning::triage-context channel is not a Slack channel ID; ignoring it."
+            channel=""
+          fi
+          if ! [[ "$thread_ts" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            [ -z "$thread_ts" ] || echo "::warning::triage-context thread_ts is not a Slack timestamp; ignoring it."
+            thread_ts=""
+          fi
+          {
+            echo "sha<<EOF"; echo "$sha"; echo "EOF"
+            echo "exact<<EOF"; echo "$exact"; echo "EOF"
+            echo "channel<<EOF"; echo "$channel"; echo "EOF"
+            echo "thread_ts<<EOF"; echo "$thread_ts"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Triaging against inspect_ai@$sha (exact tested commit: $exact); Slack channel '${channel:-<default>}' thread '${thread_ts:-<root>}'"
+
+  # UNTRUSTED once the agent has run: job token only; the Anthropic key is
+  # in the model broker, not in this job's environment. It has no outputs:
+  # land reads the context job's, not this job's.
+  agent:
+    needs: context
+    # Runs when context failed too, so that the failure reaches land as the
+    # manifest's error (the compose step below): every step that reads the
+    # upstream run or runs the agent is gated on the context job instead.
+    if: always() && needs.context.result != 'skipped' && needs.context.result != 'cancelled'
+    runs-on: ubuntu-latest
+    # Matches the broker's lifetime-minutes below, so the job cannot outlive
+    # its model access (a wedged agent would otherwise hold the runner for
+    # GitHub's six-hour default with no model). Triage runs took 2 to 12
+    # minutes over 47 runs, 2026-09-03 to 2026-09-22; 60 is a wide margin.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      # This repo's own code at the workflow's commit, for the local
+      # model-broker and isolated-agent actions. The fetch is to github.com,
+      # which the egress allow-list permits.
+      - name: Check out the isolation actions
+        if: needs.context.result == 'success'
+        uses: actions/checkout@v6
+        with:
+          path: actions-repo
+          sparse-checkout: .github/actions
+          persist-credentials: false
+
+      - name: Start the model broker
+        id: broker
+        if: needs.context.result == 'success'
+        uses: ./actions-repo/.github/actions/model-broker
+        with:
+          api-key: ${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}
+          lifetime-minutes: "60"   # = the job's timeout-minutes above
+
+      # Egress allow-list for the rest of the job. The endpoints are ci-perf's
+      # observed set (inspect-ai-ci-perf.yml, "Egress") minus the Python
+      # package indexes, which triage does not use: Anthropic for the broker,
+      # GitHub for gh and the checkout, the action's Claude Code installer and
+      # its npm install. GitHub Actions infrastructure (artifact downloads
+      # included) is allowed without listing. A blocked call shows in the
+      # harden-runner step summary and as a job annotation. sudo and containers
+      # are deliberately NOT disabled: harden-runner does that in its `pre`
+      # hook, which runs before the broker start and the agent-user setup, both
+      # of which need sudo (review round 1, B1). The untrusted agent instead
+      # runs as its own unprivileged user (the isolated-agent action), which
+      # cannot alter the firewall or read another user's files as root.
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.anthropic.com:443
+            api.github.com:443
+            github.com:443
+            claude.ai:443
+            downloads.claude.ai:443
+            registry.npmjs.org:443
+            release-assets.githubusercontent.com:443
+
+      - name: Download failed logs from upstream run
+        if: needs.context.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          UPSTREAM_RUN_ATTEMPT: ${{ needs.context.outputs.attempt }}
+        run: |
+          mkdir -p triage
+          echo "Fetching logs for run $UPSTREAM_RUN_ID attempt $UPSTREAM_RUN_ATTEMPT"
+          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
+            --repo "$REPO" \
+            --log-failed > triage/failed.log 2>&1 || echo "No failed-step logs available"
+          gh run view "$UPSTREAM_RUN_ID" --attempt "$UPSTREAM_RUN_ATTEMPT" \
+            --repo "$REPO" \
+            --json jobs,conclusion,displayTitle,headBranch,headSha,url,createdAt \
+            > triage/run.json
+          # Truncate very long logs so we fit in the context window.
+          # Keep the last 2MB — failures are almost always near the end.
+          if [ -f triage/failed.log ]; then
+            size=$(wc -c < triage/failed.log)
+            if [ "$size" -gt 2000000 ]; then
+              echo "Log is $size bytes; truncating to last 2MB"
+              tail -c 2000000 triage/failed.log > triage/failed.log.trimmed
+              mv triage/failed.log.trimmed triage/failed.log
+            fi
+          fi
+
       # Dependency versions float in the scheduled tests (`pip install -e
       # ".[dev]"` resolves against PyPI on the day, not inspect_ai's uv.lock),
       # so a failure with no relevant inspect_ai commit is often a package
@@ -323,13 +443,14 @@ jobs:
       # text is data: grepped and written to files, never evaluated; the SHA
       # is kept only when it is 40 hex.
       - name: Collect installed package versions (failed run and last passing run)
+        if: needs.context.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TESTS_WORKFLOW: Inspect AI Scheduled Tests
           # The failed run is read at the attempt being triaged; a passing
           # run's latest attempt is the one that passed.
-          UPSTREAM_RUN_ATTEMPT: ${{ steps.attempt.outputs.attempt }}
+          UPSTREAM_RUN_ATTEMPT: ${{ needs.context.outputs.attempt }}
         run: |
           set -uo pipefail
           export LC_ALL=C
@@ -393,63 +514,12 @@ jobs:
             echo '{}' > "$dir/passing-run.json"
           fi
 
-      # Every field of the artifact is data until it matches its shape:
-      # inspect_ai_sha becomes a checkout ref, channel and thread_ts select
-      # the Slack destination, and all three become step outputs. A value
-      # that fails its check is dropped (the SHA falls back to main with
-      # exact=false). Outputs are written with heredoc delimiters, never
-      # `echo "key=$value"`, so a newline in a value cannot add an output.
-      # triage/slack_thread.json exists only when the step above proved the
-      # report job produced it; this step checks shape, not provenance.
-      - name: Validate the triage context
-        id: context
-        run: |
-          set -uo pipefail
-          sha=""; channel=""; thread_ts=""
-          # Only the slack_thread.json artifact carries the inspect_ai SHA.
-          # run.json.headSha is the *actions* repo SHA and must not be used.
-          if [ -f triage/slack_thread.json ]; then
-            field() {
-              jq -r --arg k "$1" 'if type == "object" and (.[$k] | type) == "string" then .[$k] else "" end' \
-                triage/slack_thread.json 2>/dev/null || true
-            }
-            sha=$(field inspect_ai_sha)
-            channel=$(field channel)
-            thread_ts=$(field thread_ts)
-          fi
-          if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-            exact="true"
-          else
-            if [ -n "$sha" ]; then
-              echo "::warning::triage-context inspect_ai_sha is not a 40-hex SHA; ignoring it."
-            else
-              echo "No tested inspect_ai SHA available."
-            fi
-            echo "Falling back to main (not the exact tested commit)."
-            sha="main"
-            exact="false"
-          fi
-          if ! [[ "$channel" =~ ^[CG][A-Z0-9]{8,}$ ]]; then
-            [ -z "$channel" ] || echo "::warning::triage-context channel is not a Slack channel ID; ignoring it."
-            channel=""
-          fi
-          if ! [[ "$thread_ts" =~ ^[0-9]+\.[0-9]+$ ]]; then
-            [ -z "$thread_ts" ] || echo "::warning::triage-context thread_ts is not a Slack timestamp; ignoring it."
-            thread_ts=""
-          fi
-          {
-            echo "sha<<EOF"; echo "$sha"; echo "EOF"
-            echo "exact<<EOF"; echo "$exact"; echo "EOF"
-            echo "channel<<EOF"; echo "$channel"; echo "EOF"
-            echo "thread_ts<<EOF"; echo "$thread_ts"; echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-          echo "Triaging against inspect_ai@$sha (exact tested commit: $exact); Slack channel '${channel:-<default>}' thread '${thread_ts:-<root>}'"
-
       - name: Checkout inspect_ai at tested commit
+        if: needs.context.result == 'success'
         uses: actions/checkout@v6
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: ${{ steps.context.outputs.sha }}
+          ref: ${{ needs.context.outputs.sha }}
           path: inspect_ai
           fetch-depth: 0
           # The agent never fetches or pushes; leave no token in .git/config.
@@ -461,6 +531,7 @@ jobs:
       # here so it exists, runner-owned, before the agent starts.
       - name: Record the checked-out SHA and prepare the landing directory
         id: base
+        if: needs.context.result == 'success'
         env:
           LANDING_DIR: ${{ runner.temp }}/landing
         run: |
@@ -531,6 +602,7 @@ jobs:
       # its manifest and body files into.
       - name: Run Claude triage agent
         id: claude
+        if: needs.context.result == 'success'
         uses: ./actions-repo/.github/actions/isolated-agent
         with:
           base-url: ${{ steps.broker.outputs.base-url }}
@@ -588,7 +660,7 @@ jobs:
 
             Upstream run: ${{ env.UPSTREAM_RUN_URL }}
             inspect_ai checkout: ${{ steps.base.outputs.sha }}
-            inspect_ai checkout is exact tested commit: ${{ steps.context.outputs.exact }}
+            inspect_ai checkout is exact tested commit: ${{ needs.context.outputs.exact }}
             This (triage) repo: ${{ github.repository }}
             Issues repo (where all tracking issues live): ${{ env.ISSUES_REPO }}
             Landing directory (the ONLY place you may write): ${{ runner.temp }}/landing
@@ -977,6 +1049,9 @@ jobs:
           # action failed before the agent ran (setup or isolation check). Any
           # value but "success" makes this a failed triage that land reports.
           CLAUDE_OUTCOME: ${{ steps.claude.outputs.conclusion }}
+          # Anything but "success" means no step above read the run or ran
+          # the agent; land reports it and posts no Slack reply.
+          CONTEXT_RESULT: ${{ needs.context.result }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
@@ -984,6 +1059,10 @@ jobs:
           extra='{}'
           agent='{}'
           problem=""
+          if [ "${CONTEXT_RESULT:-}" != "success" ]; then
+            echo "::error::landing: the triage context could not be resolved (context job: ${CONTEXT_RESULT:-unknown})."
+            problem="the triage context could not be resolved"
+          fi
           if [ -f "$DIR/manifest-extra.json" ]; then
             if ! agent=$(jq -c 'if type=="object" then . else error("not an object") end' "$DIR/manifest-extra.json" 2>&1); then
               echo "::error::landing: the agent's manifest-extra.json is not a JSON object ($agent); nothing it described lands."
@@ -1079,11 +1158,11 @@ jobs:
   # the agent job uploaded), create, comment on, reopen and assign the fork's tracking issues as
   # marvin (created and adopted issues go on Atlas at Todo by node ID; the
   # assignee is added only to an unowned issue), post the Slack message to the
-  # destination the agent job validated, report the manifest's error and
+  # destination the context job validated, report the manifest's error and
   # fail the run when it says so. Skipped when the agent job was skipped
   # (trigger not met: no artifact) or cancelled.
   land:
-    needs: agent
+    needs: [context, agent]
     if: always() && needs.agent.result != 'skipped' && needs.agent.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
@@ -1150,11 +1229,11 @@ jobs:
           # The run names no PR; pin the manifest's (never pushed) branch to
           # the fixed name the agent job's emit-landing used.
           branch-prefix: triage
-          # Slack destination from the agent job's VALIDATED outputs (the
+          # Slack destination from the context job's VALIDATED outputs (the
           # channel the scheduled run's notification went to, else the
           # default channel; the thread of that notification, else the
           # channel root) — never from the manifest, which only supplies
-          # the text.
+          # the text, and never from the agent job, which has no outputs.
           slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
-          slack-channel: ${{ needs.agent.outputs.channel || secrets.SLACK_CHANNEL_ID }}
-          slack-thread-ts: ${{ needs.agent.outputs.thread_ts }}
+          slack-channel: ${{ needs.context.outputs.channel || secrets.SLACK_CHANNEL_ID }}
+          slack-thread-ts: ${{ needs.context.outputs.thread_ts }}

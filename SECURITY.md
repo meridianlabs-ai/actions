@@ -58,10 +58,11 @@ and its satellites, and nothing that serves end users:
   every job, and the scheduled run's `slow-tests` and `static-analysis`
   jobs execute third-party code before the `report` job uploads, so the
   name `triage-context` in a failed scheduled run proves nothing about who
-  wrote it. Triage therefore consumes only the artifact whose id and digest
-  the `report` job recorded in its own job log (a channel no other job of
-  the run can write to), found through the jobs API for the attempt being
-  triaged, checked against the run's artifact list and against the
+  wrote it. Triage therefore resolves its context in a `context` job that
+  runs no agent and no third-party code, before the agent job starts, and
+  consumes only the artifact whose id and digest the `report` job recorded
+  in its own job log (a channel no other job of the run can write to),
+  found through the jobs API for the attempt being triaged, checked against the run's artifact list and against the
   downloaded bytes, and only then shape-validated (a 40-hex SHA, a Slack
   channel ID, a Slack timestamp). A `report` job whose upload did not
   succeed, a log with no or several recorded identities, an id missing from
@@ -73,10 +74,14 @@ and its satellites, and nothing that serves end users:
   metadata, the failing run's install log and the context are all read at
   that attempt, so a triage that runs after the upstream run gained another
   attempt does not pair one attempt's failures with another's tested SHA
-  and thread. Manual triage trusts the run the dispatcher selects with the
-  same producer check, without independently checking that run's event or
-  branch. Artifact names are unique within a run attempt, not within a run:
-  a re-run is a new attempt and uploads the names again, so a run's
+  and thread. The `report` job is only as trusted as the workflow file its
+  run executed, so triage takes a run only when the API reports its event
+  as `schedule`, its head repository as this repository and its head branch
+  as the default branch. This holds for a run the dispatcher selects as for
+  the run whose completion fired triage, so a dispatcher cannot name a fork
+  pull request's run as the producer. Artifact names are unique within a
+  run attempt, not within a run: a re-run is a new attempt and uploads the
+  names again, so a run's
   artifact list can hold one of each name per attempt. The `report` job
   refuses to upload a name that an artifact created since its own attempt
   started already carries (no `overwrite`; only another job of the attempt
@@ -228,24 +233,28 @@ and its satellites, and nothing that serves end users:
   with only the permissions the job uses (a PAT fallback stays in the
   expression while the app secrets roll out). Triage's `land` job checks
   out nothing and posts its Slack reply with a separate Slack token held
-  only there; ci-perf's `publish` job checks out upstream `inspect_ai` at
-  the SHA the analysis used, to run the publisher's own validator.
+  only there, to the destination the `context` job resolved; it reads no
+  output of the agent job. ci-perf's `publish` job checks out upstream
+  `inspect_ai` at the SHA the analysis used, to run the publisher's own
+  validator.
 - No `workflow_dispatch` input, step output or event field is expanded
   inside a `run:` script; they reach bash through `env:` and are quoted.
 - Artifact content is validated against a shape before it becomes a ref, an
   output or a destination, and a value that fails its check is dropped, not
-  passed on; the scheduled-test skip cache also checks its producer's event
-  and branch, and triage checks that the `report` job produced its context
-  before reading a field (see the trust boundaries above for where those
+  passed on; the scheduled-test skip cache and triage also check the
+  producing run's event and branch, and triage checks that the `report` job
+  produced its context before reading a field (see the trust boundaries above for where those
   checks stop).
 - The scheduled test workflows declare a read-only job token, persist no
   credential into a checkout and use no Actions cache; the `report` job
   refuses to upload an artifact name another job of its attempt took.
 - The Slack destination of a triage reply comes from the context of the
-  failed run that its `report` job produced, never from the agent's
-  manifest and never from a same-named artifact another job of that run
-  supplied. The issues triage files carry no label, and the `land` job's
-  validator refuses a manifest that names one, names an owner other than
+  failed run that its `report` job produced, resolved by the `context` job
+  before the agent runs. It never comes from the agent's manifest, the
+  agent job or a same-named artifact another job of that run supplied, so
+  nothing the agent prints (an `::add-mask::` of the channel ID included)
+  moves the reply. The issues triage files carry no label, and the `land`
+  job's validator refuses a manifest that names one, names an owner other than
   `ransomr`, carries more than one issue action, or carries a `pr` or
   `handback` field, whatever the agent job uploaded. The release-note
   converter escapes Slack control syntax and emits only `http(s)` links;
