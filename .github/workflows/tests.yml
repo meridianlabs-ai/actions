@@ -52,4 +52,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest pyyaml
+      # The VS Code release tests run the publish job's cross-check step against
+      # vsce's own reader: install the vsce release-please-vscode.yml pins.
+      - run: npm install -g --ignore-scripts @vscode/vsce@3.9.2
       - run: python3 -m pytest -q tests
