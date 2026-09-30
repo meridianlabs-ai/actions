@@ -19,8 +19,9 @@ Meridian's scheduled and event-driven workflows for the `inspect_ai` fork
 and its satellites, and nothing that serves end users:
 
 - `inspect-ai-ci-perf.yml`: CI performance analysis of upstream
-  `inspect_ai`, an `analyze` job that runs a Claude agent and a `publish`
-  job that writes fork issues and Atlas cards.
+  `inspect_ai` `main`: a `resolve` job that fixes the commit, a `tooling`
+  job that tests upstream's ci-perf scripts, an `analyze` job that runs a
+  Claude agent and a `publish` job that writes fork issues and Atlas cards.
 - `triage-test-failures.yml`: triage of a failed scheduled test run, an
   `agent` job that reads the logs and a `land` job that files the fork
   issue and posts to Slack.
@@ -47,9 +48,9 @@ and its satellites, and nothing that serves end users:
 - **`workflow_dispatch` inputs are data, never syntax.** Only people with
   write access can dispatch, and no input reaches a shell script as
   syntax. Shape validation is per workflow: the scheduled suites validate
-  their ref characters and pytest arguments, ci-perf passes its
-  unrestricted ref directly to checkout, and triage passes the selected run
-  ID to `gh` as a quoted argument.
+  their ref characters and pytest arguments, ci-perf takes no ref: it
+  analyzes upstream `main`, resolved in a job that runs nothing else, and
+  triage passes the selected run ID to `gh` as a quoted argument.
 - **Prior-run artifacts are trusted by provenance where a workflow checks
   it, and a run is not a producer.** A push or dispatch run executes
   whatever copy of a workflow its branch carries, so the scheduled-test
@@ -171,7 +172,8 @@ and its satellites, and nothing that serves end users:
   as untrusted when it builds Slack mrkdwn.
 - **Upstream `main` is trusted.** The scheduled suites run upstream
   `inspect_ai` and `inspect_swe` code unpinned with the provider keys the
-  tests need, and the ci-perf analysis runs upstream's tooling unpinned;
+  tests need, and the ci-perf analysis runs upstream's tooling unpinned, at
+  the `main` commit its `resolve` job read;
   Meridian maintains those repositories, so a compromise there is a larger
   incident than these workflows.
 - **PR and issue text** that the stubs react to follows the shared model in
@@ -229,7 +231,9 @@ and its satellites, and nothing that serves end users:
   expression while the app secrets roll out). Triage's `land` job checks
   out nothing and posts its Slack reply with a separate Slack token held
   only there; ci-perf's `publish` job checks out upstream `inspect_ai` at
-  the SHA the analysis used, to run the publisher's own validator.
+  the commit the `resolve` job resolved, the one the analysis used, to run
+  the publisher's own validator, and names the artifact it downloads
+  itself. Neither the SHA nor the artifact name comes from the agent job.
 - No `workflow_dispatch` input, step output or event field is expanded
   inside a `run:` script; they reach bash through `env:` and are quoted.
 - Artifact content is validated against a shape before it becomes a ref, an
@@ -300,9 +304,14 @@ and its satellites, and nothing that serves end users:
   the runtime to dump itself; `kernel.yama.ptrace_scope` of 1 or stricter,
   which the isolation check requires, is defence in depth behind that user
   boundary.
-- The `workflow_dispatch` ref on ci-perf is unrestricted: a dispatcher may
-  analyze any upstream ref, because the agent job holds no write token and
-  publication requires the ref to be `main` (decision: Ransom, 2026-09-08).
+- ci-perf analyzes upstream `main` only (decision: Ransom, 2026-09-30).
+  The job that runs the analyzed commit's scripts holds a credential, so
+  it runs only a trusted ref: the tier-2 rule of agents' SECURITY.md says
+  a credentialed workflow a person runs on a chosen ref is "restricted to
+  trusted refs". An upstream branch is not trusted code just because a
+  write-access holder pushed it. This replaces the 2026-09-08 decision to
+  let a dispatcher analyze any upstream ref, which did not consider that
+  the job holds the model key.
 - The reviewer stub runs on demand only, on an `@review` comment from a
   collaborator or the machine account's hand-back; nothing reviews a PR on
   open (decision: Ransom, 2026-09-14).
