@@ -122,9 +122,13 @@ Non-goals:
   with the workspace layout; nothing else.
 - **The scheduled suites' provider keys**, the Actions cache findings and
   the VSIX validator (see Not this design).
-- **Changes to meridianlabs-ai/agents code.** The chosen shape needs none
-  (Design → Why the launcher). It does need a Console change to agents'
-  federation rule (Design → Federation rules).
+- **New work in meridianlabs-ai/agents.** The launcher composites need no
+  change (Design → Why the launcher). The design depends on two things on
+  the agents side, both already in or implied by the agents design: its
+  step 3 shipping land's `comment-numbers` input, with the agents design's
+  note on triage changed to match (Design → triage after the change, P4);
+  and a Console change narrowing agents' federation rule (Design →
+  Federation rules, P3).
 
 ## Current behaviour
 
@@ -343,7 +347,8 @@ destination, a checkout or code to run:
 | `publish` needs `analyze` succeeded and `analysis_conclusion == success` | publish or not | the publisher still validates the findings, and the agent can already write any valid findings |
 | `publish` checks the three data files against `analyze`'s hashes | pass or fail | hygiene against the agent user editing the data; a `runner` compromise can forge them, which buys false numbers in a fork issue, as the agent could already write false findings |
 | `land` skips on `needs.agent.result` skipped or cancelled | land nothing | the agent can already make its run land nothing |
-| The `landing` and `ci-perf-*` artifacts | any content | already validated as untrusted data by `land`'s validator and `publish_ci_findings.py` |
+| The `ci-perf-*` artifact | any content | already validated as untrusted data by `publish_ci_findings.py`, which writes only fork issues |
+| The triage `landing` artifact | any manifest, written after the composer ran | `land`'s validator refuses a label, another assignee, a second issue action, a foreign issue repository, a bundle and every PR, reply, thread and hand-back field (SECURITY.md:130-154). It does **not** today refuse generic `comments[]` on arbitrary numbers of **this** repository (validate_manifest.py:663-680 checks shape only). With `comment-numbers: event` and no event number (P4) it refuses them too |
 
 The checkout SHA `publish` runs code from comes from a new trusted `resolve`
 job, and the Slack destination from a new trusted triage `context` job. The
@@ -359,7 +364,7 @@ The task offered two shapes:
 
 This design takes **option 2**. The evidence:
 
-- **It works for these jobs with no agents change,** once the upstream
+- **It works for these jobs with no launcher change,** once the upstream
   checkout sits at the workspace root:
   - `create-codex-user` and the launcher need a git checkout there
     (create-codex-user:263, launcher action.yml:160-161, wrapper :211-214);
@@ -579,9 +584,15 @@ In order:
    the default `dest` of `$RUNNER_TEMP/landing`.
 9. `Compose landing manifest`, unchanged. It reads the imported
    `$RUNNER_TEMP/landing`, and adds one problem: "the triage context could
-   not be resolved" when `needs.context.result != 'success'`. So a failed
-   `context` job still becomes a Slack failure note on the default channel,
-   as a failed attempt resolution does today.
+   not be resolved" when `needs.context.result != 'success'`. A failed
+   `context` job therefore becomes a manifest with `error.fail_run` and no
+   `slack` entry. `land` posts Slack only for a manifest's
+   `slack.text_file` (agents land/action.yml:1284), and with no issue or
+   PR bound its error report goes to the run log (:1531-1558). So the run
+   fails red with the error in its log and **no Slack post**. That is what
+   a failed attempt resolution produces today too (the composer at
+   :1048-1056 writes no `slack` without the agent's file); there is no
+   automatic Slack fallback, and this design adds none.
 10. `Emit landing manifest`, unchanged.
 
 It has no job outputs.
@@ -590,7 +601,29 @@ It has no job outputs.
 
 - `slack-channel: ${{ needs.context.outputs.channel ||
   secrets.SLACK_CHANNEL_ID }}`;
-- `slack-thread-ts: ${{ needs.context.outputs.thread_ts }}`.
+- `slack-thread-ts: ${{ needs.context.outputs.thread_ts }}`;
+- `comment-numbers: event`, with neither `pr-number` nor `issue-number`
+  set (P4, from step 4).
+
+**Why `comment-numbers: event`.** Under this boundary a `runner`
+compromise of the agent job can upload any manifest after the composer
+ran. Today's validator constrains `issues[]` (repository, count, labels,
+assignees) but checks a generic `comments[]` entry's shape only
+(agents validate_manifest.py:663-680). The review's probe of c23eb39
+passed a manifest with two comments on this repository's #17 and #18
+under triage's exact inputs, and `land` would post them to its `repo`
+(land/action.yml:1017). The machine account's token reaches this
+repository through the `MARVIN_TOKEN` fallback
+(triage-test-failures.yml:1127-1136). The agents design adds
+`comment-numbers` in its step 3: with `event`, the validator refuses any
+number other than the `pr-number` or `issue-number` input
+(untrusted-agent-job.md, Land enforces what the composers enforced,
+item 1). Triage passes neither, so every `comments[]` entry is refused,
+while its one permitted fork action still travels through `issues[]`
+under the existing allow-lists. The agents design currently says triage
+keeps `*` (its line 415); that sentence changes with this dependency.
+Waiting for agents' default to flip would not be enough, since triage
+must set the value itself.
 
 With the destination out of the agent job, an `::add-mask::` the agent
 emits in its own job masks nothing `land` reads. That fixes 4773277's
@@ -708,7 +741,7 @@ The agent can read the JWT file and knows the rule ID, which is public in
 every agent workflow. So it could mint tokens in the "Claude Code Agent"
 workspace, outside this workflow's cap.
 
-Before step 5, that rule is narrowed to the workflows that use it. As
+Before step 4, that rule is narrowed to the workflows that use it. As
 found in local clones' default branches on 2026-09-30, those are:
 
 - agents' `claude.yml`, `claude-review.yml`, `claude-auto.yml` and
@@ -717,8 +750,8 @@ found in local clones' default branches on 2026-09-30, those are:
 - inspect_flow's `inspect-ai-main-failure.yml` and `inspect-update.yml`,
   and ts-mono's `dependabot-fix.yml`, matched on `workflow_ref`.
 
-This is a Console change on agents' rule. It is the one agents-side
-companion this design needs. It follows the agents design's own rule for
+This is a Console change on agents' rule, one of the two agents-side
+dependencies (the other is P4). It follows the agents design's own rule for
 new trusts ("never matches on `repository_owner` alone"). The admin
 checks every other rule on the GitHub issuer the same way. Open question 3
 covers the alternative of accepting that workspace's cap too.
@@ -743,6 +776,11 @@ covers the alternative of accepting that workspace's cap too.
   of this repository tries the exchange, and it must fail.
 - **P2: the two service accounts and rules exist** (the table above).
 - **P3: agents' rule is narrowed** (above).
+- **P4: agents' land has the `comment-numbers` input** (agents design step
+  3), so triage's `land` can pass `comment-numbers: event` (Design →
+  triage after the change). Step 4 needs it; it can also ship alone
+  earlier, as soon as the input exists, since it constrains only what
+  triage never posts.
 
 ### harden-runner egress
 
@@ -834,6 +872,10 @@ The text lands with the step that makes it true.
   checks out the SHA the `resolve` job resolved, and `land`'s Slack
   destination comes from the `context` job. Neither comes from the agent
   job.
+- **Guarantees, the Slack and validator bullet (:244-253)**, step 4: the
+  validator's refusals add generic comments (`comment-numbers: event`
+  with no event number), and the bullet says the refusals hold "whatever
+  the agent job uploaded", including after a `runner` compromise.
 - **Guarantees, egress and unscreened output (:273-289)**, step 6.
   "There is no reusable secret to screen for" becomes: what the outputs can
   carry is what the agent can read. That is:
@@ -986,6 +1028,9 @@ AGENTS.md changes with step 6: the test paragraph's description of
   scheduled run whose actor is not a User with write access would fail
   the agent step. Today's actors are `ransomr` and `epatey`. If a machine
   account ever edits the cron, `allowed_bots` is the fix.
+- **A failed `context` job** fails the triage run with the error in
+  `land`'s log and posts nothing to Slack, as a failed attempt resolution
+  does today. No Slack fallback is added.
 - **Rollback.** Steps 1-3 revert independently. Steps 4 and 5 each revert
   to the broker path until their key is revoked.
 
@@ -1003,6 +1048,14 @@ What untrusted input reaches the new code, and how it is handled:
   no-follow, owner-checked and capped. The compose step and `publish`
   treat them as untrusted, as today. The data the agent was given is
   republished from the runner's copy.
+- **A forged triage manifest** (uploaded by a compromised agent-job
+  `runner` after the composer ran) meets only `land`'s validator. With
+  triage's existing inputs plus `comment-numbers: event` (P4), every
+  posting field outside the one permitted fork issue action is refused:
+  generic comments, inline review comments, replies, thread resolutions,
+  PR fields and the hand-back. Without P4, generic comments on this
+  repository would land as the machine account, which is why step 4
+  waits for it.
 - **The upstream checkout** is untrusted for triage (4773278 can select a
   fork SHA) and trusted for ci-perf (restricted ref). Neither is loaded as
   configuration (`--setting-sources user`), and it is read-only to the
@@ -1049,6 +1102,9 @@ What untrusted input reaches the new code, and how it is handled:
     step 4 removes the stdout echo).
   - 4773278: open (Not this design).
   - The unreported ref gap: closed by `resolve` (step 2).
+  - Generic `comments[]` in a forged triage manifest (found in review
+    round 1 of this design; not a scan finding): closed by
+    `comment-numbers: event` (P4, step 4).
 
 ## Testing
 
@@ -1091,8 +1147,18 @@ test needs network, Docker or a model: `gh` and `git` are stand-ins on
   - `land`'s `slack-channel` and `slack-thread-ts` read `needs.context`,
     and no `needs.agent.outputs` expression remains in `land`.
   - The agent job structure, as for `analyze`, with the triage event list.
-  - Compose: a failed `context` becomes `error.fail_run`, and reads the
-    imported directory.
+  - Compose: a failed `context` becomes `error.fail_run` with no `slack`
+    entry (the test asserts both, since no Slack post is the intended
+    behaviour), and compose reads the imported directory.
+  - `land` passes `comment-numbers: event` and neither `pr-number` nor
+    `issue-number`. Against the land validator at the ref triage uses
+    (the existing `TRIAGE_VALIDATOR_REF` cross-check), forged manifests
+    are refused under triage's exact inputs: generic `comments[]` on this
+    repository (the review's #17/#18 case), `review_comments`,
+    `replies`, `resolve_threads`, `pr` and `handback: true`. A manifest
+    with one permitted `issues[]` action still passes. The cross-check
+    xfails on a validator ref without the input, as it already does for
+    older contract changes.
   - The permission-rule tests: the landing path becomes `/claude-agent/`,
     and `git -C inspect_ai` becomes `git`. The write-vector cases stay.
   - `test_agent_job_timeout_matches_the_broker_lifetime` and the
@@ -1101,9 +1167,17 @@ test needs network, Docker or a model: `gh` and `git` are stand-ins on
   Until then step 1 adds a test that the install recipe names an exact
   version and runs under `env -i`.
 - **A repository-wide test** (step 6): no workflow references
-  `CI_PERF_ANTHROPIC_API_KEY` or `TRIAGE_ANTHROPIC_API_KEY`. Every job with
-  `id-token: write` is one of the two agent jobs, and every such job passes
-  `github_token: ${{ github.token }}` to each claude-code-action step.
+  `CI_PERF_ANTHROPIC_API_KEY` or `TRIAGE_ANTHROPIC_API_KEY`.
+- **A per-workflow permission test** (steps 4 and 5), scoped to
+  `inspect-ai-ci-perf.yml` and `triage-test-failures.yml` only: in each,
+  exactly one job has `id-token: write` (`analyze`, triage `agent`), and
+  that job's claude-code-action step passes `github_token: ${{
+  github.token }}`. The five existing reusable-workflow caller jobs keep
+  their grants and are outside this test: `claude.yml` jobs `claude` and
+  `claude-auto`, `claude-review.yml` job `review`, and `claude-auto.yml`
+  jobs `ci-fix` and `review-fix`. They call agents' reusable workflows,
+  whose own jobs run WIF and pass `github_token` (agents steps 1 and 4);
+  removing their grant would break those workflows.
 - **Hosted proof, per workflow, after its migration step** (recorded in
   the step's PR):
   1. **It reaches the model.** For ci-perf: a `workflow_dispatch` on
@@ -1159,10 +1233,15 @@ updates the SECURITY.md text it makes true.
        SECURITY.md recording it;
      - P1: this repository leaves the Claude App's installation, either
        after agents steps 1 and 4 or at agents step 6 (open question 2),
-       verified by the canary.
+       verified by the canary;
+     - P4 (before step 4 only): agents step 3 ships land's
+       `comment-numbers` input, and the agents design's sentence that
+       triage keeps `*` is corrected.
 4. **triage on WIF and the launcher.**
    - The job shape under Design → triage and the agent step: the layout,
-     the prompt paths, the settings, `id-token: write` and the new comments.
+     the prompt paths, the settings, `id-token: write`, `land`'s
+     `comment-numbers: event` (if it has not shipped alone already) and
+     the new comments.
    - Tests: `tests/test_triage_workflow.py`.
    - SECURITY.md: the split first guarantee, and Verification notes
      re-checked.
