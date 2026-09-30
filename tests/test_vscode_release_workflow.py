@@ -496,22 +496,18 @@ def test_rejects_end_record_and_central_directory_that_readers_could_resolve_dif
         (b"PK\x05\x06", "a second end-of-central-directory signature"),
     ],
 )
-@pytest.mark.parametrize("where", ["first-entry", "last-entry-at-locator-position"])
-def test_rejects_zip64_and_second_end_signatures_outside_entry_data(tmp_path, signature, reason, where):
-    if where == "first-entry":
+@pytest.mark.parametrize("where", ["first-entry-comment", "last-entry-comment-at-locator-position", "stored-entry-data"])
+def test_rejects_zip64_and_second_end_signatures_anywhere(tmp_path, signature, reason, where):
+    if where == "first-entry-comment":
         items = [(with_comment("extension.vsixmanifest", signature + b" in a comment"), vsixmanifest())] + entries()[1:]
-    else:
+    elif where == "last-entry-comment-at-locator-position":
         # the last record's comment ends 20 bytes before the end record, where zipfile looks for a Zip64 locator
         items = entries() + [(with_comment("extension/z.txt", signature + b"\0" * 16), b"")]
+    else:
+        stored = zipfile.ZipInfo("extension/dist/payload.bin")
+        stored.compress_type = zipfile.ZIP_STORED
+        items = entries() + [(stored, b"data " + signature + b" data")]
     assert f"the archive contains {reason} at offset" in rejected(tmp_path, items)
-
-
-def test_accepts_those_signatures_inside_entry_data(tmp_path):
-    # No reader looks for them there: a stored nested zip, say, or compressed bytes that happen to match.
-    nested = zipfile.ZipInfo("extension/dist/nested.zip")
-    nested.compress_type = zipfile.ZIP_STORED
-    write_vsix(tmp_path / "vsix", entries() + [(nested, HONEST + b"PK\x06\x06PK\x06\x07PK\x05\x06")])
-    assert validator.verify(str(tmp_path / "vsix"), EXTENSION_ID, TAG)[1] == VERSION
 
 
 @pytest.mark.parametrize("name", ["extension/package.json", "extension.vsixmanifest", "extension/README.md"])

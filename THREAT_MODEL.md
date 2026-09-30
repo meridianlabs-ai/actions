@@ -255,7 +255,8 @@ guarantee, and what is by design. To report a vulnerability, see
   before zipfile reads the archive the validator checks its structure: the
   end-of-central-directory record must be the last 22 bytes of the file,
   with no comment, no Zip64 fields and one disk; no Zip64 end record, Zip64
-  locator or second end-record signature may appear outside entry data; the
+  locator or second end-record signature may appear anywhere in the file,
+  entry data included; the
   central directory the end record names must end exactly at it and hold
   the number of entries it counts; zipfile must list those same entries;
   and each manifest's local header (or data descriptor) must match its
