@@ -1,8 +1,18 @@
 ---
-# Inspect AI CI performance analysis, in two jobs with a runner boundary
-# between them.
+# Inspect AI CI performance analysis of upstream inspect_ai `main`, in four
+# jobs with runner boundaries between them.
 #
-# analyze checks out upstream inspect_ai, collects CI timings, and runs the
+# resolve reads the commit upstream `main` points at, once, and runs nothing
+# else. tooling, analyze and publish all check out that commit, so the three
+# test, analyze and publish the same code. No job takes a ref from a person:
+# the job that runs the analyzed commit's scripts holds the model key, and
+# only upstream `main` is trusted code (decision: Ransom, 2026-09-30).
+#
+# tooling runs upstream's ci-perf script tests. It installs pytest from PyPI,
+# which is third-party code, so it runs in its own job with only a read-only
+# token, not in analyze. analyze needs it: a failed test skips the analysis.
+#
+# analyze collects CI timings from that checkout, and runs the
 # Claude agent that writes report.md and findings.json. The agent reads
 # upstream CI logs, upstream PR titles and bodies, and fork issue text, so its
 # runner is untrusted once the agent has run: injected text could leave a gh
@@ -50,8 +60,10 @@
 # action's Claude Code installer), GitHub (github.com and api.github.com,
 # listed explicitly in case the agent's meta-domain fetch fails;
 # release-assets.githubusercontent.com is the action downloading a release
-# asset) and the package indexes the action and the tooling test install
-# from (registry.npmjs.org, pypi.org, files.pythonhosted.org). The agent
+# asset) and the package indexes (registry.npmjs.org for the action;
+# pypi.org and files.pythonhosted.org were for the tooling test's install,
+# which now runs in the tooling job, and go with the rest of the egress
+# change in step 4 of design/agent-jobs-workload-identity.md). The agent
 # allows GitHub Actions infrastructure without listing: the GitHub meta
 # domains (github.com, *.github.com, *.githubapp.com, ghcr.io),
 # *.actions.githubusercontent.com, codeload.github.com,
@@ -62,7 +74,9 @@
 # checks. A newly needed endpoint shows up as a blocked call in the
 # harden-runner step summary and as a job annotation; add it only if it is
 # clearly required, that is an Anthropic, GitHub or package-index host.
-# publish needs no allow-list: its only egress is GitHub.
+# publish needs no allow-list: its only egress is GitHub. resolve and
+# tooling get no harden-runner: they hold nothing that reaches beyond the
+# job.
 #
 # Privileges: harden-runner does NOT disable sudo here. Its hardening runs in
 # a `pre` hook that GitHub runs before every job step, so a
@@ -107,11 +121,6 @@ name: Inspect AI CI Perf
     - cron: "0 9 */2 * *"
   workflow_dispatch:
     inputs:
-      inspect_ai_ref:
-        description: "Upstream inspect_ai branch/tag/commit for analysis and tooling"
-        required: false
-        default: "main"
-        type: string
       dry_run:
         description: "Collect and analyze without creating issues or comments"
         required: false
@@ -127,7 +136,53 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The one commit every other job uses. It reads refs/heads/main and nothing
+  # else, requires 40 hex, and writes the output with a heredoc delimiter.
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      sha: ${{ steps.main.outputs.sha }}
+    steps:
+      - name: Resolve upstream main
+        id: main
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote https://github.com/UKGovernmentBEIS/inspect_ai.git refs/heads/main \
+                  | awk '$2 == "refs/heads/main" {print $1}')
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve UKGovernmentBEIS/inspect_ai main"; exit 1; }
+          { echo "sha<<EOF"; echo "$sha"; echo "EOF"; } >>"$GITHUB_OUTPUT"
+
+  # Third-party code (pytest from PyPI) runs here, with only a read-only
+  # token, never in the job that holds the model key.
+  tooling:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout upstream source at the resolved commit
+        uses: actions/checkout@v7
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: inspect_ai
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Test CI tooling
+        run: |
+          python -m pip install pytest
+          python -m pytest -c /dev/null -p no:cacheprovider inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
+
   analyze:
+    needs: [resolve, tooling]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -141,12 +196,10 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
       CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     outputs:
-      source_sha: ${{ steps.source.outputs.commit }}
       raw_sha: ${{ steps.data.outputs.raw_sha }}
       measurements_sha: ${{ steps.data.outputs.measurements_sha }}
       summary_sha: ${{ steps.data.outputs.summary_sha }}
       analysis_conclusion: ${{ steps.analysis.outputs.conclusion }}
-      artifact_name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       # This repo's own code at the workflow's commit, for the local model-broker
@@ -194,11 +247,10 @@ jobs:
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
 
       - name: Checkout upstream source for analysis
-        id: source
         uses: actions/checkout@v7
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: ${{ inputs.inspect_ai_ref || 'main' }}
+          ref: ${{ needs.resolve.outputs.sha }}
           path: inspect_ai
           persist-credentials: false
 
@@ -206,11 +258,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-
-      - name: Test CI tooling
-        run: |
-          python -m pip install pytest
-          python -m pytest -c /dev/null -p no:cacheprovider inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py -q
 
       # previous-summaries.json is analysis context, not a --publish input;
       # the hashes below protect the collected measurements used at publication.
@@ -310,9 +357,13 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+  # The checkout SHA and the artifact name come from resolve and from this
+  # job, not from analyze, whose runner the agent had. The artifact name is
+  # this attempt's, so a re-run of publish alone does not find an earlier
+  # attempt's evidence: re-run all jobs instead.
   publish:
-    needs: analyze
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.inspect_ai_ref == 'main')
+    needs: [resolve, analyze]
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -353,7 +404,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: UKGovernmentBEIS/inspect_ai
-          ref: ${{ needs.analyze.outputs.source_sha }}
+          ref: ${{ needs.resolve.outputs.sha }}
           path: inspect_ai
           persist-credentials: false
 
@@ -365,7 +416,7 @@ jobs:
       - name: Download CI evidence
         uses: actions/download-artifact@v7
         with:
-          name: ${{ needs.analyze.outputs.artifact_name }}
+          name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.CI_PERF_OUTPUT_DIR }}
 
       - name: Validate proposed findings
@@ -382,7 +433,7 @@ jobs:
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR"
 
-      # Upstream publisher contract at source_sha: --publish reads findings.json,
+      # Upstream publisher contract at the resolved commit: --publish reads findings.json,
       # summary.json and report.md, never previous-summaries.json or an existing
       # published.json. Success overwrites published.json with the active issue
       # URLs, including [] when none remain. Preserve this contract when changing

@@ -510,3 +510,143 @@ def test_no_secret_input_or_step_output_expression_inside_an_analyze_run_script(
     for s in analyze_steps():
         hit = re.search(r"\$\{\{\s*(inputs|steps|needs|secrets|github\.event)\b", s.get("run") or "")
         assert hit is None, f"{s.get('name')}: {hit.group(0)} inside run:"
+
+
+# --- resolve and tooling: one upstream `main` commit, third-party code away from the key --
+#
+# resolve fixes the upstream `main` SHA that tooling, analyze and publish all
+# check out; no job reads a ref from a person. tooling runs the pip install
+# and upstream's script tests with only a read-only token. publish takes its
+# checkout SHA from resolve and computes its artifact name itself, so neither
+# comes from the job whose runner the agent had.
+
+UPSTREAM = "https://github.com/UKGovernmentBEIS/inspect_ai.git"
+MAIN_SHA = "0123456789abcdef0123456789abcdef01234567"
+ARTIFACT = "ci-perf-${{ github.run_id }}-${{ github.run_attempt }}"
+
+
+def workflow() -> dict:
+    return yaml.safe_load(CI_PERF.read_text())
+
+
+def jobs() -> dict:
+    return workflow()["jobs"]
+
+
+# `git`: records its argv and prints $FAKE_LS_REMOTE, exiting $FAKE_GIT_STATUS.
+FAKE_GIT = f'''#!{sys.executable}
+import os, pathlib, sys
+pathlib.Path(os.environ["FAKE_GIT_ARGV"]).write_text("\\n".join(sys.argv[1:]))
+sys.stdout.write(os.environ.get("FAKE_LS_REMOTE", ""))
+sys.exit(int(os.environ.get("FAKE_GIT_STATUS", "0")))
+'''
+
+
+def run_resolve(tmp_path: Path, ls_remote: str, status: int = 0) -> tuple[subprocess.CompletedProcess, str, list[str]]:
+    (s,) = jobs()["resolve"]["steps"]
+    output = tmp_path / "github_output"
+    output.touch()
+    argv = tmp_path / "git-argv"
+    env = {
+        "PATH": f"{bin_dir(tmp_path, git=FAKE_GIT)}:{os.environ['PATH']}",
+        "GITHUB_OUTPUT": str(output),
+        "FAKE_GIT_ARGV": str(argv),
+        "FAKE_LS_REMOTE": ls_remote,
+        "FAKE_GIT_STATUS": str(status),
+    }
+    r = run_bash(s["run"], cwd=tmp_path, env=env)
+    return r, output.read_text(), argv.read_text().splitlines() if argv.exists() else []
+
+
+@pytest.mark.parametrize("ls_remote", [
+    f"{MAIN_SHA}\trefs/heads/main\n",
+    # ls-remote's pattern matches any ref ending in refs/heads/main; only the exact name counts.
+    f"{'f' * 40}\trefs/remotes/fork/refs/heads/main\n{MAIN_SHA}\trefs/heads/main\n{'e' * 40}\trefs/heads/main-old\n",
+], ids=["one-line", "extra-lines"])
+def test_resolve_writes_the_sha_of_refs_heads_main(tmp_path, ls_remote):
+    r, output, argv = run_resolve(tmp_path, ls_remote)
+    assert r.returncode == 0, r.stderr
+    assert argv == ["ls-remote", UPSTREAM, "refs/heads/main"]
+    assert output == f"sha<<EOF\n{MAIN_SHA}\nEOF\n"
+
+
+@pytest.mark.parametrize(("ls_remote", "status"), [
+    ("", 0),
+    (f"{MAIN_SHA[:39]}\trefs/heads/main\n", 0),
+    (f"{MAIN_SHA.upper()}\trefs/heads/main\n", 0),
+    (f"{'f' * 40}\trefs/heads/main-old\n", 0),
+    (f"{MAIN_SHA}\trefs/heads/main\n{'e' * 40}\trefs/heads/main\n", 0),
+    (f"{MAIN_SHA}\trefs/heads/main\n", 128),
+], ids=["no-line", "short-sha", "not-lowercase-hex", "no-exact-ref", "two-main-lines", "ls-remote-failed"])
+def test_resolve_fails_and_writes_nothing_without_one_valid_sha(tmp_path, ls_remote, status):
+    r, output, _ = run_resolve(tmp_path, ls_remote, status)
+    assert r.returncode != 0
+    assert output == ""
+
+
+def test_resolve_holds_nothing_and_runs_no_action():
+    job = jobs()["resolve"]
+    assert job["permissions"] == {}
+    assert "needs" not in job
+    assert job["outputs"] == {"sha": "${{ steps.main.outputs.sha }}"}
+    (s,) = job["steps"]
+    assert s["id"] == "main" and "uses" not in s and "env" not in s
+    assert "${{" not in s["run"] and "secrets." not in yaml.safe_dump(job)
+
+
+def test_dispatch_takes_no_ref():
+    assert set(workflow()["on"]["workflow_dispatch"]["inputs"]) == {"dry_run"}
+    assert "inspect_ai_ref" not in CI_PERF.read_text()
+    assert jobs()["publish"]["if"] == "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)"
+
+
+def upstream_checkouts(job: str) -> list[dict]:
+    return [s for s in jobs()[job]["steps"] if str(s.get("uses", "")).startswith("actions/checkout@") and s["with"].get("repository") == "UKGovernmentBEIS/inspect_ai"]
+
+
+@pytest.mark.parametrize("job", ["tooling", "analyze", "publish"])
+def test_every_upstream_checkout_is_the_resolved_commit(job):
+    (checkout,) = upstream_checkouts(job)
+    assert checkout["with"]["ref"] == "${{ needs.resolve.outputs.sha }}"
+    assert checkout["with"]["persist-credentials"] is False
+    assert "resolve" in ([jobs()[job]["needs"]] if isinstance(jobs()[job]["needs"], str) else jobs()[job]["needs"])
+
+
+def test_the_job_graph():
+    assert list(jobs()) == ["resolve", "tooling", "analyze", "publish"]
+    assert jobs()["tooling"]["needs"] == "resolve"
+    assert jobs()["analyze"]["needs"] == ["resolve", "tooling"]
+    assert jobs()["publish"]["needs"] == ["resolve", "analyze"]
+
+
+def test_tooling_runs_the_third_party_install_with_only_a_read_token():
+    job = jobs()["tooling"]
+    assert job["permissions"] == {"contents": "read"}
+    text = yaml.safe_dump(job)
+    assert "secrets." not in text and "id-token" not in text and "steps.mint" not in text
+    (test,) = [s for s in job["steps"] if s.get("name") == "Test CI tooling"]
+    lines = test["run"].splitlines()
+    assert lines[0] == "python -m pip install pytest"
+    assert "inspect_ai/.claude/skills/ci-perf/scripts/test_ci_perf.py" in lines[1]
+    for s in job["steps"]:
+        assert "${{" not in (s.get("run") or ""), s.get("name")
+
+
+def test_analyze_installs_nothing_from_pypi_and_no_longer_reports_a_sha_or_name():
+    job = jobs()["analyze"]
+    assert not any(s.get("name") == "Test CI tooling" for s in job["steps"])
+    assert not any("pip install" in (s.get("run") or "") for s in job["steps"])
+    assert set(job["outputs"]) == {"raw_sha", "measurements_sha", "summary_sha", "analysis_conclusion"}
+
+
+def test_publish_takes_nothing_but_hashes_and_the_conclusion_from_analyze():
+    steps = publish_steps()
+    assert step(DOWNLOAD)["with"]["name"] == ARTIFACT
+    upload = [s for s in analyze_steps() if s.get("name") == "Retain CI evidence outside Git"][0]
+    assert upload["with"]["name"] == ARTIFACT  # the name analyze uploads under
+    for s in steps:
+        for value in [s.get("run") or "", *(str(v) for k, v in (s.get("with") or {}).items() if k in ("ref", "name", "path", "repository"))]:
+            assert "needs.analyze" not in value, s.get("name")
+    used = set(re.findall(r"needs\.analyze\.outputs\.(\w+)", yaml.safe_dump(jobs()["publish"])))
+    assert used == {"analysis_conclusion", "raw_sha", "measurements_sha", "summary_sha"}
+    assert set(re.findall(r"needs\.analyze\.outputs\.(\w+)", yaml.safe_dump(step(VALIDATE)["env"]))) == used
