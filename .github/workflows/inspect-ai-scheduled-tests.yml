@@ -7,7 +7,7 @@
 # control: `pip install -e ".[dev]"` resolves upstream's whole dev closure
 # against PyPI on the day (no lock file, on purpose: the point of the run is
 # the frontier resolution a new user would get), and pytest and mypy then
-# import it together with upstream's tests. SECURITY.md names that code as an
+# import it together with upstream's tests. THREAT_MODEL.md names that code as an
 # adversary that can take over its job's runner and read what is there (the
 # provider keys). What these jobs must not have is anything that reaches
 # beyond that one job:
@@ -500,7 +500,7 @@ jobs:
                 echo "An artifact named $name (id $id, created $created) exists from before attempt $RUN_ATTEMPT started ($started): a previous attempt's. This attempt uploads its own; its consumer takes this job's recorded one, or the newest."
               else
                 conflict=1
-                echo "::error::An artifact named $name (id $id, created $created) already exists in this run, created during attempt $RUN_ATTEMPT (started $started) before this job ran. Only this job uploads that name, and the jobs before it execute third-party code (SECURITY.md), so treat this as tampering. The consumers ignore an artifact this job did not produce, and this job uploads nothing under that name."
+                echo "::error::An artifact named $name (id $id, created $created) already exists in this run, created during attempt $RUN_ATTEMPT (started $started) before this job ran. Only this job uploads that name, and the jobs before it execute third-party code (THREAT_MODEL.md), so treat this as tampering. The consumers ignore an artifact this job did not produce, and this job uploads nothing under that name."
               fi
             done <<<"$existing"
           done

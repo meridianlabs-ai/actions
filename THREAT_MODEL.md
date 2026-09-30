@@ -1,0 +1,361 @@
+# Threat model
+
+What the workflows and actions in this repository trust, what they
+guarantee, and what is by design. To report a vulnerability, see
+[`SECURITY.md`](SECURITY.md).
+
+## Trust boundaries specific to this repo
+
+- **Test output and CI data are third-party-shaped input.** Any code the
+  tests exercise (a dependency released that day, a PR under analysis) can
+  shape the logs, timings and run metadata the agents read, and the fork
+  issues the triage agent searches are public. Once an agent has read
+  them, its runner is untrusted: a shim on `$GITHUB_PATH`, a line in
+  `$GITHUB_ENV` or a `.pth` file can outlive the agent step, so no step
+  that runs after the agent on that runner holds a secret or decides
+  whether the agent's output is published.
+- **`workflow_dispatch` inputs are data, never syntax.** Only people with
+  write access can dispatch, and no input reaches a shell script as
+  syntax. Shape validation is per workflow: the scheduled suites validate
+  their ref characters and pytest arguments, ci-perf takes no ref: it
+  analyzes upstream `main`, resolved in a job that runs nothing else, and
+  triage passes the selected run ID to `gh` as a quoted argument.
+- **Prior-run artifacts are trusted by provenance where a workflow checks
+  it, and a run is not a producer.** A push or dispatch run executes
+  whatever copy of a workflow its branch carries, so the scheduled-test
+  skip cache accepts a last-tested SHA only from a successful scheduled run
+  on the default branch. Within a run, the artifact namespace is shared by
+  every job, and the scheduled run's `slow-tests` and `static-analysis`
+  jobs execute third-party code before the `report` job uploads, so the
+  name `triage-context` in a failed scheduled run proves nothing about who
+  wrote it. Triage therefore resolves its context in a `context` job that
+  runs no agent and no third-party code, before the agent job starts, and
+  consumes only the artifact whose id and digest the `report` job recorded
+  in its own job log (a channel no other job of the run can write to),
+  found through the jobs API for the attempt being triaged, checked against the run's artifact list and against the
+  downloaded bytes, and only then shape-validated (a 40-hex SHA, a Slack
+  channel ID, a Slack timestamp). A `report` job whose upload did not
+  succeed, a log with no or several recorded identities, an id missing from
+  the run or a digest that does not match all mean "no context": the reply
+  goes to the default Slack destination and the agent investigates
+  upstream `main` with `exact=false`. Triage resolves the attempt once,
+  before it reads anything: the attempt whose completion fired it, or the
+  latest attempt of the run a dispatcher selects. The failed log, the run
+  metadata, the failing run's install log and the context are all read at
+  that attempt, so a triage that runs after the upstream run gained another
+  attempt does not pair one attempt's failures with another's tested SHA
+  and thread. The `report` job is only as trusted as the workflow file its
+  run executed, so triage takes a run only when the API reports its event
+  as `schedule`, its head repository as this repository and its head branch
+  as the default branch. This holds for a run the dispatcher selects as for
+  the run whose completion fired triage, so a dispatcher cannot name a fork
+  pull request's run as the producer. Artifact names are unique within a
+  run attempt, not within a run: a re-run is a new attempt and uploads the
+  names again, so a run's
+  artifact list can hold one of each name per attempt. The `report` job
+  refuses to upload a name that an artifact created since its own attempt
+  started already carries (no `overwrite`; only another job of the attempt
+  can have made it), fails, and so fails the run, while it notes and
+  uploads beside an artifact from a previous attempt. The skip cache's
+  `last-inspect-ai-sha` has no log binding. The skip cache selects the
+  newest unexpired `last-inspect-ai-sha` from a successful scheduled run.
+  This does not independently authenticate its producer: a later
+  successful attempt that skips `report` (its `check-commit` found the
+  commit already tested) can leave an earlier attempt's artifact eligible.
+  The upload-conflict check protects attempts whose `report` actually
+  uploads. A forged SHA can cause incorrect skipping in later runs while
+  that artifact remains selected; it cannot select triage's checkout or
+  Slack destination. What this rests on: a job's
+  log is written by that job's steps alone; `actions/upload-artifact`
+  refuses a duplicate name within an attempt unless told to overwrite, and
+  its client documents re-runs as a source of same-named artifacts in one
+  run; the API's `run_started_at` is the latest attempt's start. Not
+  established here: that code in a test job can recover the runner's
+  artifact-service token and upload (a published technique, not
+  reproduced); the consumers do not depend on it, since triage takes the
+  attempt's own `report` job as the producer and its recorded id as the
+  artifact.
+- **Jobs that run the dependency closure hold nothing that reaches beyond
+  the job.** The scheduled suites install upstream's dev closure from PyPI
+  unlocked (the point of the run) and execute it. Their job token is
+  declared read-only in the workflow (`permissions: contents: read`, with
+  `actions: read` only on the jobs that read this repository's run data),
+  so its reach does not depend on the repository's default token setting;
+  the checkouts do not persist it; and no Actions cache is restored or
+  saved in those jobs, because a cache written after that code ran would
+  be installed by every later scheduled run, before the keys-bearing step,
+  and would outlive the offending release and a key rotation. The token
+  enforces the save half: both workflows declare `cache-mode: read` at
+  workflow level, so the runtime token that Runner.Worker holds, as the same
+  user as the closure, cannot save a cache entry. The default
+  token setting itself was not read (the API query needs repository
+  administration), and no write exploit was observed: the job logs of runs
+  before the declaration already listed Contents, Metadata and Packages as
+  read-only, so the declaration fixes in the file what a setting provided.
+- **Triage never authorizes autonomous implementation.** The issue the
+  triage workflow files carries no label. Until 2026-09-22 its composing
+  step forwarded the `auto` label on the agent's say-so, and on the
+  `inspect_ai` fork that label starts the autonomous coding agent; the
+  agent had just read test output anyone can shape, so the label was a
+  privilege the untrusted principal granted itself and the machine account
+  merely wrote (Claude Security finding 4628345). The machine account is
+  the writer of these issues, not the authority behind them: a maintainer
+  who reads the brief applies `auto` themselves, and the fork's kickoff
+  (the `claude.yml` stub, and the trigger check of the shared workflow it
+  calls) accepts a human labeler's write access and refuses a label the
+  machine account applied. The same holds for the ci-perf publisher in
+  upstream `inspect_ai`, which used to label its findings `auto`.
+- **Triage's issue policies are enforced twice, three of them on the land
+  runner.** The "Compose landing manifest" step on the agent's runner drops
+  every label, reduces assignees to `ransomr`, keeps one issue action per
+  run and carries a failed agent step into the manifest's
+  `error.fail_run`. The `land` job passes the first three to the validator
+  on its fresh runner as `allowed-issue-labels: ""`,
+  `allowed-issue-assignees` and `max-issues: "1"`, alongside the generic
+  manifest contract (schema and known keys, body and text file references,
+  the allowed issue repository, no bundle under `refuse-bundle`, and no
+  `pr` or `handback` field under `refuse-pr`: a `pr.open` needs no push,
+  it adopts or opens a PR for a branch already on origin and labels it,
+  and the `MARVIN_TOKEN` fallback reaches this repository's pull requests
+  where the minted token does not; the Slack destination is a `land`
+  input, not a manifest field), so a manifest forged past the composing
+  step after a separate compromise of the agent runner (a shim on
+  `$GITHUB_PATH`, a line in `$GITHUB_ENV`) is refused whole rather than
+  landed with a label, another owner, several issue actions, a labelled PR
+  or an `@review`. The fourth policy is the composer's alone: such a forged
+  manifest could drop its `error`, but could not make an already failed
+  agent job green, since the job result is the runner's and `land` runs
+  after a failure either way. This is enforcement of an authorization
+  boundary, not a response to a demonstrated write primitive: the
+  redirection route finding 4628349 described was replayed against the
+  real permission engine and refused (see "Verification notes"), and that
+  qualification stands.
+- **A built `.vsix` is repo output, not evidence.** In
+  `release-please-vscode.yml` the `build` job runs the consuming repo's
+  install hooks, scripts, tests and `vsce:package`, so the package it
+  uploads, that file's name and any version it reports are repo-controlled,
+  and vsce and ovsx publish to whatever publisher, name and version the
+  package's own manifests declare. Separating build from publish confines
+  where that code runs; it does not bind the publisher-wide PATs to one
+  extension. The `publish` job's "Verify VSIX" step does that (see the
+  guarantees below); what it cannot do is stop a compromised release commit
+  from becoming the content of the one extension version it authorizes,
+  which is what building is. A Marketplace PAT covers every extension of
+  every publisher its account manages and an Open VSX token every namespace
+  of its account; tokens scoped to the one publisher, where a marketplace
+  allows it, are an administrative defence separate from this check.
+- **Release notes are contributor text.** The announce action reads notes
+  assembled from merged commit subjects in the calling repo and treats them
+  as untrusted when it builds Slack mrkdwn.
+- **Upstream `main` is trusted.** The scheduled suites run upstream
+  `inspect_ai` and `inspect_swe` code unpinned with the provider keys the
+  tests need, and the ci-perf analysis runs upstream's tooling unpinned, at
+  the `main` commit its `resolve` job read;
+  Meridian maintains those repositories, so a compromise there is a larger
+  incident than these workflows.
+- **PR and issue text** that the stubs react to follows the shared model in
+  `meridianlabs-ai/agents`; this repo only decides which events reach it.
+
+## Guarantees (true on `main`)
+
+- The `analyze` and `agent` jobs hold only the read-only job token; their
+  Anthropic keys (`CI_PERF_ANTHROPIC_API_KEY` and `TRIAGE_ANTHROPIC_API_KEY`,
+  each from a dedicated Console workspace with a spend cap; triage does not
+  use the `ANTHROPIC_API_KEY` the test suites run with) are never in the
+  agent's environment, files or reachable processes. Three Unix users carry
+  the separation. The runner user does the trusted bootstrap. The model
+  broker (`.github/actions/model-broker`) reads the key into a process
+  running as the `model-broker` user and forwards Messages API calls, and
+  nothing else, to `api.anthropic.com`. The whole Claude process and every
+  tool it spawns run as a third, unprivileged user (`claude-agent`, chosen so
+  its home does not collide with harden-runner's `/home/agent`) through
+  `.github/actions/isolated-agent`, whose `ANTHROPIC_API_KEY` is only the
+  broker's per-run token (usable only against the broker on loopback while
+  the job runs) and whose `ANTHROPIC_BASE_URL` is the broker. That agent
+  cannot read the broker user's key file or memory; cannot read the runner
+  process's memory or its .NET diagnostic socket, where GitHub's runner keeps
+  every job secret for masking; cannot `sudo` or reach Docker; and runs under
+  `env -i` with no runner command-file variables (so it cannot rewrite a
+  later trusted step) and no OIDC request variables (so it cannot mint
+  tokens). Its reach into the filesystem is explicit: the runner's home is
+  private, so the action gives the agent user search-only (`--x`) ACL entries
+  on the ancestors of the workspace, the staged prompt and the output
+  directory that deny it traversal, and nothing else (no read, so it cannot
+  list those directories; no recursive or other-user change, and a
+  directory's existing ACL mask is kept so no other entry's effective rights
+  move; the step fails instead where that mask would have to widen another
+  principal), then verifies
+  as the agent that those paths, the check script and the Claude Code
+  install are reachable. Files under a granted directory keep their own
+  modes, so what the runner keeps private stays private, and what it leaves
+  world-readable under its home (its install directory, whose
+  `.credentials` holds the OAuth client id and token URL) is reachable by
+  name. The isolated-agent action runs an isolation check as the agent user
+  and fails the job before the agent if any of that does not hold, including
+  if the runner's registration private key (`.credentials_rsaparams`, 0600
+  on hosted runners) is readable. The
+  triage agent's tools are reads plus file writes under the landing
+  directory; the writes it wants are a manifest that the `land` job validates
+  and performs. Claude Code checks the target of a shell output redirect
+  against those same file rules, so an allowed read command such as `grep`
+  is not a write outside the landing directory through `>` or `>>` in the
+  releases checked under "Verification notes"; that check belongs to the
+  installed Claude Code release, not to this repo.
+- The two agent workflows perform their GitHub and Atlas writes in separate
+  jobs on fresh runners, from artifacts those jobs validate first, under a
+  GitHub App token minted for that job and scoped to the `inspect_ai` fork
+  with only the permissions the job uses (a PAT fallback stays in the
+  expression while the app secrets roll out). Triage's `land` job checks
+  out nothing and posts its Slack reply with a separate Slack token held
+  only there, to the destination the `context` job resolved; it reads no
+  output of the agent job. ci-perf's `publish` job checks out upstream
+  `inspect_ai` at the commit the `resolve` job resolved, the one the
+  analysis used, to run the publisher's own validator, and names the
+  artifact it downloads itself. Neither the SHA nor the artifact name comes
+  from the agent job.
+- No `workflow_dispatch` input, step output or event field is expanded
+  inside a `run:` script; they reach bash through `env:` and are quoted.
+- Artifact content is validated against a shape before it becomes a ref, an
+  output or a destination, and a value that fails its check is dropped, not
+  passed on; the scheduled-test skip cache and triage also check the
+  producing run's event and branch, and triage checks that the `report` job
+  produced its context before reading a field (see the trust boundaries above for where those
+  checks stop).
+- The scheduled test workflows declare a read-only job token, persist no
+  credential into a checkout and use no Actions cache, and their
+  workflow-level `cache-mode: read` makes the token refuse a cache save;
+  the `report` job refuses to upload an artifact name another job of its
+  attempt took.
+- The Slack destination of a triage reply comes from the context of the
+  failed run that its `report` job produced, resolved by the `context` job
+  before the agent runs. It never comes from the agent's manifest, the
+  agent job or a same-named artifact another job of that run supplied, so
+  nothing the agent prints (an `::add-mask::` of the channel ID included)
+  moves the reply. The issues triage files carry no label, and the `land`
+  job's validator refuses a manifest that names one, names an owner other than
+  `ransomr`, carries more than one issue action, or carries a `pr` or
+  `handback` field, whatever the agent job uploaded. The release-note
+  converter escapes Slack control syntax and emits only `http(s)` links;
+  callers must supply a trusted release URL for the separate full-release
+  link, which is not converted.
+- The VS Code publish job publishes only a package it has bound to the
+  release: before any step holds a PAT, its inline validator opens the
+  downloaded `.vsix` without executing anything in it and fails the job
+  unless `extension/package.json` and `extension.vsixmanifest` agree and
+  name exactly the caller's `extension-id` at the version in the
+  release-please tag (`vX.Y.Z`, `X.Y.Z`, or either with a release-please
+  component prefix). The artifact directory must hold exactly one regular
+  file with a plain name; an archive with repeated or case-variant manifest
+  entries, unsafe entry names, symlinks or Info-ZIP Unicode Path fields
+  (which rename an entry for vsce's reader only), a `package.json` with
+  duplicate keys or the `NaN`/`Infinity` constants JavaScript rejects, or a
+  `vsixmanifest` with a DTD or with more than one `Metadata` or `Identity`
+  element in any namespace is rejected. Nothing the build job output is
+  used afterwards: the verified path, identity and version feed the publish
+  commands, the already-published checks (exact JSON comparison of the
+  listing's publisher, name and versions, a rerun convenience rather than a
+  control) and the release upload. The validator reads the zip's central directory as vsce, ovsx and
+  the registries do; it does not defend against parser differentials beyond
+  those it rejects by name.
+- Both agent jobs run under harden-runner's egress allow-list (Anthropic,
+  reached only by the broker; GitHub; the action's installer; for ci-perf
+  the Python package indexes). harden-runner does not disable sudo here: its
+  hardening runs in a `pre` hook that GitHub runs before every step, so a
+  `disable-sudo-and-containers` would take sudo away before the broker start
+  and agent-user setup that need it; the agent is powerless because it runs
+  as an unprivileged user, not because the runner's sudo was removed. The
+  allow-list stops connections to any other host. It does not stop an
+  upload to an attacker-owned resource on a listed multi-tenant host
+  (`github.com`, `api.github.com`, `registry.npmjs.org`) authenticated with
+  a credential the attacker placed in the agent's input, and the job
+  summary, artifact, issue body and Slack text an agent job produces are
+  published unscreened. What any of these can carry is what the agent can
+  read: the run token, the read-only job token (this repository, expired
+  when the job ends) and the inputs, which are public. Agent output is not
+  screened for secrets because a screen on the agent's runner would be the
+  agent's to defeat and there is no reusable secret to screen for.
+- The stubs pass the shared workflows exactly the secrets they name, never
+  `secrets: inherit`.
+
+## By design
+
+- The agent can spend the capped workspace budget through the broker for as
+  long as its job runs; the cap bounds it. GitHub's runner process holds the
+  job's secrets in memory for masking (its design). The agent is a different
+  Unix user from that process, so it cannot read its memory or environment,
+  nor reach the .NET diagnostic socket that would let a same-user process ask
+  the runtime to dump itself; `kernel.yama.ptrace_scope` of 1 or stricter,
+  which the isolation check requires, is defence in depth behind that user
+  boundary.
+- ci-perf analyzes upstream `main` only (decision: Ransom, 2026-09-30).
+  The job that runs the analyzed commit's scripts holds a credential, so
+  it runs only a trusted ref: the tier-2 rule of agents' THREAT_MODEL.md says
+  a credentialed workflow a person runs on a chosen ref is "restricted to
+  trusted refs". An upstream branch is not trusted code just because a
+  write-access holder pushed it. This replaces the 2026-09-08 decision to
+  let a dispatcher analyze any upstream ref, which did not consider that
+  the job holds the model key.
+- The reviewer stub runs on demand only, on an `@review` comment from a
+  collaborator or the machine account's hand-back; nothing reviews a PR on
+  open (decision: Ransom, 2026-09-14).
+- A triage-filed fix brief reaches the autonomous coding agent only when a
+  maintainer labels the issue `auto` after reading it. Triage could carry
+  an opt-in of its own (a `workflow_dispatch` input, an allow-list of
+  files), but a human's label after the fact is the decision Ransom
+  approved (2026-09-22): routine triage creates a reviewable issue and
+  authorizes nothing.
+
+## Adding or changing a workflow here
+
+The rules and checks for a workflow change are in [`AGENTS.md`](AGENTS.md).
+
+## Verification notes
+
+Dated checks of controls that live in a dependency rather than in this
+repo's files, and when to repeat them.
+
+- **Claude Code redirect-target checks in the triage agent job (checked
+  2026-09-21).** A Bash allow rule such as `Bash(grep *)` does not extend
+  to the command's output redirect: Claude Code checks the redirect target
+  against the file-write rules separately, an application-level permission
+  check rather than an OS sandbox
+  ([documentation](https://code.claude.com/docs/en/permissions#redirections)).
+  Checked in Claude Code 2.1.274, the release pinned by the
+  `claude-code-action@v1` revision the workflow resolved on 2026-09-17
+  (`3b8197d3d486006dd4af54613517f21ac6ac625e`), and 2.1.278, the release
+  pinned by the revision `v1` resolved to on 2026-09-21
+  (`b949468893d8bba436c9c71ea860b1f5f344804e`). The action pins its Claude
+  Code release internally; the `@v1` reference moves between revisions.
+  The settings were the permissions block of the workflow's `settings:`
+  input, with the landing directory under a runner-style temp path and the
+  `inspect_ai` clone below the working directory. Direct Write calls and
+  absolute-path redirects with `>`, `>>`, `2>`, `&>` and `>|` into the
+  landing directory ran; the corresponding writes and redirects into the
+  working directory and into another temp path were refused. Separate `>>`
+  cases were refused too: relative paths into the working directory and
+  the temp directory, absolute paths to pre-created stand-ins for the
+  runner's `GITHUB_ENV`, `GITHUB_PATH` and `GITHUB_STEP_SUMMARY` files
+  (the stand-ins stayed empty), and `$GITHUB_ENV` quoted and unquoted.
+  `git --output` was denied; `/dev/null` and `2>&1` were allowed. Limits:
+  these were the official Linux ARM64 builds of those two releases, run
+  directly with a deterministic stand-in model and fake data in an isolated
+  container, not the Linux x64 binary the hosted runner installs and not
+  through the action and Agent SDK; and they covered the
+  redirect operators listed, not every way a program can write (symlinks,
+  command substitution, here-documents and allowed programs' own output
+  options were not surveyed). `tests/test_triage_workflow.py` approximates
+  only the Bash-pattern step of the decision and cannot stand in for this
+  check. Repeat it with the installed CLI when `@v1` moves to a revision
+  that pins another release, when the runner image or architecture
+  changes, or when the `settings:` block changes. The records are kept
+  with the maintainers' security notes, not in this repository.
+
+## Further reading
+
+- [`THREAT_MODEL.md`](https://github.com/meridianlabs-ai/agents/blob/main/THREAT_MODEL.md)
+  in `meridianlabs-ai/agents`: the shared model for the agent workflows the
+  stubs call, including how PR and issue text is trusted.
+- [`design/credential-separation.md`](https://github.com/meridianlabs-ai/agents/blob/main/design/credential-separation.md)
+  in `meridianlabs-ai/agents`: the two-job pattern, the manifest contract
+  and the GitHub App identity these workflows follow.
+- [`AGENTS.md`](AGENTS.md): the rules the tests enforce in this repo.
