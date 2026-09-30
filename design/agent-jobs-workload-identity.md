@@ -11,6 +11,11 @@ short-lived Anthropic token. What limits its value is the spend-capped
 workspace, the token's lifetime, and a federation rule restricted to the
 workflow.
 
+Ransom also settled the questions this design raised (decision: Ransom,
+2026-09-30): ci-perf analyzes upstream `main` only; the Claude App's removal
+waits for agents step 6; no interim patches; agents' owner-only federation
+rule is narrowed. See Decisions.
+
 Disclosure: this repository is public, and this design names open Claude
 Security findings and an unreported gap in full detail. Ransom chose that
 (decision: Ransom, 2026-09-30), although SECURITY.md asks for no public
@@ -328,7 +333,7 @@ Three composites make it up:
 
 ### The boundary after the change
 
-What each agent job holds once the design is fully shipped (step 6):
+What each agent job holds once the design is fully shipped (step 5):
 
 | Held in `analyze` / triage `agent` | Reachable by the agent | Why the agent may have it |
 |---|---|---|
@@ -453,38 +458,34 @@ fetches, so this has no effect.
 Four jobs: `resolve → tooling → analyze → publish`.
 
 **`resolve`** (new; trusted; `permissions: {}`; runs no third-party code)
-resolves the ref to one commit of upstream's branches or tags:
+resolves upstream `main` to one commit:
 
 ```bash
 set -euo pipefail
-ref="${INSPECT_AI_REF:-main}"          # the input, through env:
-fail() { echo "::error::inspect_ai_ref: $*"; exit 1; }
-[[ "$ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || fail "'$ref' is not a branch or tag name"
-case "$ref" in *..*|*//*|*/|*.lock|*@\{*) fail "'$ref' is not a branch or tag name" ;; esac
-lines=$(git ls-remote https://github.com/UKGovernmentBEIS/inspect_ai.git \
-          "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}")
-branch=$(awk -v r="refs/heads/$ref" '$2 == r {print $1}' <<<"$lines")
-tag=$(awk -v r="refs/tags/$ref^{}" '$2 == r {print $1}' <<<"$lines")
-[ -n "$tag" ] || tag=$(awk -v r="refs/tags/$ref" '$2 == r {print $1}' <<<"$lines")
-if [ -n "$branch" ] && [ -n "$tag" ]; then fail "'$ref' names both a branch and a tag"; fi
-sha="${branch:-$tag}"
-[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "'$ref' is not a branch or tag of UKGovernmentBEIS/inspect_ai"
+sha=$(git ls-remote https://github.com/UKGovernmentBEIS/inspect_ai.git refs/heads/main \
+        | awk '$2 == "refs/heads/main" {print $1}')
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve UKGovernmentBEIS/inspect_ai main"; exit 1; }
 { echo "sha<<EOF"; echo "$sha"; echo "EOF"; } >>"$GITHUB_OUTPUT"
 ```
 
-- The name is matched only under `refs/heads/` and `refs/tags/`. So
-  `refs/pull/<n>/head`, a raw SHA or `pull/5614/head` finds nothing and
-  fails.
-- Output: `sha`.
-- The input's description becomes "Upstream inspect_ai branch or tag
-  (default main); commits and pull-request refs are refused".
+- Output: `sha`. `tooling`, `analyze` and `publish` all use it, so the
+  three analyse, test and publish the same commit.
+- **The `inspect_ai_ref` input is removed** (decision: Ransom, 2026-09-30:
+  `main` only). ci-perf always analyzes upstream `main`. `workflow_dispatch`
+  keeps `dry_run` alone, and nothing in the workflow reads a ref from a
+  person.
 
-Why these refs are trusted: upstream branches and tags are pushed only by
-accounts with write access to UKGovernmentBEIS/inspect_ai. That is the
-population SECURITY.md already trusts for upstream `main` (:172-176).
-Meridian's agents push to the fork, not upstream, and the machine account
-cannot write upstream. Open question 1 asks whether to narrow this to
-`main` alone.
+Why `main` only, not upstream branches and tags: a branch would help only
+to dry-run a ci-perf script change on a branch pushed directly to
+UKGovernmentBEIS/inspect_ai. Meridian's own inspect_ai work lives on the
+fork and reaches upstream as a pull request, whose ref is refused either
+way. And being pushed by an upstream write-access holder does not make a
+branch trusted code: upstream has about 422 branches, and some look like
+maintainer-pushed copies of outside contributors' PR branches, named
+after the contributor (422 by `git ls-remote --heads` on 2026-09-30).
+Upstream `main`
+is what SECURITY.md trusts (:172-176), and it is the only ref this job
+checks out.
 
 **`tooling`** (new; `needs: resolve`; `permissions: contents: read`; no
 secret, no `id-token`) checks out `needs.resolve.outputs.sha`, sets up
@@ -537,7 +538,10 @@ Outputs: the three hashes, and `analysis_conclusion: ${{
 steps.analysis.outputs.conclusion }}`. `source_sha` and `artifact_name` are
 removed.
 
-**`publish`** (`needs: [resolve, analyze]`; `if:` unchanged):
+**`publish`** (`needs: [resolve, analyze]`; `if: github.event_name ==
+'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run
+== false)`, the old condition without its `inputs.inspect_ai_ref ==
+'main'` clause, which no longer has an input to read):
 
 - checks out `needs.resolve.outputs.sha`;
 - downloads `ci-perf-${{ github.run_id }}-${{ github.run_attempt }}`,
@@ -603,7 +607,7 @@ It has no job outputs.
   secrets.SLACK_CHANNEL_ID }}`;
 - `slack-thread-ts: ${{ needs.context.outputs.thread_ts }}`;
 - `comment-numbers: event`, with neither `pr-number` nor `issue-number`
-  set (P4, from step 4).
+  set (P4, from step 3).
 
 **Why `comment-numbers: event`.** Under this boundary a `runner`
 compromise of the agent job can upload any manifest after the composer
@@ -741,7 +745,7 @@ The agent can read the JWT file and knows the rule ID, which is public in
 every agent workflow. So it could mint tokens in the "Claude Code Agent"
 workspace, outside this workflow's cap.
 
-Before step 4, that rule is narrowed to the workflows that use it. As
+Before step 3, that rule is narrowed to the workflows that use it. As
 found in local clones' default branches on 2026-09-30, those are:
 
 - agents' `claude.yml`, `claude-review.yml`, `claude-auto.yml` and
@@ -751,10 +755,14 @@ found in local clones' default branches on 2026-09-30, those are:
   and ts-mono's `dependabot-fix.yml`, matched on `workflow_ref`.
 
 This is a Console change on agents' rule, one of the two agents-side
-dependencies (the other is P4). It follows the agents design's own rule for
-new trusts ("never matches on `repository_owner` alone"). The admin
-checks every other rule on the GitHub issuer the same way. Open question 3
-covers the alternative of accepting that workspace's cap too.
+dependencies (the other is P4). Ransom decided to narrow it (decision:
+Ransom, 2026-09-30) rather than accept that these two agents can also
+spend the "Claude Code Agent" workspace up to its cap: without the
+narrowing, "limited by the spend-capped workspace" would hold only if that
+workspace were capped too. It follows the agents design's own rule for
+new trusts ("never matches on `repository_owner` alone"), and costs one
+entry in the rule for each future direct caller. The admin checks every
+other rule on the GitHub issuer the same way.
 
 ### Ordering prerequisites
 
@@ -765,22 +773,20 @@ covers the alternative of accepting that workspace's cap too.
   repository (most recently 2026-09-14), so the App is installed here.
   Until it is removed, the new `id-token: write` would let `runner` mint a
   token with contents, pull-requests and issues write on this repository,
-  where its workflows live. There are two ways to meet P1:
-  - (a) Remove this repository from the App's installation once agents
-    steps 1 and 4 have shipped. After them every reusable workflow the
-    stubs here call passes `github_token`, and none needs the App.
-  - (b) Wait for agents step 6, which uninstalls the App everywhere.
-
-  Open question 2 asks which. Either way, a canary checks it before step 5
-  merges: a `push`-triggered job with `id-token: write` on a scratch branch
-  of this repository tries the exchange, and it must fail.
+  where its workflows live. P1 is met by agents step 6, which uninstalls
+  the App from the Meridian repositories (decision: Ransom, 2026-09-30:
+  wait for agents step 6; no early removal of this repository alone, since
+  the work will land quickly). Steps 3 and 4 here therefore follow agents
+  step 6. Agents step 6 runs its own canary (the exchange now fails); for
+  this repository, the same check is repeated before step 3 merges: a
+  `push`-triggered job with `id-token: write` on a scratch branch here
+  tries the exchange, and it must fail.
 - **P2: the two service accounts and rules exist** (the table above).
 - **P3: agents' rule is narrowed** (above).
 - **P4: agents' land has the `comment-numbers` input** (agents design step
   3), so triage's `land` can pass `comment-numbers: event` (Design →
-  triage after the change). Step 4 needs it; it can also ship alone
-  earlier, as soon as the input exists, since it constrains only what
-  triage never posts.
+  triage after the change). Step 3 sets it. Agents step 3 precedes agents
+  step 6 (P1), so P4 is met by the time step 3 can ship.
 
 ### harden-runner egress
 
@@ -828,37 +834,32 @@ exists and runs in every agents Claude job, so the cost is one step.
 
 ### Pinning the Claude Code install
 
-- **After steps 4 and 5** the launcher installs the exact `claudeCodeVersion`
+- **After steps 3 and 4** the launcher installs the exact `claudeCodeVersion`
   claude-code-action pins, root-owned, through the vendor installer (see
   Current behaviour). No npm lifecycle script runs. The checksum comes from
   the release manifest on the same host as the binary. A repository-pinned
   hash would be stronger, and belongs in the launcher for every caller (Not
   this design).
-- **Before then**, step 1 replaces `isolated-agent`'s `npm install -g`
-  (4773473, High, open while the key exists). It uses the same vendor
-  installer at an exact version literal: `sudo env -i
-  HOME=/opt/claude-code PATH=/usr/sbin:/usr/bin:/sbin:/bin bash
-  "$installer" 2.1.285`, then `chown -R root:root` and a `--version` check,
-  as the launcher does, with `/opt/claude-code/.local/bin` put first on the
-  PATH the setup and run steps resolve `claude` from. `env -i` also clears
-  `SUDO_USER`, which the
-  installer otherwise refuses (install.sh, "do not run this installer with
-  sudo").
+- **4773473 is closed by the migration, not by an interim pin** (decision:
+  Ransom, 2026-09-30: the work will land quickly, so no temporary
+  patches). Until triage and ci-perf move (steps 3 and 4), `isolated-agent`
+  keeps its unpinned `npm install -g`; steps 3 and 4 remove its callers and
+  step 5 deletes it.
 
 ### SECURITY.md after the change
 
 The text lands with the step that makes it true.
 
-- **Trust boundaries, `workflow_dispatch` inputs (:47-52)**, step 2:
-  "ci-perf resolves its ref to a branch or tag of UKGovernmentBEIS/inspect_ai
-  in a job that runs nothing else, and refuses commits and pull-request
-  refs".
-- **Trust boundaries, "Upstream `main` is trusted" (:172-176)**, step 2:
-  add upstream branches and tags, which ci-perf may analyze, pushed only
-  by upstream's write-access holders.
+- **Trust boundaries, `workflow_dispatch` inputs (:47-52)**, step 1:
+  "ci-perf passes its unrestricted ref directly to checkout" becomes
+  "ci-perf takes no ref: it analyzes upstream `main`, resolved in a job
+  that runs nothing else".
+- **Trust boundaries, "Upstream `main` is trusted" (:172-176)**, step 1:
+  "the ci-perf analysis runs upstream's tooling unpinned" gains "at the
+  `main` commit its `resolve` job read".
 - **Guarantees, first bullet (:182-224)**:
-  - Step 4 splits it per workflow and rewrites triage's; step 5 rewrites
-    ci-perf's; step 6 merges them.
+  - Step 3 splits it per workflow and rewrites triage's; step 4 rewrites
+    ci-perf's; step 5 merges them.
   - The rewrite: the agent jobs hold nothing the agent may not have. That
     is the read-only job token and the model credential, the declared
     exception: a WIF token for the workflow's own spend-capped workspace,
@@ -868,15 +869,15 @@ The text lands with the step that makes it true.
   - The agent runs as `claude-agent` through agents' launcher, in its own
     PID and mount namespace, as defence in depth. The rest of the bullet
     (the redirect-target check) stays.
-- **Guarantees, the two-job bullet (:225-232)**, steps 2-3: `publish`
+- **Guarantees, the two-job bullet (:225-232)**, steps 1-2: `publish`
   checks out the SHA the `resolve` job resolved, and `land`'s Slack
   destination comes from the `context` job. Neither comes from the agent
   job.
-- **Guarantees, the Slack and validator bullet (:244-253)**, step 4: the
+- **Guarantees, the Slack and validator bullet (:244-253)**, step 3: the
   validator's refusals add generic comments (`comment-numbers: event`
   with no event number), and the bullet says the refusals hold "whatever
   the agent job uploaded", including after a `runner` compromise.
-- **Guarantees, egress and unscreened output (:273-289)**, step 6.
+- **Guarantees, egress and unscreened output (:273-289)**, step 5.
   "There is no reusable secret to screen for" becomes: what the outputs can
   carry is what the agent can read. That is:
   - the read-only job token (expired at job end);
@@ -892,38 +893,40 @@ The text lands with the step that makes it true.
 
   Screening stays pointless for the old reason: a screen on the agent's
   runner is the agent's to defeat.
-- **By design, first bullet (:295-302)**, step 6: the agent can spend the
+- **By design, first bullet (:295-302)**, step 5: the agent can spend the
   capped workspace for the job's lifetime, plus the remaining life of the
   last token it minted. Runner.Worker holds no model secret. The .NET
   socket text goes.
-- **By design, second bullet (:303-305)**, step 2: replaced by the ref
-  rule above and the reason: the job that runs the ref's scripts holds a
-  credential (agents' SECURITY.md tier-2 rule, "restricted to trusted
-  refs").
-- **Adding or changing a workflow, item 2 (:321-328)**, step 6: the model
+- **By design, second bullet (:303-305)**, step 1: the 2026-09-08
+  unrestricted-ref entry is replaced by "ci-perf analyzes upstream `main`
+  only (decision: Ransom, 2026-09-30)", with the reason: the job that runs
+  the analyzed commit's scripts holds a credential (agents' SECURITY.md
+  tier-2 rule, "restricted to trusted refs"), and upstream branches are
+  not trusted code merely because a write-access holder pushed them.
+- **Adding or changing a workflow, item 2 (:321-328)**, step 5: the model
   credential is Anthropic WIF through claude-code-action with
   `github_token: ${{ github.token }}`, launched through agents'
   `claude-agent-launcher`. The job requests `id-token: write` for that
   alone, under a dedicated rule pinned to the workflow file on `main`, and
   no agent job references a long-lived model key.
-- **Verification notes (:343-377)**, step 4: the redirect-target check is
+- **Verification notes (:343-377)**, step 3: the redirect-target check is
   repeated. The triage `settings:` block changes paths, and the installed
   release becomes the action's pin (2.1.285 at fd1c128) instead of npm's
   latest. The note is updated with the result.
 
-AGENTS.md changes with step 6: the test paragraph's description of
+AGENTS.md changes with step 5: the test paragraph's description of
 `tests/test_model_broker.py`, and "Rules the tests enforce", bullet 2.
 
 ### Retiring the keys
 
 - **Revoke** each key in the Anthropic Console once its workflow has run
-  green on WIF: triage after step 4, ci-perf after step 5. Revoking, not
+  green on WIF: triage after step 3, ci-perf after step 4. Revoking, not
   just deleting the GitHub secret, is the rotation. The key sat in
   Runner.Worker's memory and within root's reach on every run, so it is
   treated as possibly copied. Until the revoke, reverting the step's PR
   restores the broker path.
 - **Delete** the `CI_PERF_ANTHROPIC_API_KEY` and `TRIAGE_ANTHROPIC_API_KEY`
-  secrets in step 6. A search on 2026-09-30 found them referenced only in
+  secrets in step 5. A search on 2026-09-30 found them referenced only in
   these two workflows among the local clones of Meridian repositories. The
   step's PR repeats the search with `gh search code --owner
   meridianlabs-ai`.
@@ -973,8 +976,25 @@ AGENTS.md changes with step 6: the test paragraph's description of
   reads its `SKILL.md` and can run its scripts with unrestricted Bash. The
   ref's content steers a job that holds the model credential. Agents'
   tier-2 rule asks for trusted refs in exactly this case. So the ref is
-  restricted. Separately, `pytest` from PyPI, the one third-party install,
-  moves to `tooling`.
+  restricted, to `main` alone (decision: Ransom, 2026-09-30). Separately,
+  `pytest` from PyPI, the one third-party install, moves to `tooling`.
+- **ci-perf: allow upstream branches and tags too** (resolved with
+  `ls-remote` under `refs/heads/` and `refs/tags/`, refusing commits and
+  PR refs). It would keep dry-running a script change on an upstream
+  branch. Rejected (decision: Ransom, 2026-09-30): Meridian's work reaches
+  upstream as PRs, which are refused either way, and upstream's 422
+  branches include copies of outside contributors' PR branches, so a
+  write-access push does not make a branch trusted code.
+- **Remove this repository from the Claude App's installation early**, after
+  agents steps 1 and 4, instead of waiting for agents step 6. It would
+  unblock steps 3 and 4 sooner, at the cost of a feature audit for this
+  repository and a separate removal. Rejected (decision: Ransom,
+  2026-09-30): the work lands quickly, so no temporary arrangement.
+- **Pin `isolated-agent`'s install as an interim fix for 4773473**, with the
+  vendor installer at an exact version. It would close the finding while
+  the key still exists, and be deleted with the action. Rejected
+  (decision: Ransom, 2026-09-30): no temporary patches; the migration
+  closes it.
 - **ci-perf: move the collection into its own job, so the hashes come from
   outside `analyze`.** It would make the data-integrity check hold against
   a `runner` compromise of `analyze`. That buys correctness of numbers in a
@@ -1004,11 +1024,11 @@ AGENTS.md changes with step 6: the test paragraph's description of
   six files. Any other file the agent writes is no longer uploaded. The
   `-published` artifact is unchanged. None of this repository's workflows
   has a viewer schema or generated types.
-- **`workflow_dispatch` input `inspect_ai_ref`.** Raw SHAs, `refs/pull/*`
-  and other names that are not a branch or tag of upstream are refused in
-  `resolve`, with a message naming the rule. Default and schedule
-  behaviour are unchanged. Anyone who dispatched ci-perf on a commit
-  pushes a branch or tag upstream instead.
+- **`workflow_dispatch` input `inspect_ai_ref` is removed.** A dispatch
+  that still passes it is refused by GitHub as an unexpected input. ci-perf
+  can no longer analyze an upstream branch, tag, commit or pull-request
+  ref; schedules and default dispatches are unchanged, since they already
+  analyzed `main`.
 - **Triage `run_id`**: unchanged.
 - **Job graph.** New jobs `resolve` and `tooling` (ci-perf) and `context`
   (triage). The triage `agent` job loses its `channel` and `thread_ts`
@@ -1016,7 +1036,7 @@ AGENTS.md changes with step 6: the test paragraph's description of
   Nothing outside these workflows reads them. No required checks name
   these jobs. The extra jobs add roughly a minute of wall time.
 - **Composite actions.** `.github/actions/model-broker` and
-  `.github/actions/isolated-agent` are deleted in step 6. A search of
+  `.github/actions/isolated-agent` are deleted in step 5. A search of
   every Meridian clone on 2026-09-30 found only these two workflows
   referencing them, by relative path. `tests.yml` keeps running on
   `.github/actions/**` until then, and drops the path when nothing is
@@ -1031,17 +1051,17 @@ AGENTS.md changes with step 6: the test paragraph's description of
 - **A failed `context` job** fails the triage run with the error in
   `land`'s log and posts nothing to Slack, as a failed attempt resolution
   does today. No Slack fallback is added.
-- **Rollback.** Steps 1-3 revert independently. Steps 4 and 5 each revert
+- **Rollback.** Steps 1 and 2 revert independently. Steps 3 and 4 each revert
   to the broker path until their key is revoked.
 
 ## Security
 
 What untrusted input reaches the new code, and how it is handled:
 
-- **`inspect_ai_ref`** (write-access dispatcher) reaches only `resolve`,
-  through `env:`. It is shape-checked, and used as a quoted argument after
-  a fixed `refs/heads/` or `refs/tags/` prefix. The result must be 40 hex
-  before it is written with a heredoc. Nothing is parsed as syntax.
+- **No dispatcher-chosen ref** reaches any job: `inspect_ai_ref` is gone.
+  `resolve` reads `refs/heads/main` only, requires 40 hex and writes it
+  with a heredoc. The one remaining ci-perf input, `dry_run`, is a boolean
+  that gates `publish`, as today.
 - **`run_id` and the upstream run's artifact** reach `context`, handled
   exactly as today by the moved steps. 4773278 remains.
 - **Agent-written files** reach `runner` only through `import-codex-final`:
@@ -1054,10 +1074,10 @@ What untrusted input reaches the new code, and how it is handled:
   posting field outside the one permitted fork issue action is refused:
   generic comments, inline review comments, replies, thread resolutions,
   PR fields and the hand-back. Without P4, generic comments on this
-  repository would land as the machine account, which is why step 4
+  repository would land as the machine account, which is why step 3
   waits for it.
 - **The upstream checkout** is untrusted for triage (4773278 can select a
-  fork SHA) and trusted for ci-perf (restricted ref). Neither is loaded as
+  fork SHA) and trusted for ci-perf (upstream `main`). Neither is loaded as
   configuration (`--setting-sources user`), and it is read-only to the
   agent.
 - **The model credential.** The agent can read the JWT file and its
@@ -1093,18 +1113,18 @@ What untrusted input reaches the new code, and how it is handled:
     output is worth up to 600 s of capped inference.
 
   These are the losses the decision accepted.
-- **Findings, after step 6:**
-  - 4773473: closed by the launcher's pinned install, and by step 1 in the
-    meantime.
-  - 4773275: closed by `tooling` (step 2).
-  - 4773274: closed by the import (step 5), hygiene under this boundary.
-  - 4773277: its consequence is gone (step 3 moves the destination, and
-    step 4 removes the stdout echo).
+- **Findings, after step 5:**
+  - 4773473: closed by the migration (the launcher's pinned install
+    replaces `isolated-agent`), with no interim pin.
+  - 4773275: closed by `tooling` (step 1).
+  - 4773274: closed by the import (step 4), hygiene under this boundary.
+  - 4773277: its consequence is gone (step 2 moves the destination, and
+    step 3 removes the stdout echo).
   - 4773278: open (Not this design).
-  - The unreported ref gap: closed by `resolve` (step 2).
+  - The unreported ref gap: closed by `resolve` (step 1).
   - Generic `comments[]` in a forged triage manifest (found in review
     round 1 of this design; not a scan finding): closed by
-    `comment-numbers: event` (P4, step 4).
+    `comment-numbers: event` (P4, step 3).
 
 ## Testing
 
@@ -1114,12 +1134,12 @@ test needs network, Docker or a model: `gh` and `git` are stand-ins on
 
 - **`tests/test_ci_perf_workflow.py`:**
   - `resolve` (the script lifted from the YAML, with a `git` stand-in that
-    prints `ls-remote` lines): default `main`; a branch; an annotated tag,
-    where the peeled SHA wins; a lightweight tag; a name that is both,
-    refused; `refs/pull/5614/head`, `pull/5614/head`, a 40-hex SHA, `..`,
-    a leading `-`, a newline, `@{` and 201 characters, all refused with no
-    output written; `ls-remote` output with extra lines that are not exact
-    matches, ignored.
+    prints `ls-remote` lines): `refs/heads/main` resolves to its SHA; extra
+    lines that are not exactly `refs/heads/main` are ignored; empty or
+    malformed output (no line, a short SHA, a failed `ls-remote`) fails
+    with no output written.
+  - The workflow has no `inspect_ai_ref` input and no `inputs.inspect_ai_ref`
+    expression; `publish`'s `if:` reads only the event and `dry_run`.
   - The job graph: `publish` checks out `needs.resolve.outputs.sha` and
     computes the artifact name. No `needs.analyze.outputs` expression
     reaches a `ref:`, a `name:` or a `run:`. `tooling` holds
@@ -1163,12 +1183,10 @@ test needs network, Docker or a model: `gh` and `git` are stand-ins on
     and `git -C inspect_ai` becomes `git`. The write-vector cases stay.
   - `test_agent_job_timeout_matches_the_broker_lifetime` and the
     broker-pointing tests are removed with the broker.
-- **`tests/test_model_broker.py`** is deleted in step 6, with both actions.
-  Until then step 1 adds a test that the install recipe names an exact
-  version and runs under `env -i`.
-- **A repository-wide test** (step 6): no workflow references
+- **`tests/test_model_broker.py`** is deleted in step 5, with both actions.
+- **A repository-wide test** (step 5): no workflow references
   `CI_PERF_ANTHROPIC_API_KEY` or `TRIAGE_ANTHROPIC_API_KEY`.
-- **A per-workflow permission test** (steps 4 and 5), scoped to
+- **A per-workflow permission test** (steps 3 and 4), scoped to
   `inspect-ai-ci-perf.yml` and `triage-test-failures.yml` only: in each,
   exactly one job has `id-token: write` (`analyze`, triage `agent`), and
   that job's claude-code-action step passes `github_token: ${{
@@ -1198,7 +1216,7 @@ test needs network, Docker or a model: `gh` and `git` are stand-ins on
      - For P3, agents' rule reads the narrowed condition, and a dispatch of
        the unchanged agents stubs still succeeds.
   3. **The redirect-target verification** (SECURITY.md → Verification
-     notes) is repeated with the triage settings of step 4 and the CLI
+     notes) is repeated with the triage settings of step 3 and the CLI
      release the action pins.
 
 ## Implementation plan
@@ -1207,52 +1225,53 @@ Each step is one PR in this repository unless it says otherwise. Each runs
 `python3 -m pytest -q tests` and `actionlint` on the changed files, and
 updates the SECURITY.md text it makes true.
 
-1. **Pin isolated-agent's Claude Code install (4773473, interim).**
-   - Change: `.github/actions/isolated-agent/action.yml`, the install recipe
-     under Design → Pinning, at the exact version claude-code-action pins
-     at the time.
-   - Test: `tests/test_model_broker.py`.
-   - Independent of everything else, and deleted again in step 6. If steps
-     4 and 5 are expected within days, it can be skipped.
-2. **ci-perf: `resolve` and `tooling` jobs, the restricted ref, and
-   `publish` from `resolve`.** This closes 4773275 and the ref gap while the
-   key still exists.
+No step is an interim patch (decision: Ransom, 2026-09-30: the work will
+land quickly, so no temporary patches). Steps 1 and 2 ship before WIF only
+because they need nothing from agents; they are the final shape of those
+jobs, not stopgaps, and they stay after steps 3-5.
+
+1. **ci-perf: `resolve` and `tooling` jobs, `main` only, and `publish` from
+   `resolve`.**
+   - Removes the `inspect_ai_ref` input, which closes the ref gap; moving
+     `pytest` to `tooling` closes 4773275. Both hold after WIF: `resolve`
+     is where every job's SHA comes from, and `tooling` keeps third-party
+     code out of the credentialed job.
    - Files: `.github/workflows/inspect-ai-ci-perf.yml`,
      `tests/test_ci_perf_workflow.py`, SECURITY.md (trust boundaries;
      By design, second bullet; the two-job guarantee).
    - Independent of agents.
-3. **triage: the `context` job, and `land` reading from it.** This fixes
-   4773277's consequence.
+2. **triage: the `context` job, and `land` reading from it.** This fixes
+   4773277's consequence, and is what lets `land` stop believing the agent
+   job's outputs after WIF.
    - Files: `.github/workflows/triage-test-failures.yml`,
      `tests/test_triage_workflow.py`, SECURITY.md (the Slack-destination
      sentence of the two-job guarantee).
    - Independent of agents.
-   - *Prerequisites, before steps 4 and 5 (not PRs here):*
+   - *Prerequisites, before steps 3 and 4 (not PRs here):*
+     - P1: agents step 6 has uninstalled the Claude App, verified here by
+       the scratch-branch canary;
      - P2: Ransom creates the two service accounts and rules;
-     - P3: Ransom narrows agents' rule, with a line in agents' design and
-       SECURITY.md recording it;
-     - P1: this repository leaves the Claude App's installation, either
-       after agents steps 1 and 4 or at agents step 6 (open question 2),
-       verified by the canary;
-     - P4 (before step 4 only): agents step 3 ships land's
+     - P3: Ransom narrows agents' rule to its seven workflows (decided), with
+       a line in agents' design and SECURITY.md recording it;
+     - P4 (before step 3 only): agents step 3 has shipped land's
        `comment-numbers` input, and the agents design's sentence that
-       triage keeps `*` is corrected.
-4. **triage on WIF and the launcher.**
+       triage keeps `*` is corrected. It is met with P1, since agents step
+       3 precedes agents step 6.
+3. **triage on WIF and the launcher.**
    - The job shape under Design → triage and the agent step: the layout,
      the prompt paths, the settings, `id-token: write`, `land`'s
-     `comment-numbers: event` (if it has not shipped alone already) and
-     the new comments.
+     `comment-numbers: event` and the new comments.
    - Tests: `tests/test_triage_workflow.py`.
-   - SECURITY.md: the split first guarantee, and Verification notes
-     re-checked.
+   - SECURITY.md: the split first guarantee, the Slack and validator
+     bullet, and Verification notes re-checked.
    - After a green run: revoke `TRIAGE_ANTHROPIC_API_KEY` in the Console.
-5. **ci-perf on WIF and the launcher.**
+4. **ci-perf on WIF and the launcher.**
    - The shape under Design → ci-perf, with its egress list.
    - Tests: `tests/test_ci_perf_workflow.py`.
    - SECURITY.md: ci-perf's half of the first guarantee.
    - After a green run: revoke `CI_PERF_ANTHROPIC_API_KEY`.
-   - Steps 4 and 5 can ship in either order.
-6. **Retire the broker.**
+   - Steps 3 and 4 can ship in either order.
+5. **Retire the broker.**
    - Delete `.github/actions/model-broker/`, `.github/actions/isolated-agent/`
      and `tests/test_model_broker.py`.
    - `tests.yml`: drop `.github/actions/**`.
@@ -1262,32 +1281,26 @@ updates the SECURITY.md text it makes true.
      test paragraph, "Rules the tests enforce" bullet 2).
    - Delete the two secrets, after the organization-wide search.
 
+## Decisions
+
+Ransom answered the questions an earlier round of this design left open
+(decision: Ransom, 2026-09-30):
+
+1. **ci-perf analyzes upstream `main` only**, and the `inspect_ai_ref`
+   input goes (Design → ci-perf after the change). Upstream branches would
+   help only to dry-run a script change pushed straight to upstream, and
+   a write-access push does not make a branch trusted code.
+2. **P1 waits for agents step 6.** This repository is not removed from the
+   Claude App's installation early; the work lands quickly, so no
+   temporary arrangement is needed.
+3. **No interim pin of `isolated-agent`'s install.** 4773473 is closed by
+   the migration.
+4. **agents' owner-only rule is narrowed** to the seven workflows that use
+   it (P3), and stays a prerequisite.
+
 ## Open questions
 
-1. **Which upstream refs may ci-perf analyze?**
-   - (a) Any branch or tag of UKGovernmentBEIS/inspect_ai, which keeps
-     testing a tooling branch before it merges.
-   - (b) `main` only.
-
-   Recommendation: (a). Upstream branches are pushed only by its
-   write-access holders, whom SECURITY.md already trusts for `main`.
-2. **How to meet P1 for this repository?**
-   - (a) Remove meridianlabs-ai/actions from the Claude App's installation
-     as soon as agents steps 1 and 4 have shipped. That unblocks steps 4-5
-     early, and loses the App's features on this repository only, which
-     the agents step-5 checklist can confirm are unused here.
-   - (b) Wait for agents step 6.
-
-   Recommendation: (a). It is reversible, and the agents design's
-   reasoning applies unchanged.
-3. **agents' owner-only rule (P3).**
-   - (a) Narrow it to the seven workflows that use it.
-   - (b) Leave it, and accept that these two agents can also spend the
-     "Claude Code Agent" workspace up to its cap.
-
-   Recommendation: (a). Without it, "limited by the spend-capped
-   workspace" is true only if that workspace is capped too. (a) costs one
-   line in the rule for each future direct caller.
+None.
 
 ## Not this design
 
