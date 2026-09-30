@@ -109,7 +109,10 @@ and its satellites, and nothing that serves end users:
   the checkouts do not persist it; and no Actions cache is restored or
   saved in those jobs, because a cache written after that code ran would
   be installed by every later scheduled run, before the keys-bearing step,
-  and would outlive the offending release and a key rotation. The default
+  and would outlive the offending release and a key rotation. The token
+  enforces the save half: both workflows declare `cache-mode: read` at
+  workflow level, so the runtime token that Runner.Worker holds, as the same
+  user as the closure, cannot save a cache entry. The default
   token setting itself was not read (the API query needs repository
   administration), and no write exploit was observed: the job logs of runs
   before the declaration already listed Contents, Metadata and Packages as
@@ -239,8 +242,10 @@ and its satellites, and nothing that serves end users:
   before reading a field (see the trust boundaries above for where those
   checks stop).
 - The scheduled test workflows declare a read-only job token, persist no
-  credential into a checkout and use no Actions cache; the `report` job
-  refuses to upload an artifact name another job of its attempt took.
+  credential into a checkout and use no Actions cache, and their
+  workflow-level `cache-mode: read` makes the token refuse a cache save;
+  the `report` job refuses to upload an artifact name another job of its
+  attempt took.
 - The Slack destination of a triage reply comes from the context of the
   failed run that its `report` job produced, never from the agent's
   manifest and never from a same-named artifact another job of that run

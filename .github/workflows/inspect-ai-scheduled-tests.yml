@@ -21,8 +21,10 @@
 # - No Actions cache is restored or saved by a job that runs that code. A
 #   cache saved after the closure ran would be restored by every later
 #   scheduled run and installed from before the keys-bearing step, and it
-#   would outlive the offending release and a key rotation. Every job installs
-#   fresh; setup-python has no `cache:` input here.
+#   would outlive the offending release and a key rotation. The workflow-level
+#   `cache-mode: read` makes every job's token refuse a save, so the closure
+#   cannot write one with the token Runner.Worker holds; no step restores one
+#   either. Every job installs fresh; setup-python has no `cache:` input here.
 # - The two artifacts (`last-inspect-ai-sha`, `triage-context`) are uploaded
 #   by the report job, which runs only after those jobs have finished. Their
 #   names are claimable by any job of the run attempt (a re-run is a new
@@ -78,6 +80,11 @@ name: Inspect AI Scheduled Tests
 # run and artifact data add actions: read for themselves.
 permissions:
   contents: read
+
+# The job tokens can restore caches but not save them, so code that runs here
+# cannot plant a cache for a later run (see the header). Workflow level, so no
+# job can widen it.
+cache-mode: read
 
 jobs:
   # Resolve the inspect_ai commit to test and skip if it was already tested
