@@ -9,7 +9,8 @@ from a scheduled run on the default branch and only when it is a 40-hex SHA,
 and step outputs travel to later steps through env:, never through `${{ }}`
 inside a script. The jobs that run the day's dependency closure and the test
 suites hold nothing that reaches beyond the job: a token declared read-only,
-no persisted checkout credential, no Actions cache; and the report job, the
+no persisted checkout credential, no Actions cache and a token that cannot
+save one (`cache-mode: read`); and the report job, the
 only producer of the two artifacts later runs trust, refuses a name another
 job took and records the identity of the triage-context it uploaded for the
 triage consumer (tests/test_triage_workflow.py checks that consumer against
@@ -346,7 +347,10 @@ def test_triage_context_is_built_by_jq_from_env(tmp_path):
 # this repo does not control. The contract: a job token declared read-only in
 # the file (not left to the repository's default setting), no token persisted
 # into a checkout, and no Actions cache restored or saved by such a job (a
-# cache saved after that code ran would be installed by every later run).
+# cache saved after that code ran would be installed by every later run). The
+# step checks below cover what the file asks for; `cache-mode: read` makes the
+# token itself refuse a save, which is what stops the closure from saving one
+# through the runtime token Runner.Worker holds.
 
 
 def workflow_jobs(workflow: Path) -> dict:
@@ -398,6 +402,16 @@ def test_no_job_restores_or_saves_an_actions_cache(workflow):
             assert "cache" not in uses.lower(), (name, uses)
             if uses.startswith("actions/setup-python@"):
                 assert "cache" not in s.get("with", {}) and "cache-dependency-path" not in s.get("with", {}), (name, s["with"])
+
+
+@pytest.mark.parametrize("workflow", [SCHEDULED, NIGHTLY], ids=REF_IDS)
+def test_every_job_token_can_restore_caches_but_not_save_them(workflow):
+    # Claude Security findings 4773471 (scheduled) and 4773276 (nightly).
+    # Workflow level covers every job; a job-level key would override it, so
+    # the file carries exactly one, at column 0.
+    assert yaml.safe_load(workflow.read_text())["cache-mode"] == "read"
+    keys = [l for l in workflow.read_text().splitlines() if re.match(r"\s*cache-mode\s*:", l)]
+    assert keys == ["cache-mode: read"], keys
 
 
 # --- The report job's artifact names ------------------------------------------------
