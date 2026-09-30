@@ -46,8 +46,8 @@ permissions:
   contents: read
 
 # The job token can restore caches but not save them, so code that runs here
-# cannot plant a cache for a later run (see the header). Workflow level, so no
-# job can widen it.
+# cannot plant a cache for a later run (see the header). Workflow level covers
+# every job; tests forbid job-level overrides.
 cache-mode: read
 
 jobs:
