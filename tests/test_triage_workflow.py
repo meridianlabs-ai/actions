@@ -1,11 +1,12 @@
-"""Tests for .github/workflows/triage-test-failures.yml's agent-job scripts.
+"""Tests for .github/workflows/triage-test-failures.yml's job scripts.
 
-The workflow's trust boundary is in four places a YAML file cannot test on
-its own: the step that resolves the triage-context artifact by the identity
-the scheduled run's report job recorded in its own log (any job of that run
-could otherwise supply a same-named artifact) and the step that validates its
-fields before any becomes a checkout ref, a step output or the Slack
-destination; the step that composes the landing manifest from what the agent wrote
+The workflow's trust boundary is in five places a YAML file cannot test on
+its own: the context job's step that accepts only a scheduled run of the
+default branch; its step that resolves the triage-context artifact by the
+identity the scheduled run's report job recorded in its own log (any job of
+that run could otherwise supply a same-named artifact) and its step that
+validates the artifact's fields before any becomes a checkout ref, a job
+output or the Slack destination; the step that composes the landing manifest from what the agent wrote
 (whitelisting, normalizing, and turning every dropped action into a
 fail_run error); and the agent's permission rules, whose allow list must not
 reach a write outside the landing directory. The step that collects the
@@ -70,11 +71,19 @@ def land_inputs() -> dict:
     return {k: re.sub(r"\$\{\{ env\.(\w+) \}\}", lambda m: env[m.group(1)], str(v)) for k, v in step["with"].items()}
 
 
-def agent_step(name_or_id: str) -> dict:
-    for step in load_workflow()["jobs"]["agent"]["steps"]:
+def job_step(job: str, name_or_id: str) -> dict:
+    for step in load_workflow()["jobs"][job]["steps"]:
         if step.get("id") == name_or_id or step.get("name") == name_or_id:
             return step
     raise KeyError(name_or_id)
+
+
+def agent_step(name_or_id: str) -> dict:
+    return job_step("agent", name_or_id)
+
+
+def context_step(name_or_id: str) -> dict:
+    return job_step("context", name_or_id)
 
 
 def run_bash(script: str, *, cwd: Path, env: dict) -> subprocess.CompletedProcess:
@@ -106,7 +115,7 @@ def validate(tmp_path: Path, artifact: str | None) -> tuple[dict, subprocess.Com
         (tmp_path / "triage" / "slack_thread.json").write_text(artifact)
     gh_out = tmp_path / "output.txt"
     gh_out.touch()
-    r = run_bash(agent_step("context")["run"], cwd=tmp_path, env={"GITHUB_OUTPUT": str(gh_out)})
+    r = run_bash(context_step("context")["run"], cwd=tmp_path, env={"GITHUB_OUTPUT": str(gh_out)})
     assert r.returncode == 0, r.stderr
     return parse_outputs(gh_out.read_text()), r
 
@@ -238,7 +247,7 @@ def collect(tmp_path: Path, *, logs: dict, runs: list, artifacts: dict, run_json
     if run_json is not False:
         (tmp_path / "triage" / "run.json").write_text(json.dumps(run_json))
     step = agent_step("Collect installed package versions (failed run and last passing run)")
-    assert step["env"]["UPSTREAM_RUN_ATTEMPT"] == "${{ steps.attempt.outputs.attempt }}"
+    assert step["env"]["UPSTREAM_RUN_ATTEMPT"] == "${{ needs.context.outputs.attempt }}"
     env = {
         "PATH": f"{gh.parent}:{os.environ['PATH']}",
         "FAKE_GH_DIR": str(fake),
@@ -399,7 +408,7 @@ def resolve_attempt(tmp_path: Path, *, event_attempt: str, run_json: dict | None
     gh.chmod(0o755)
     gh_out = tmp_path / "output.txt"
     gh_out.touch()
-    s = agent_step("attempt")
+    s = context_step("attempt")
     assert s["env"] == {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}", "REPO": "${{ github.repository }}", "EVENT_ATTEMPT": "${{ github.event.workflow_run.run_attempt || '' }}"}
     env = {"PATH": f"{gh.parent}:{os.environ['PATH']}", "FAKE_GH_DIR": str(store), "GH_TOKEN": "fake", "REPO": "meridianlabs-ai/actions",
            "UPSTREAM_RUN_ID": RUN_ID, "EVENT_ATTEMPT": event_attempt, "GITHUB_OUTPUT": str(gh_out)}
@@ -440,7 +449,7 @@ def test_the_failed_log_and_run_metadata_are_read_at_the_resolved_attempt(tmp_pa
     gh.write_text(FAKE_GH)
     gh.chmod(0o755)
     s = agent_step("Download failed logs from upstream run")
-    assert s["env"] == {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}", "REPO": "${{ github.repository }}", "UPSTREAM_RUN_ATTEMPT": "${{ steps.attempt.outputs.attempt }}"}
+    assert s["env"] == {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}", "REPO": "${{ github.repository }}", "UPSTREAM_RUN_ATTEMPT": "${{ needs.context.outputs.attempt }}"}
     for attempt in ("1", "2"):
         cwd = tmp_path / attempt
         cwd.mkdir()
@@ -454,25 +463,34 @@ def test_the_failed_log_and_run_metadata_are_read_at_the_resolved_attempt(tmp_pa
 
 
 def test_every_read_of_the_upstream_run_takes_the_resolved_attempt():
-    steps = load_workflow()["jobs"]["agent"]["steps"]
-    names = [s.get("name") for s in steps]
-    readers = ["Download failed logs from upstream run", "Resolve the trusted triage context", "Collect installed package versions (failed run and last passing run)"]
-    assert names.index("Harden runner") < names.index("Resolve the upstream run attempt") < min(names.index(n) for n in readers)
-    for s in steps:
-        if s.get("name") in readers:
-            assert s["env"]["UPSTREAM_RUN_ATTEMPT"] == "${{ steps.attempt.outputs.attempt }}", s["name"]
-            # Every `gh run view` of the failed run in these scripts names the attempt.
-            for call in re.findall(r'gh run view "\$(?:UPSTREAM_RUN_ID|run)"[^\n]*', s["run"]):
-                assert '--attempt' in call or '"$@"' in call, (s["name"], call)
-        # No other step reads the upstream run by id without the attempt.
-        elif "UPSTREAM_RUN_ID" in (s.get("run") or ""):
-            assert s.get("name") == "Resolve the upstream run attempt", s.get("name")
+    # The context job resolves the attempt and reads the context at it; the
+    # agent job reads the logs and packages at the attempt context reports.
+    wf = load_workflow()
+    names = [s.get("name") for s in wf["jobs"]["context"]["steps"]]
+    assert names.index("Resolve the upstream run attempt") < names.index("Resolve the trusted triage context")
+    assert wf["jobs"]["context"]["outputs"]["attempt"] == "${{ steps.attempt.outputs.attempt }}"
+    readers = {"context": ["Resolve the trusted triage context"],
+               "agent": ["Download failed logs from upstream run", "Collect installed package versions (failed run and last passing run)"]}
+    expected = {"context": "${{ steps.attempt.outputs.attempt }}", "agent": "${{ needs.context.outputs.attempt }}"}
+    # Run-level reads, where the attempt does not matter: the run's event and
+    # head (the same for every attempt), and the attempt itself.
+    run_level = ["Check the run is a scheduled run of the default branch", "Resolve the upstream run attempt"]
+    for job, job_readers in readers.items():
+        for s in wf["jobs"][job]["steps"]:
+            if s.get("name") in job_readers:
+                assert s["env"]["UPSTREAM_RUN_ATTEMPT"] == expected[job], s["name"]
+                # Every `gh run view` of the failed run in these scripts names the attempt.
+                for call in re.findall(r'gh run view "\$(?:UPSTREAM_RUN_ID|run)"[^\n]*', s["run"]):
+                    assert '--attempt' in call or '"$@"' in call, (s["name"], call)
+            # No other step reads the upstream run by id without the attempt.
+            elif "UPSTREAM_RUN_ID" in (s.get("run") or ""):
+                assert job == "context" and s.get("name") in run_level, (job, s.get("name"))
 
 
 # --- Compose landing manifest -----------------------------------------------
 
 
-def compose(tmp_path: Path, manifest_extra, *, outcome="success", files=()) -> tuple[dict, subprocess.CompletedProcess]:
+def compose(tmp_path: Path, manifest_extra, *, outcome="success", files=(), context="success") -> tuple[dict, subprocess.CompletedProcess]:
     landing = tmp_path / "landing"
     landing.mkdir(exist_ok=True)
     for name in files:
@@ -486,6 +504,7 @@ def compose(tmp_path: Path, manifest_extra, *, outcome="success", files=()) -> t
         "DIR": str(landing),
         "EXTRA": str(extra),
         "CLAUDE_OUTCOME": outcome,
+        "CONTEXT_RESULT": context,
         "RUN_URL": "https://example.test/run",
         "ISSUES_REPO": ISSUES_REPO,
         "ISSUE_ASSIGNEE": workflow_env("ISSUE_ASSIGNEE"),
@@ -599,6 +618,21 @@ def test_compose_agent_that_never_ran_is_an_unknown_outcome_error(tmp_path):
     assert "outcome 'unknown'" in extra["error"]["message"]
     assert "no Slack reply" not in extra["error"]["message"]  # only a run that happened owes one
     assert "::error::landing: the triage agent step ended with outcome 'unknown'." in r.stdout
+
+
+@pytest.mark.parametrize("result", ["failure", ""])
+def test_compose_failed_context_is_an_error_with_no_slack_reply(tmp_path, result):
+    # The context job failed (the run is not a scheduled run of the default
+    # branch, or its attempt could not be read): no step of the agent job
+    # read the run or ran the agent, and land gets a failed run to report
+    # and no Slack text, so it posts nothing to Slack.
+    step = agent_step("landing")
+    assert step["env"]["CONTEXT_RESULT"] == "${{ needs.context.result }}"
+    extra, r = compose(tmp_path, None, outcome="", context=result)
+    assert extra["error"]["fail_run"] is True
+    assert "slack" not in extra and "issues" not in extra
+    assert extra["error"]["message"].startswith("⚠️ Triage of the failed run did not complete: the triage context could not be resolved")
+    assert "::error::landing: the triage context could not be resolved" in r.stdout
 
 
 def test_compose_unparsable_manifest_lands_nothing_and_fails(tmp_path):
@@ -1272,7 +1306,7 @@ def resolve(tmp_path: Path, *, jobs: dict, logs: dict, artifacts: list, zips: di
     gh.chmod(0o755)
     (tmp_path / "triage").mkdir()
     (tmp_path / "triage" / "failed.log").write_text("FAILED tests/x.py::test_y\n")
-    s = agent_step("Resolve the trusted triage context")
+    s = context_step("Resolve the trusted triage context")
     assert set(s["env"]) == {"GH_TOKEN", "REPO", "UPSTREAM_RUN_ATTEMPT"}
     assert s["env"]["UPSTREAM_RUN_ATTEMPT"] == "${{ steps.attempt.outputs.attempt }}"
     env = {"PATH": f"{gh.parent}:{os.environ['PATH']}", "FAKE_GH_DIR": str(store), "GH_TOKEN": "fake", "REPO": "meridianlabs-ai/actions",
@@ -1473,12 +1507,149 @@ def test_the_producers_recorded_line_is_what_the_consumer_reads(tmp_path):
     # And the shape validation step then passes the fields through as usual.
     gh_out = tmp_path / "output.txt"
     gh_out.touch()
-    v = run_bash(agent_step("context")["run"], cwd=tmp_path, env={"GITHUB_OUTPUT": str(gh_out)})
+    v = run_bash(context_step("context")["run"], cwd=tmp_path, env={"GITHUB_OUTPUT": str(gh_out)})
     assert v.returncode == 0, v.stderr
     assert parse_outputs(gh_out.read_text()) == {"sha": SHA, "exact": "true", "channel": "C099JCXDC06", "thread_ts": "1790072961.576449"}
 
 
-def test_resolve_runs_before_the_validation_and_after_harden_runner():
-    names = [s.get("name") for s in load_workflow()["jobs"]["agent"]["steps"]]
-    assert names.index("Harden runner") < names.index("Resolve the upstream run attempt") < names.index("Resolve the trusted triage context") < names.index("Validate the triage context")
-    assert "Download triage-context artifact" not in names
+def test_resolve_runs_in_the_context_job_before_the_validation():
+    names = [s.get("name") for s in load_workflow()["jobs"]["context"]["steps"]]
+    assert names == ["Check the run is a scheduled run of the default branch", "Resolve the upstream run attempt",
+                     "Resolve the trusted triage context", "Validate the triage context"]
+    agent_names = [s.get("name") for s in load_workflow()["jobs"]["agent"]["steps"]]
+    assert not set(names) & set(agent_names)
+    assert "Download triage-context artifact" not in agent_names
+
+
+# --- The context job ----------------------------------------------------------
+#
+# What triage believes about the failed run (its attempt, the tested SHA, the
+# Slack destination) is resolved in a job that runs no agent and no
+# third-party code, and land reads it from there: nothing the agent job
+# prints or reports (Claude Security finding 4773277: an `::add-mask::` of
+# the channel ID made GitHub drop the agent job's channel output) moves the
+# reply. The run itself must be a scheduled run of this repository's default
+# branch, for a dispatch as for a completion event (finding 4773278: a
+# dispatch could name a fork pull request's run, whose report job runs the
+# fork's workflow file).
+
+TRIGGER = ("github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'failure' && "
+           "github.event.workflow_run.event == 'schedule')")
+
+
+def test_the_context_job_is_trusted_and_carries_the_trigger():
+    job = load_workflow()["jobs"]["context"]
+    assert " ".join(job["if"].split()) == TRIGGER
+    assert job["permissions"] == {"contents": "read", "actions": "read"}
+    assert "needs" not in job
+    # No action at all: no checkout, no agent, nothing but the four scripts.
+    assert all("uses" not in s and "run" in s for s in job["steps"])
+    assert set(re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(job))) == {"GITHUB_TOKEN"}
+    assert job["outputs"] == {
+        "attempt": "${{ steps.attempt.outputs.attempt }}",
+        "sha": "${{ steps.context.outputs.sha }}",
+        "exact": "${{ steps.context.outputs.exact }}",
+        "channel": "${{ steps.context.outputs.channel }}",
+        "thread_ts": "${{ steps.context.outputs.thread_ts }}",
+    }
+    # The run the jobs read is named once, at the workflow level.
+    env = load_workflow()["env"]
+    assert env["UPSTREAM_RUN_ID"] == "${{ github.event.workflow_run.id || inputs.run_id }}"
+    assert "UPSTREAM_RUN_ID" not in yaml.safe_dump({k: v.get("env", {}) for k, v in load_workflow()["jobs"].items()})
+
+
+def test_the_agent_job_reads_the_context_job_and_has_no_outputs():
+    job = load_workflow()["jobs"]["agent"]
+    assert job["needs"] == "context"
+    assert job["if"] == "always() && needs.context.result != 'skipped' && needs.context.result != 'cancelled'"
+    assert "outputs" not in job
+    text = yaml.safe_dump(job)
+    assert "steps.attempt." not in text and "steps.context." not in text
+    assert agent_step("Checkout inspect_ai at tested commit")["with"]["ref"] == "${{ needs.context.outputs.sha }}"
+    assert "inspect_ai checkout is exact tested commit: ${{ needs.context.outputs.exact }}" in agent_step("claude")["with"]["prompt"]
+    # Every step that reads the run or runs the agent waits for a good
+    # context; the rest are the always() steps that report a failed triage.
+    ungated = {"Harden runner", "Stop the model broker", "Compose landing manifest", "Emit landing manifest"}
+    for s in job["steps"]:
+        if s["name"] in ungated:
+            assert "needs.context" not in s.get("if", ""), s["name"]
+        else:
+            assert s.get("if") == "needs.context.result == 'success'", s["name"]
+
+
+def test_land_takes_the_slack_destination_from_the_context_job():
+    job = load_workflow()["jobs"]["land"]
+    assert job["needs"] == ["context", "agent"]
+    assert job["if"] == "always() && needs.agent.result != 'skipped' && needs.agent.result != 'cancelled'"
+    assert land_inputs()["slack-channel"] == "${{ needs.context.outputs.channel || secrets.SLACK_CHANNEL_ID }}"
+    assert land_inputs()["slack-thread-ts"] == "${{ needs.context.outputs.thread_ts }}"
+    # Nothing the agent job reports reaches land; only its artifact does.
+    assert "needs.agent.outputs" not in WORKFLOW.read_text()
+
+
+def check_run(tmp_path: Path, run_json: dict | None, *, run_id: str = RUN_ID, default_branch: str = "main") -> tuple[subprocess.CompletedProcess, list[str]]:
+    store = tmp_path / "gh"
+    store.mkdir(parents=True)
+    if run_json is not None:
+        (store / "run.json").write_text(json.dumps(run_json))
+    gh = tmp_path / "bin" / "gh"
+    gh.parent.mkdir()
+    gh.write_text(FAKE_GH_API)
+    gh.chmod(0o755)
+    s = context_step("Check the run is a scheduled run of the default branch")
+    assert s["env"] == {"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}", "REPO": "${{ github.repository }}",
+                        "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}"}
+    env = {"PATH": f"{gh.parent}:{os.environ['PATH']}", "FAKE_GH_DIR": str(store), "GH_TOKEN": "fake", "REPO": "meridianlabs-ai/actions",
+           "UPSTREAM_RUN_ID": run_id, "DEFAULT_BRANCH": default_branch}
+    r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]], cwd=tmp_path, env={**os.environ, **env},
+                       text=True, capture_output=True, check=False)
+    calls = (store / "calls.log").read_text().splitlines() if (store / "calls.log").exists() else []
+    return r, calls
+
+
+def api_run(event: str = "schedule", head_repo: str | None = "meridianlabs-ai/actions", head_branch: str | None = "main") -> dict:
+    return {"id": int(RUN_ID), "run_attempt": 1, "event": event, "head_branch": head_branch,
+            "head_repository": None if head_repo is None else {"full_name": head_repo}}
+
+
+def test_check_accepts_a_scheduled_run_of_the_default_branch(tmp_path):
+    r, calls = check_run(tmp_path, api_run())
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len(calls) == 1 and f"repos/meridianlabs-ai/actions/actions/runs/{RUN_ID}" in calls[0]
+    assert "is a scheduled run of meridianlabs-ai/actions on main" in r.stdout
+
+
+@pytest.mark.parametrize("run_json", [
+    api_run(event="pull_request", head_repo="someone/actions", head_branch="main"),   # a fork PR's run (4773278)
+    api_run(event="pull_request"),                                                   # a PR from this repository
+    api_run(event="workflow_dispatch"),                                              # a dispatched run of main
+    api_run(event="push"),
+    api_run(head_repo="someone/actions"),
+    api_run(head_branch="feature"),
+    api_run(head_repo=None),
+    api_run(head_branch=None),
+    {"id": int(RUN_ID)},
+], ids=["fork-pr", "own-pr", "dispatch", "push", "other-head-repo", "other-branch", "no-head-repo", "no-branch", "no-fields"])
+def test_check_refuses_any_other_run(tmp_path, run_json):
+    r, _ = check_run(tmp_path, run_json)
+    assert r.returncode == 1
+    assert f"::error::Run {RUN_ID} is not a scheduled run of meridianlabs-ai/actions on main" in r.stdout
+
+
+def test_check_follows_the_repositorys_default_branch(tmp_path):
+    r, _ = check_run(tmp_path / "trunk", api_run(head_branch="trunk"), default_branch="trunk")
+    assert r.returncode == 0, r.stdout
+    r, _ = check_run(tmp_path / "none", api_run(), default_branch="")
+    assert r.returncode == 1 and "names no default branch" in r.stdout
+
+
+@pytest.mark.parametrize("run_id", ["", "0", "12a", "123/../../pulls", "1\n2", "-1"])
+def test_check_refuses_a_run_id_that_is_not_a_number_before_any_call(tmp_path, run_id):
+    r, calls = check_run(tmp_path, api_run(), run_id=run_id)
+    assert r.returncode == 1 and calls == []
+    assert "::error::The run to triage is not a numeric run ID." in r.stdout
+
+
+def test_check_fails_when_the_run_cannot_be_read(tmp_path):
+    r, _ = check_run(tmp_path, None)
+    assert r.returncode == 1 and f"::error::Could not read run {RUN_ID}" in r.stdout

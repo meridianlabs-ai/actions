@@ -90,7 +90,8 @@ clean.
 - A job that installs and runs the day's dependency closure (the scheduled
   and nightly test suites) holds nothing that reaches beyond the job: the
   workflow declares a read-only token, its checkouts set
-  `persist-credentials: false`, and it restores and saves no Actions cache.
+  `persist-credentials: false`, and it restores and saves no Actions cache
+  (workflow-level `cache-mode: read`, so the token refuses a save).
   An artifact a later trusted step consumes is bound to its producer, not to
   its name: the scheduled run's `report` job refuses a name another job of
   its attempt took (a re-run may upload the names again) and records the id

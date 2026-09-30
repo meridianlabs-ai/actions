@@ -641,8 +641,12 @@ consequence. The agent step no longer echoes the agent's text either
 chosen key names inside its `::error::` lines. Under this boundary that
 buys only annotations in the agent job's own log.
 
-4773278 is **not** fixed: `context` trusts the dispatcher's run exactly as
-today. `context` is where its check goes (Not this design).
+4773278 is fixed in `context` too (moved into step 2; decision: Ransom,
+2026-09-30). Its first step requires the selected run's `event` to be
+`schedule`, its `head_repository` to be this repository and its
+`head_branch` the default branch, on `workflow_dispatch` as on
+`workflow_run`. A failed check fails `context`, which the compose step
+turns into a failed run with no Slack post, as above.
 
 ### The agent step
 
@@ -1069,7 +1073,7 @@ What untrusted input reaches the new code, and how it is handled:
   with a heredoc. The one remaining ci-perf input, `dry_run`, is a boolean
   that gates `publish`, as today.
 - **`run_id` and the upstream run's artifact** reach `context`, handled
-  exactly as today by the moved steps. 4773278 remains.
+  by the moved steps, after the run check that closes 4773278.
 - **Agent-written files** reach `runner` only through `import-codex-final`:
   no-follow, owner-checked and capped. The compose step and `publish`
   treat them as untrusted, as today. The data the agent was given is
@@ -1082,8 +1086,8 @@ What untrusted input reaches the new code, and how it is handled:
   PR fields and the hand-back. Without P4, generic comments on this
   repository would land as the machine account, which is why step 3
   waits for it.
-- **The upstream checkout** is untrusted for triage (4773278 can select a
-  fork SHA) and trusted for ci-perf (upstream `main`). Neither is loaded as
+- **The upstream checkout** is untrusted for triage (before step 2,
+  4773278 could select a fork SHA) and trusted for ci-perf (upstream `main`). Neither is loaded as
   configuration (`--setting-sources user`), and it is read-only to the
   agent.
 - **The model credential.** The agent can read the JWT file and its
@@ -1126,7 +1130,7 @@ What untrusted input reaches the new code, and how it is handled:
   - 4773274: closed by the import (step 4), hygiene under this boundary.
   - 4773277: its consequence is gone (step 2 moves the destination, and
     step 3 removes the stdout echo).
-  - 4773278: open (Not this design).
+  - 4773278: closed by the run check in `context` (step 2).
   - The unreported ref gap: closed by `resolve` (step 1).
   - Generic `comments[]` in a forged triage manifest (found in review
     round 1 of this design; not a scan finding): closed by
@@ -1248,10 +1252,12 @@ jobs, not stopgaps, and they stay after steps 3-5.
    - Independent of agents.
 2. **triage: the `context` job, and `land` reading from it.** This fixes
    4773277's consequence, and is what lets `land` stop believing the agent
-   job's outputs after WIF.
+   job's outputs after WIF. It also closes 4773278 with the run check in
+   `context` (Design → triage after the change).
    - Files: `.github/workflows/triage-test-failures.yml`,
      `tests/test_triage_workflow.py`, THREAT_MODEL.md (the Slack-destination
-     sentence of the two-job guarantee).
+     sentence of the two-job guarantee, and the triage-context producer
+     text).
    - Independent of agents.
    - *Prerequisites, before steps 3 and 4 (not PRs here):*
      - P1: agents step 6 has uninstalled the Claude App, verified here by
@@ -1311,10 +1317,11 @@ None.
 
 ## Not this design
 
-- **4773278**: manual triage accepts a fork PR's workflow run as the
-  trusted context producer. The fix is a check in the new `context` job:
-  the selected run's `event` is `schedule`, its `head_repository` is this
-  repository and its `head_branch` is the default branch.
+- **4773278** moved into step 2 (decision: Ransom, 2026-09-30): manual
+  triage accepted a fork PR's workflow run as the trusted context
+  producer. The fix is the check in the new `context` job: the selected
+  run's `event` is `schedule`, its `head_repository` is this repository
+  and its `head_branch` is the default branch.
 - **The Actions cache findings of group 2b**: 4773471 (scheduled tests) and
   4773276 (inspect_swe nightly), which need a workflow-level `cache-mode:
   read`.
