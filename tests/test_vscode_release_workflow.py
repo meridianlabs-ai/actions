@@ -207,12 +207,13 @@ def zip64_end_record(count: int, size: int, offset: int) -> bytes:
     return struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0, count, count, size, offset)
 
 
-def shift_offsets(cd: bytes, delta: int) -> bytes:
-    """The central directory with every local header offset moved by delta."""
+def shift_offsets(cd: bytes, delta: int, at: int = 0) -> bytes:
+    """The central directory with every local header offset from `at` on moved by delta."""
     out, pos = bytearray(cd), 0
     while pos < len(out):
         n, m, k = struct.unpack_from("<HHH", out, pos + 28)
-        struct.pack_into("<I", out, pos + 42, struct.unpack_from("<I", out, pos + 42)[0] + delta)
+        offset = struct.unpack_from("<I", out, pos + 42)[0]
+        struct.pack_into("<I", out, pos + 42, offset + delta if offset >= at else offset)
         pos += 46 + n + m + k
     return bytes(out)
 
@@ -488,6 +489,12 @@ def test_rejects_end_record_and_central_directory_that_readers_could_resolve_dif
     assert reason in rejected(tmp_path, data)
 
 
+def with_gap(at: int, gap: bytes) -> bytes:
+    """The honest archive with `gap` inserted at offset `at` of its entry area, the directory and end record adjusted to match."""
+    central = shift_offsets(CENTRAL, len(gap), at)
+    return LOCAL[:at] + gap + LOCAL[at:] + central + end_record(COUNT, len(central), len(LOCAL) + len(gap))
+
+
 @pytest.mark.parametrize(
     "signature, reason",
     [
@@ -496,18 +503,48 @@ def test_rejects_end_record_and_central_directory_that_readers_could_resolve_dif
         (b"PK\x05\x06", "a second end-of-central-directory signature"),
     ],
 )
-@pytest.mark.parametrize("where", ["first-entry-comment", "last-entry-comment-at-locator-position", "stored-entry-data"])
-def test_rejects_zip64_and_second_end_signatures_anywhere(tmp_path, signature, reason, where):
+@pytest.mark.parametrize("where", ["first-entry-comment", "last-entry-comment-at-locator-position", "before-first-entry", "between-entries", "before-directory"])
+def test_rejects_zip64_and_second_end_signatures_outside_entry_data(tmp_path, signature, reason, where):
     if where == "first-entry-comment":
-        items = [(with_comment("extension.vsixmanifest", signature + b" in a comment"), vsixmanifest())] + entries()[1:]
+        data = zip_bytes([(with_comment("extension.vsixmanifest", signature + b" in a comment"), vsixmanifest())] + entries()[1:])
     elif where == "last-entry-comment-at-locator-position":
         # the last record's comment ends 20 bytes before the end record, where zipfile looks for a Zip64 locator
-        items = entries() + [(with_comment("extension/z.txt", signature + b"\0" * 16), b"")]
+        data = zip_bytes(entries() + [(with_comment("extension/z.txt", signature + b"\0" * 16), b"")])
+    elif where == "before-first-entry":
+        data = with_gap(0, b"gap " + signature)
+    elif where == "between-entries":
+        data = with_gap(local_header(HONEST, "extension/package.json"), b"gap " + signature)
     else:
-        stored = zipfile.ZipInfo("extension/dist/payload.bin")
-        stored.compress_type = zipfile.ZIP_STORED
-        items = entries() + [(stored, b"data " + signature + b" data")]
-    assert f"the archive contains {reason} at offset" in rejected(tmp_path, items)
+        data = with_gap(len(LOCAL), b"gap " + signature)
+    assert f"the archive contains {reason} at offset" in rejected(tmp_path, data)
+
+
+def test_gaps_without_signatures_pass():
+    # The gap alone is not what the scan refuses.
+    for at in (0, local_header(HONEST, "extension/package.json"), len(LOCAL)):
+        assert len(validator.check_structure(with_gap(at, b"gap bytes"))) == COUNT
+
+
+@pytest.mark.parametrize("signature", [b"PK\x06\x06", b"PK\x06\x07", b"PK\x05\x06"])
+def test_rejects_those_signatures_in_trailing_data(tmp_path, signature):
+    assert "last 22 bytes are not an end-of-central-directory record" in rejected(tmp_path, HONEST + signature)
+
+
+@pytest.mark.parametrize("signature", [b"PK\x06\x06", b"PK\x06\x07", b"PK\x05\x06"])
+def test_accepts_those_signatures_inside_entry_data(tmp_path, signature):
+    # Compressed or stored bytes can match by chance, or a bundled zip holds them; no reader looks
+    # for these records there (decision: Ransom, 2026-09-30).
+    stored = zipfile.ZipInfo("extension/dist/payload.bin")
+    stored.compress_type = zipfile.ZIP_STORED
+    write_vsix(tmp_path / "vsix", entries() + [(stored, b"data " + signature + b" data")])
+    assert validator.verify(str(tmp_path / "vsix"), EXTENSION_ID, TAG)[1] == VERSION
+
+
+def test_accepts_a_bundled_zip_stored_as_entry_data(tmp_path):
+    nested = zipfile.ZipInfo("extension/dist/nested.zip")
+    nested.compress_type = zipfile.ZIP_STORED
+    write_vsix(tmp_path / "vsix", entries() + [(nested, DUAL_LOCATOR)])
+    assert validator.verify(str(tmp_path / "vsix"), EXTENSION_ID, TAG)[1] == VERSION
 
 
 @pytest.mark.parametrize("name", ["extension/package.json", "extension.vsixmanifest", "extension/README.md"])

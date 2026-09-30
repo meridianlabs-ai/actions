@@ -331,9 +331,9 @@ jobs:
       # zipfile reads the archive it checks the zip structure itself, since
       # zipfile and vsce's reader (yauzl) do not find the central directory
       # the same way: the end record must be the last 22 bytes (no comment),
-      # with no Zip64 fields, no Zip64 end or locator signature and no
-      # second end-record signature anywhere in the file (entry data
-      # included); the central directory it names must end exactly at it
+      # with no Zip64 fields, and no Zip64 end or locator signature or
+      # second end-record signature anywhere outside entry data (see the
+      # scan for why entry data is skipped); the central directory it names must end exactly at it
       # and hold the number of entries it counts; zipfile must list those
       # same entries; and the manifests' local headers must match their
       # directory records. It then parses extension/package.json and
@@ -507,16 +507,23 @@ jobs:
               for (_, _, prev_end), (next_offset, _, _) in zip(data_ranges, data_ranges[1:]):
                   if next_offset < prev_end:
                       raise Rejected(f"archive entries overlap at offset {next_offset}")
-              # Anywhere in the file, entry data included, so that no reader
-              # can be pointed at a second set of records.
+              # Refuse these signatures anywhere except inside an entry's data
+              # (decision: Ransom, 2026-09-30). Compressed or stored data can
+              # hold those 4 bytes by chance, or legitimately in a bundled zip,
+              # and refusing it would fail honest releases. Skipping it is safe:
+              # both readers take the end record from the last 22 bytes and
+              # read a Zip64 locator only from the 20 bytes before it, which lie
+              # in the central directory since it ends there; that directory
+              # and every local header are outside the data ranges, which come
+              # from the checked directory and do not overlap each other or it.
               for sig, what in ((ZIP64_END_SIG, "a Zip64 end-of-central-directory signature"),
                                 (ZIP64_LOCATOR_SIG, "a Zip64 end-of-central-directory locator signature"),
                                 (END_SIG, "a second end-of-central-directory signature")):
                   at = data.find(sig)
-                  if at == end:  # the end record itself
-                      at = data.find(sig, end + 1)
-                  if at != -1:
-                      raise Rejected(f"the archive contains {what} at offset {at}")
+                  while at != -1:
+                      if at != end and not any(s <= at and at + 4 <= e for _, s, e in data_ranges):
+                          raise Rejected(f"the archive contains {what} at offset {at}")
+                      at = data.find(sig, at + 1)
               return [(name, crc, csize, size, offset) for name, _, crc, csize, size, offset in records]
 
 

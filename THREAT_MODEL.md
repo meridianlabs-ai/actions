@@ -255,12 +255,19 @@ guarantee, and what is by design. To report a vulnerability, see
   before zipfile reads the archive the validator checks its structure: the
   end-of-central-directory record must be the last 22 bytes of the file,
   with no comment, no Zip64 fields and one disk; no Zip64 end record, Zip64
-  locator or second end-record signature may appear anywhere in the file,
-  entry data included; the
+  locator or second end-record signature may appear outside entry data; the
   central directory the end record names must end exactly at it and hold
   the number of entries it counts; zipfile must list those same entries;
   and each manifest's local header (or data descriptor) must match its
-  directory record. A later step, still before any PAT, reads the package
+  directory record. The signature scan skips entry data, where compressed
+  or stored bytes can match by chance (decision: Ransom, 2026-09-30,
+  relaxing the fix's "anywhere in the archive" criterion so honest releases
+  do not fail). That is safe because neither reader looks for these records
+  there: the end record is pinned to the last 22 bytes, the only place a
+  Zip64 locator is read from (the 20 bytes before it) lies in the central
+  directory, and the directory and every local header lie outside the data
+  ranges, which come from the checked directory and may not overlap. A
+  later step, still before any PAT, reads the package
   with `readVSIXPackage` from the pinned vsce (the function and yauzl that
   `vsce publish --packagePath` uses) and fails unless both manifests there
   name the same identity and version. Nothing the build job output is
