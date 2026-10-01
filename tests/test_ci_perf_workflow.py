@@ -411,12 +411,14 @@ def test_the_publisher_result_is_still_reported_when_atlas_fails(tmp_path):
     assert not any("--method" in c["argv"] for c in run.gh_calls)
 
 
-# --- The analyze job: the model key never reaches the agent -----------------
+# --- The analyze job: WIF and agents' launcher ---------------------------------------------
 #
-# The whole-agent isolation of the security work: the key reaches only the
-# broker step, harden-runner keeps sudo (B1), and the analysis runs the entire
-# Claude process as a dedicated unprivileged user through the isolated-agent
-# action rather than as the runner user through claude-code-action.
+# analyze holds nothing the agent may not have: the read-only job token and
+# the model credential, a WIF token for ci-perf's capped workspace that
+# claude-code-action mints from the job's OIDC token. agents' launcher starts
+# the CLI as claude-agent in its own namespace, with the checkout read-only.
+# The runner reads what the agent wrote only through import-codex-final, and
+# shows and uploads only its own directory (finding 4773274).
 
 
 def analyze_steps() -> list[dict]:
@@ -430,70 +432,249 @@ def analyze_step(name: str) -> dict:
     raise KeyError(name)
 
 
-def test_analyze_key_reaches_only_the_broker():
-    for s in analyze_steps():
-        if s.get("id") == "broker":
-            assert set(re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(s))) == {"CI_PERF_ANTHROPIC_API_KEY"}
-        else:
-            assert "ANTHROPIC_API_KEY" not in yaml.safe_dump(s), s.get("name")
-    broker = analyze_step("broker")
-    assert broker["uses"] == "./actions-repo/.github/actions/model-broker"
-    assert broker["with"]["api-key"] == "${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}"
-    checkout = analyze_step("Check out the isolation actions")
-    assert checkout["with"]["sparse-checkout"] == ".github/actions"
+AGENTS = "meridianlabs-ai/agents/.github/actions/{}@main"
+WIF = {
+    "anthropic_federation_rule_id": "fdrl_011HrZrxamS56HuRWRMbqYBH",
+    "anthropic_organization_id": "be5d0086-bc43-45d2-9184-20ecdd647aa7",
+    "anthropic_service_account_id": "svac_01GhGfdWv1dYwL9WEPE2esoV",
+    "anthropic_workspace_id": "wrkspc_0111jFg7osvhUziZXCNh5sfB",
+}
+ALLOWED_ENDPOINTS = {
+    "api.anthropic.com:443",
+    "api.github.com:443",
+    "github.com:443",
+    "claude.ai:443",
+    "downloads.claude.ai:443",
+    "registry.npmjs.org:443",
+    "release-assets.githubusercontent.com:443",
+}
+AFTER_AGENT = ["Reclaim workspace from the agent", "Import the agent's files", "Assemble the evidence", "Show report", "Retain CI evidence outside Git"]
+COLLECTED = ("raw.json", "summary.json", "measurements.md", "previous-summaries.json")
 
 
-def test_analyze_harden_runner_blocks_egress_and_does_not_disable_sudo():
-    with_ = analyze_step("Harden runner")["with"]
-    assert with_["egress-policy"] == "block"
-    # B1: the pre hook would drop sudo before the broker/agent-user bootstrap.
-    assert "disable-sudo-and-containers" not in with_ and "disable-sudo" not in with_
-    endpoints = with_["allowed-endpoints"].split()
-    assert all(e.endswith(":443") for e in endpoints)
-    assert "api.anthropic.com:443" in endpoints  # the broker's upstream
+def test_analyze_runs_the_agent_through_the_launcher_in_order():
+    assert [s["name"] for s in analyze_steps()] == [
+        "Harden runner",
+        "Initialize output directory",
+        "Checkout upstream source for analysis",
+        "Set up Python",
+        "Collect timings and prior summaries",
+        "Create agent user",
+        "Create the scratch directory",
+        "Prepare the agent launch",
+        "Stage the collected data for the agent",
+        "Analyze CI performance",
+        *AFTER_AGENT,
+    ]
 
 
-def test_analyze_runs_the_whole_agent_as_the_isolated_user():
+def test_analyze_references_no_secret_and_holds_reads_plus_id_token():
+    job = jobs()["analyze"]
+    assert job["permissions"] == {"contents": "read", "actions": "read", "issues": "read", "pull-requests": "read", "id-token": "write"}
+    text = yaml.safe_dump(job)
+    assert "secrets." not in text
+    assert "MARVIN" not in text and "create-github-app-token" not in text and "steps.mint" not in text
+
+
+def test_no_model_broker_isolated_agent_or_api_key_remains():
+    assert "ANTHROPIC_API_KEY" not in CI_PERF.read_text()  # not even in a comment
+    text = yaml.safe_dump(workflow())
+    for gone in ("anthropic_api_key", "claude_code_oauth_token", "model-broker", "isolated-agent", "actions-repo"):
+        assert gone not in text, gone
+    for job in jobs().values():
+        assert not any(str(s.get("uses", "")).startswith("./") for s in job["steps"])
+
+
+def test_only_analyze_can_request_an_oidc_token_and_its_agent_passes_the_job_token():
+    assert "permissions" not in workflow()  # no workflow-level grant reaching every job
+    holders = [name for name, job in jobs().items() if "id-token" in (job.get("permissions") or {})]
+    assert holders == ["analyze"]
+    actions = [s for job in jobs().values() for s in job["steps"] if str(s.get("uses", "")).startswith("anthropics/claude-code-action")]
+    assert actions == [analyze_step("analysis")]
+    assert actions[0]["with"]["github_token"] == "${{ github.token }}"
+
+
+def test_the_agent_step_authenticates_with_wif_through_the_launcher():
     agent = analyze_step("analysis")
-    assert agent["uses"] == "./actions-repo/.github/actions/isolated-agent"
+    assert agent["uses"] == "anthropics/claude-code-action@v1"
     w = agent["with"]
-    assert w["token"] == "${{ steps.broker.outputs.token }}"
-    assert w["base-url"] == "${{ steps.broker.outputs.base-url }}"
-    assert w["github-token"] == "${{ github.token }}"
-    assert w["write-dir"] == "${{ env.CI_PERF_OUTPUT_DIR }}"
-    args = w["claude-args"].split()
+    assert {k: w[k] for k in WIF} == WIF
+    assert w["github_token"] == "${{ github.token }}"
+    assert w["path_to_claude_code_executable"] == "${{ steps.launcher.outputs.executable }}"
+    assert w["classify_inline_comments"] == "false"
+    # No static credential (the action ignores WIF when a key is set), and no
+    # transcript in the log or the step summary (the defaults).
+    assert set(w) == {*WIF, "github_token", "path_to_claude_code_executable", "classify_inline_comments", "claude_args", "settings", "prompt"}
+    # The job output that gates publish comes from the action's conclusion.
+    assert jobs()["analyze"]["outputs"]["analysis_conclusion"] == "${{ steps.analysis.outputs.conclusion }}"
+
+
+def test_the_agent_step_args_and_settings():
+    w = analyze_step("analysis")["with"]
+    args = w["claude_args"].replace("${{ runner.temp }}", "/rt").split()
     # The Opus alias, not a dated model id, at default reasoning effort.
     assert args[args.index("--model") + 1] == "opus"
     assert not any(a.startswith("--effort") for a in args)
-    # forward-env carries only non-secret values the prompt names.
-    forwarded = {ln.split("=", 1)[0] for ln in w["forward-env"].splitlines() if "=" in ln}
-    assert forwarded == {"CI_PERF_OUTPUT_DIR", "CI_PERF_RUN_URL"}
-    assert "ANTHROPIC" not in w["forward-env"] and "secrets." not in w["forward-env"]
-    assert "secrets." not in yaml.safe_dump(agent)
-    # The job output that gates publish comes from the action's conclusion.
-    outputs = yaml.safe_load(CI_PERF.read_text())["jobs"]["analyze"]["outputs"]
-    assert outputs["analysis_conclusion"] == "${{ steps.analysis.outputs.conclusion }}"
-    assert "anthropics/claude-code-action" not in yaml.safe_dump(yaml.safe_load(CI_PERF.read_text())["jobs"]["analyze"])
+    assert args[args.index("--allowedTools") + 1] == "Bash,Read,Edit,Write,Grep,Glob"
+    # Nothing is loaded from the checkout: no settings, hooks, CLAUDE.md or skills.
+    assert args[args.index("--setting-sources") + 1] == "user"
+    assert args[args.index("--add-dir") + 1] == "/rt/claude-agent"
+    # The wrapper's environment allow-list drops every other variable, so the
+    # two values the prompt names travel as settings env; neither is a secret.
+    rendered = w["settings"].replace("${{ runner.temp }}", "/rt").replace("${{ env.CI_PERF_RUN_URL }}", RUN_URL)
+    assert "${{" not in rendered
+    assert json.loads(rendered) == {"env": {
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CI_PERF_OUTPUT_DIR": "/rt/claude-agent",
+        "CI_PERF_RUN_URL": RUN_URL,
+    }}
 
 
-def test_analyze_has_no_runner_side_secret_scan_and_publishes_unconditionally():
-    names = [s.get("name") for s in analyze_steps()]
-    # The removed control: no post-agent secret scan (there is no reusable
-    # secret to screen for, and it would run where the agent could shim it).
-    assert not any("Refuse to publish" in (n or "") for n in names)
-    after = analyze_steps()[[s.get("id") for s in analyze_steps()].index("analysis") + 1:]
-    assert [s["name"] for s in after] == ["Stop the model broker", "Show report", "Retain CI evidence outside Git"]
+def test_the_checkout_is_at_the_workspace_root_and_the_paths_follow_it():
+    (checkout,) = upstream_checkouts("analyze")
+    assert "path" not in checkout["with"]  # the launcher needs a git checkout at the root
+    collect = analyze_step("data")["run"]
+    assert collect.count("python .claude/skills/ci-perf/scripts/") == 3
+    prompt = analyze_step("analysis")["with"]["prompt"]
+    assert ".claude/skills/ci-perf/SKILL.md" in prompt and "design/ci-perf/" in prompt
+    assert "inspect_ai/" not in collect and "inspect_ai/" not in prompt.replace("meridianlabs-ai/inspect_ai", "")
+
+
+def test_the_launcher_composites_take_grant_none_and_gate_in_order():
+    agentuser = analyze_step("agentuser")
+    assert agentuser["uses"] == AGENTS.format("create-codex-user")
+    assert agentuser["with"] == {"user": "claude-agent", "grant": "none"}
+    launcher = analyze_step("launcher")
+    assert launcher["uses"] == AGENTS.format("claude-agent-launcher")
+    assert launcher["with"] == {"grant": "none"}
+    # grant: none binds $RUNNER_TEMP/scratch into the namespace and requires it.
+    assert analyze_step("Create the scratch directory")["run"].strip() == 'sudo install -d -o claude-agent -g claude-agent -m 0700 "$RUNNER_TEMP/scratch"'
+    reclaim = analyze_step("agentreclaim")
+    assert reclaim["uses"] == AGENTS.format("reclaim-codex-workspace")
+    assert reclaim["with"] == {"user": "claude-agent"}
+    assert reclaim["if"] == "always() && steps.agentuser.outcome == 'success'"
+    imp = analyze_step("import")
+    assert imp["uses"] == AGENTS.format("import-codex-final")
+    assert imp["with"] == {"mode": "dir", "dest": "${{ runner.temp }}/ci-perf-agent"}
+    assert imp["if"] == "always() && steps.agentreclaim.outcome == 'success'"
+    assert analyze_step("Assemble the evidence")["if"] == "always() && steps.import.outcome == 'success'"
+
+
+def test_analyze_harden_runner_allows_exactly_its_hosts_and_does_not_disable_sudo():
+    harden = analyze_steps()[0]
+    assert harden["name"] == "Harden runner"
+    with_ = harden["with"]
+    assert with_["egress-policy"] == "block"
+    # B1: the pre hook would drop sudo before the agent-user setup and the launcher.
+    assert "disable-sudo-and-containers" not in with_ and "disable-sudo" not in with_
+    endpoints = with_["allowed-endpoints"].split()
+    assert len(endpoints) == len(ALLOWED_ENDPOINTS) and set(endpoints) == ALLOWED_ENDPOINTS
+
+
+def test_no_step_after_the_agent_holds_a_secret_or_reads_the_landing_directory():
+    names = [s["name"] for s in analyze_steps()]
+    after = analyze_steps()[names.index("Analyze CI performance") + 1:]
+    assert [s["name"] for s in after] == AFTER_AGENT
     for s in after:
-        assert set(re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(s))) == set(), s["name"]
+        assert "secrets." not in yaml.safe_dump(s), s["name"]
+    # Only the reclaim (by user) and the import (its default source) touch
+    # the landing directory; the rest read the runner's own directory.
+    for s in after[2:]:
+        assert "claude-agent" not in yaml.safe_dump(s), s["name"]
     assert analyze_step("Show report")["if"] == "always()"
-    assert analyze_step("Retain CI evidence outside Git")["if"] == "always()"
+    retain = analyze_step("Retain CI evidence outside Git")
+    assert retain["if"] == "always()"
+    assert retain["with"]["path"] == "${{ runner.temp }}/ci-perf/"
 
 
-def test_analyze_holds_read_permissions_and_no_marvin_identity():
-    job = yaml.safe_load(CI_PERF.read_text())["jobs"]["analyze"]
-    assert set(job["permissions"].values()) == {"read"}
-    text = yaml.safe_dump(job)
-    assert "MARVIN" not in text and "create-github-app-token" not in text and "steps.mint" not in text
+# `sudo`: records its argv; runs `install` without the owner flags, which
+# need root.
+FAKE_SUDO = f'''#!{sys.executable}
+import os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_SUDO_LOG"], "a") as log:
+    log.write(" ".join(args) + "\\n")
+if args[:1] != ["install"]:
+    sys.exit(f"fake sudo: unexpected call {{args}}")
+rest, i = [], 1
+while i < len(args):
+    if args[i] in ("-o", "-g"):
+        i += 2
+        continue
+    rest.append(args[i])
+    i += 1
+sys.exit(subprocess.run(["install", *rest]).returncode)
+'''
+
+
+def test_the_agent_gets_copies_of_the_collected_data(tmp_path):
+    rt = tmp_path / "rt"
+    out = rt / "ci-perf"
+    out.mkdir(parents=True)
+    (rt / "claude-agent").mkdir()
+    for name in COLLECTED:
+        (out / name).write_text(INPUTS[name])
+    log = tmp_path / "sudo.log"
+    env = {"PATH": f"{bin_dir(tmp_path, sudo=FAKE_SUDO)}:{os.environ['PATH']}", "RUNNER_TEMP": str(rt), "CI_PERF_OUTPUT_DIR": str(out), "FAKE_SUDO_LOG": str(log)}
+    r = run_bash(analyze_step("Stage the collected data for the agent")["run"], cwd=tmp_path, env=env)
+    assert r.returncode == 0, r.stderr
+    assert log.read_text().splitlines() == [f"install -o claude-agent -g claude-agent -m 0644 {out}/{n} {rt}/claude-agent/{n}" for n in COLLECTED]
+    for name in COLLECTED:
+        assert (rt / "claude-agent" / name).read_text() == (out / name).read_text()
+
+
+def run_post_agent(tmp_path: Path, *, imported: dict[str, str] | None) -> tuple[Path, str]:
+    """Run Assemble the evidence and Show report after an agent that planted
+    links in its landing directory. `imported` is what import-codex-final
+    copied (regular files only), None when it refused the import."""
+    rt = tmp_path / "rt"
+    out = rt / "ci-perf"
+    out.mkdir(parents=True)
+    for name in COLLECTED:
+        (out / name).write_text(INPUTS[name])
+    secret = tmp_path / "environ"
+    secret.write_text("ACTIONS_ID_TOKEN_REQUEST_TOKEN=SECRET\n")
+    landing = rt / "claude-agent"
+    landing.mkdir()
+    for name in ("report.md", "findings.json", "measurements.md"):
+        (landing / name).symlink_to(secret)
+    if imported is not None:
+        (rt / "ci-perf-agent").mkdir()
+        for name, text in imported.items():
+            (rt / "ci-perf-agent" / name).write_text(text)
+    summary = tmp_path / "summary.md"
+    summary.touch()
+    job_env = {"RUNNER_TEMP": str(rt), "CI_PERF_OUTPUT_DIR": str(out), "GITHUB_STEP_SUMMARY": str(summary)}
+    values = {"runner.temp": str(rt), "github.event_name == 'workflow_dispatch' && inputs.dry_run": "true"}
+
+    def render(text: str) -> str:
+        return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda m: values[m.group(1)], text)
+
+    for name in ("Assemble the evidence", "Show report"):
+        s = analyze_step(name)
+        env = {**job_env, **{k: render(str(v)) for k, v in (s.get("env") or {}).items()}}
+        r = run_bash(s["run"], cwd=tmp_path, env=env)
+        assert r.returncode == 0, (name, r.stderr)
+    return out, summary.read_text()
+
+
+def test_post_agent_reads_never_follow_the_agents_links(tmp_path):
+    # The agent also rewrote its staged raw.json: only report.md and
+    # findings.json join the runner's collected data.
+    out, summary = run_post_agent(tmp_path, imported={"report.md": "# Imported report\n", "findings.json": "[]\n", "raw.json": "tampered\n"})
+    assert "SECRET" not in summary
+    assert summary == "Dry-run: true\n\n# Imported report\n\n# Measurements\n\n"
+    assert (out / "report.md").read_text() == "# Imported report\n" and not (out / "report.md").is_symlink()
+    assert (out / "findings.json").read_text() == "[]\n"
+    assert (out / "raw.json").read_text() == INPUTS["raw.json"]
+    assert sorted(p.name for p in out.iterdir()) == sorted([*COLLECTED, "report.md", "findings.json"])
+
+
+def test_a_refused_import_adds_nothing_from_the_agent(tmp_path):
+    out, summary = run_post_agent(tmp_path, imported=None)
+    assert "SECRET" not in summary
+    assert summary == "Dry-run: true\n\n# Measurements\n\n"
+    assert sorted(p.name for p in out.iterdir()) == sorted(COLLECTED)
 
 
 def test_every_job_restores_caches_but_cannot_save_them():

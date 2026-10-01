@@ -5,8 +5,8 @@
 # resolve reads the commit upstream `main` points at, once, and runs nothing
 # else. tooling, analyze and publish all check out that commit, so the three
 # test, analyze and publish the same code. No job takes a ref from a person:
-# the job that runs the analyzed commit's scripts holds the model key, and
-# only upstream `main` is trusted code (decision: Ransom, 2026-09-30).
+# the job that runs the analyzed commit's scripts holds the model credential,
+# and only upstream `main` is trusted code (decision: Ransom, 2026-09-30).
 #
 # tooling runs upstream's ci-perf script tests. It installs pytest from PyPI,
 # which is third-party code, so it runs in its own job with only a read-only
@@ -17,9 +17,9 @@
 # upstream CI logs, upstream PR titles and bodies, and fork issue text, so its
 # runner is untrusted once the agent has run: injected text could leave a gh
 # shim on $GITHUB_PATH, a variable in $GITHUB_ENV, or a .pth file in the
-# ambient Python. analyze holds only read tokens (the capped Anthropic key is
-# in the model broker, a process the agent cannot read) and uploads its
-# evidence as an artifact.
+# ambient Python. analyze holds nothing the agent may not have: the read-only
+# job token and the model credential (below). It uploads its evidence as an
+# artifact.
 #
 # publish runs on a fresh runner the agent never had. It downloads that
 # artifact, checks the collected data against the sha256 values recorded
@@ -30,21 +30,33 @@
 # consume the validated report.md and findings.json plus the pinned summary.
 # Validation constrains the proposals' shape, not their factual correctness.
 #
-# Secrets:
-# - CI_PERF_ANTHROPIC_API_KEY: a key from a dedicated Anthropic Console
-#   workspace with a monthly spend cap, added as an org secret scoped to this
-#   repository. The agent never holds it. Two Unix users besides the runner
-#   carry the separation: the model broker (.github/actions/model-broker)
-#   reads the key into a process running as the model-broker user and
-#   forwards Messages API calls, and nothing else, to api.anthropic.com; the
-#   agent (.github/actions/isolated-agent) runs the whole Claude process as a
-#   third, unprivileged user whose ANTHROPIC_API_KEY is only the broker's
-#   per-run token (good only for 127.0.0.1 while the broker is alive) and
-#   whose ANTHROPIC_BASE_URL is the broker. The agent cannot read the broker
-#   user's key file or memory, cannot read the runner process's memory or its
-#   .NET diagnostic socket (where the runner keeps every job secret for
-#   masking), and cannot sudo. The cap bounds what the agent can spend through
-#   the broker during the job. Until the secret exists the broker step fails.
+# The model credential (design/agent-jobs-workload-identity.md): Anthropic
+# workload identity federation. claude-code-action exchanges the job's GitHub
+# OIDC token (audience https://api.anthropic.com) for a short-lived Anthropic
+# token under a federation rule that admits only this workflow on `main`
+# (schedule and workflow_dispatch). The token acts as a service account that
+# belongs only to the ci-perf workspace, which has a spend cap; it is scoped
+# to workspace:inference and lives at most 600 s. The agent can read it: it
+# is the declared exception, bounded by the cap, its lifetime and the rule,
+# not kept secret. analyze references no long-lived Anthropic key, and
+# `id-token: write` is there for this exchange alone. The rule, service
+# account, workspace and organization IDs below are addresses, not secrets.
+#
+# The agent runs as the unprivileged claude-agent user through agents'
+# launcher (create-codex-user, claude-agent-launcher, reclaim-codex-workspace
+# and import-codex-final from meridianlabs-ai/agents), in its own PID and
+# mount namespace with an allow-listed environment: no runner command-file
+# variable, no OIDC request variable, only the job token as GH_TOKEN. The
+# upstream checkout at the workspace root is read-only to it (grant: none).
+# It writes only its landing directory, $RUNNER_TEMP/claude-agent, which the
+# runner reads back only through import-codex-final (regular files owned by
+# the agent, opened without following links, size-capped). The runner's own
+# $RUNNER_TEMP/ci-perf, which the agent never sees, holds the collected data
+# and the imported report.md and findings.json; Show report and the artifact
+# read only that directory. github_token is the job token, so the action
+# mints no Claude App token.
+#
+# Secrets (publish only):
 # - MARVIN_APP_CLIENT_ID and MARVIN_APP_PRIVATE_KEY: the meridian-marvin
 #   GitHub App, used only in publish, which mints a token scoped to the
 #   inspect_ai fork with issues and organization-projects write (its only
@@ -55,56 +67,52 @@
 # Egress: harden-runner runs in analyze with egress-policy block.
 # allowed-endpoints is the egress observed in audit mode on run
 # https://github.com/meridianlabs-ai/actions/actions/runs/34880688791:
-# Anthropic (api.anthropic.com, now reached only by the broker; claude.ai
-# and downloads.claude.ai are the
-# action's Claude Code installer), GitHub (github.com and api.github.com,
+# Anthropic (api.anthropic.com, the CLI's inference and token exchange from
+# the agent's namespace; claude.ai and downloads.claude.ai are the
+# launcher's Claude Code installer), GitHub (github.com and api.github.com,
 # listed explicitly in case the agent's meta-domain fetch fails;
-# release-assets.githubusercontent.com is the action downloading a release
-# asset) and the package indexes (registry.npmjs.org for the action;
-# pypi.org and files.pythonhosted.org were for the tooling test's install,
-# which now runs in the tooling job, and go with the rest of the egress
-# change in step 4 of design/agent-jobs-workload-identity.md). The agent
-# allows GitHub Actions infrastructure without listing: the GitHub meta
-# domains (github.com, *.github.com, *.githubapp.com, ghcr.io),
-# *.actions.githubusercontent.com, codeload.github.com,
+# release-assets.githubusercontent.com is the action's setup-bun) and
+# registry.npmjs.org (the action's bun install). Nothing in analyze installs
+# from PyPI. harden-runner allows GitHub Actions infrastructure without
+# listing: the GitHub meta domains (github.com, *.github.com,
+# *.githubapp.com, ghcr.io), *.actions.githubusercontent.com (the OIDC
+# endpoint among them), codeload.github.com,
 # productionresultssa*.blob.core.windows.net, and the Azure wire and
-# metadata IPs. Claude Code's telemetry intake (datadoghq.com) is not
-# allowed; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC on the analysis step
-# stops Claude Code from attempting telemetry, error reporting and update
-# checks. A newly needed endpoint shows up as a blocked call in the
-# harden-runner step summary and as a job annotation; add it only if it is
-# clearly required, that is an Anthropic, GitHub or package-index host.
-# publish needs no allow-list: its only egress is GitHub. resolve and
-# tooling get no harden-runner: they hold nothing that reaches beyond the
-# job.
+# metadata IPs. The agent's namespace shares the host network, so the
+# firewall applies to it. Claude Code's telemetry intake (datadoghq.com) is
+# not allowed; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC in the analysis
+# step's settings stops Claude Code from attempting telemetry, error
+# reporting and update checks. A newly needed endpoint shows up as a blocked
+# call in the harden-runner step summary and as a job annotation; add it
+# only if it is clearly required, that is an Anthropic, GitHub or
+# package-index host. publish needs no allow-list: its only egress is
+# GitHub. resolve and tooling get no harden-runner: they hold nothing that
+# reaches beyond the job.
 #
 # Privileges: harden-runner does NOT disable sudo here. Its hardening runs in
 # a `pre` hook that GitHub runs before every job step, so a
-# disable-sudo-and-containers would take sudo away before the broker start
-# and the agent-user setup, both of which need it (review round 1, B1).
-# Instead the untrusted agent runs as its own unprivileged user (not in sudo
-# or docker), so it cannot alter the egress firewall or read another user's
-# files as root; the isolated-agent action's own check fails the job before
-# the agent if sudo or Docker are reachable to that user, if ptrace_scope
-# would let it read another process, or if the broker or runner processes are
-# open to it. Nothing untrusted runs as the runner user, so the runner
-# keeping sudo is not a path for the agent.
+# disable-sudo-and-containers would take sudo away before the agent-user
+# setup and the launcher, which need it (review round 1, B1). Instead the
+# untrusted agent runs as its own unprivileged user (not in sudo or docker),
+# so it cannot alter the egress firewall or read another user's files as
+# root; the launcher's isolation check fails the job before the agent if
+# sudo or Docker are reachable to that user, if ptrace_scope would let it
+# read another process, or if a runner process or command file is open to
+# it.
 #
 # What the allow-list does and does not do: it stops connections to hosts
 # not on the list. It does not stop an upload to an attacker's own resource
 # on a listed multi-tenant host (a github.com repository or gist, an npm
 # package) authenticated with a credential the attacker put in the text the
-# agent reads. So the allow-list is not what keeps the key confidential; the
-# broker is. What the agent can still move off the runner is what it can
-# read: the read-only job token (this repository, expires with the job) and
-# the collected data, which is public.
+# agent reads. What the agent can move off the runner is what it can read:
+# the read-only job token (this repository, expires with the job), the
+# collected data, which is public, and the model credential, worth at most
+# 600 s of inference in the capped workspace.
 #
 # Published output: this repo is public, so the job summary and the artifact
-# are world-readable. They carry whatever the agent wrote, unscreened: the
-# agent holds no reusable secret (the key is in the broker, reachable only by
-# the model-broker user, and the agent runs as its own unprivileged user), so
-# there is nothing to screen for, and a scan on a runner the agent could have
-# shimmed would not be a control anyway.
+# are world-readable. They carry the agent's report.md and findings.json,
+# unscreened: what it can leak there is what it can read (above), and a scan
+# on a runner the agent could have shimmed would not be a control anyway.
 #
 # Publication result (publish job): the downloaded artifact is agent-written
 # and may carry a published.json of its own. The Publish step deletes that
@@ -190,6 +198,7 @@ jobs:
       actions: read
       issues: read
       pull-requests: read
+      id-token: write  # the Anthropic WIF exchange only (see the header)
     env:
       CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
       CI_PERF_SCHEDULED: "1"
@@ -202,32 +211,14 @@ jobs:
       analysis_conclusion: ${{ steps.analysis.outputs.conclusion }}
 
     steps:
-      # This repo's own code at the workflow's commit, for the local model-broker
-      # and isolated-agent actions. It does not matter that harden-runner's pre
-      # hook (below) has already programmed the egress firewall: the fetch is to
-      # github.com, which the allow-list permits.
-      - name: Check out the isolation actions
-        uses: actions/checkout@v7
-        with:
-          path: actions-repo
-          sparse-checkout: .github/actions
-          persist-credentials: false
-
-      - name: Start the model broker
-        id: broker
-        uses: ./actions-repo/.github/actions/model-broker
-        with:
-          api-key: ${{ secrets.CI_PERF_ANTHROPIC_API_KEY }}
-          lifetime-minutes: "90"
-
       # egress-policy block only. sudo and containers are deliberately NOT
       # disabled here: harden-runner does that in its `pre` hook, which runs
-      # before every step including the broker start and the agent-user setup,
+      # before every step including the agent-user setup and the launcher,
       # both of which need sudo (review round 1, B1). Instead the untrusted
-      # agent runs as its own unprivileged user (the isolated-agent action),
-      # which is not in sudo or docker and so cannot alter the firewall or read
-      # another user's files as root; the isolation check inside that action
-      # fails the job before the agent if that boundary does not hold.
+      # agent runs as its own unprivileged user, which is not in sudo or
+      # docker and so cannot alter the firewall or read another user's files
+      # as root; the launcher's isolation check fails the job before the
+      # agent if that boundary does not hold.
       - name: Harden runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
@@ -240,18 +231,19 @@ jobs:
             downloads.claude.ai:443
             registry.npmjs.org:443
             release-assets.githubusercontent.com:443
-            pypi.org:443
-            files.pythonhosted.org:443
 
+      # The runner's own directory: the collected data, and later the
+      # agent's imported report.md and findings.json. The agent never sees it.
       - name: Initialize output directory
         run: echo "CI_PERF_OUTPUT_DIR=$RUNNER_TEMP/ci-perf" >> "$GITHUB_ENV"
 
+      # At the workspace root: the launcher's composites need a git checkout
+      # there, and mount it read-only into the agent's namespace.
       - name: Checkout upstream source for analysis
         uses: actions/checkout@v7
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.resolve.outputs.sha }}
-          path: inspect_ai
           persist-credentials: false
 
       - name: Set up Python
@@ -266,47 +258,95 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python inspect_ai/.claude/skills/ci-perf/scripts/collect_ci_data.py \
+          python .claude/skills/ci-perf/scripts/collect_ci_data.py \
             --out "$CI_PERF_OUTPUT_DIR/raw.json"
-          python inspect_ai/.claude/skills/ci-perf/scripts/summarize_ci_data.py \
+          python .claude/skills/ci-perf/scripts/summarize_ci_data.py \
             "$CI_PERF_OUTPUT_DIR/raw.json" \
             --out "$CI_PERF_OUTPUT_DIR/summary.json" \
             --markdown "$CI_PERF_OUTPUT_DIR/measurements.md"
-          python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
+          python .claude/skills/ci-perf/scripts/publish_ci_findings.py \
             --directory "$CI_PERF_OUTPUT_DIR" --read-history
           echo "raw_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/raw.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "measurements_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/measurements.md" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "summary_sha=$(sha256sum "$CI_PERF_OUTPUT_DIR/summary.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      # The entire Claude process runs as a dedicated unprivileged user (the
-      # isolated-agent action), pointed at the broker on loopback with its
-      # per-run token as ANTHROPIC_API_KEY; the reusable key is never in this
-      # agent's environment, files or reachable processes. The action's own
-      # isolation check fails the job before the agent if that does not hold.
-      # `conclusion` (success/failure) drives the publish job. --model opus
-      # pins the model to the Opus alias, which Claude Code resolves to the
-      # latest Opus release (was the action's default). CI_PERF_OUTPUT_DIR and CI_PERF_RUN_URL are non-secret values
-      # the prompt refers to, forwarded into the agent's otherwise-empty
-      # environment.
+      # The agent user, its landing directory $RUNNER_TEMP/claude-agent and
+      # /opt/meridian-agent. grant: none leaves the checkout runner-owned
+      # and read-only to the agent. The reclaim after the agent gates on
+      # this step's id.
+      - name: Create agent user
+        id: agentuser
+        uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
+        with:
+          user: claude-agent
+          grant: none
+
+      # The agent's namespace binds this directory in grant: none mode and
+      # requires it; nothing here uses it.
+      - name: Create the scratch directory
+        run: sudo install -d -o claude-agent -g claude-agent -m 0700 "$RUNNER_TEMP/scratch"
+
+      # Claude Code root-owned at the version claude-code-action pins, the
+      # wrapper the action spawns as the CLI, the pre-agent isolation check,
+      # a kill of every claude-agent process and an emptied landing
+      # directory.
+      - name: Prepare the agent launch
+        id: launcher
+        uses: meridianlabs-ai/agents/.github/actions/claude-agent-launcher@main
+        with:
+          grant: none
+
+      # After the launcher, which empties the landing directory. The agent
+      # reads these copies; the runner keeps its own in $CI_PERF_OUTPUT_DIR,
+      # and those are what the artifact carries.
+      - name: Stage the collected data for the agent
+        run: |
+          for file in raw.json summary.json measurements.md previous-summaries.json; do
+            sudo install -o claude-agent -g claude-agent -m 0644 "$CI_PERF_OUTPUT_DIR/$file" "$RUNNER_TEMP/claude-agent/$file"
+          done
+
+      # claude-code-action in agent mode (the prompt input). The wrapper the
+      # launcher installed starts the CLI as claude-agent in its namespace,
+      # with an allow-listed environment, so the two values the prompt names
+      # travel as settings env. --setting-sources user loads no settings,
+      # hooks, CLAUDE.md or skills from the checkout. A failed CLI run fails
+      # this step; `conclusion` (set on success) drives the publish job.
+      # --model opus pins the model to the Opus alias, which Claude Code
+      # resolves to the latest Opus release. No anthropic_api_key: the
+      # action ignores WIF when a key is set.
       - name: Analyze CI performance
         id: analysis
-        uses: ./actions-repo/.github/actions/isolated-agent
+        uses: anthropics/claude-code-action@v1
         with:
-          base-url: ${{ steps.broker.outputs.base-url }}
-          token: ${{ steps.broker.outputs.token }}
-          github-token: ${{ github.token }}
-          write-dir: ${{ env.CI_PERF_OUTPUT_DIR }}
-          claude-args: "--model opus --allowedTools Bash,Read,Edit,Write,Grep,Glob"
-          forward-env: |
-            CI_PERF_OUTPUT_DIR=${{ env.CI_PERF_OUTPUT_DIR }}
-            CI_PERF_RUN_URL=${{ env.CI_PERF_RUN_URL }}
+          anthropic_federation_rule_id: fdrl_011HrZrxamS56HuRWRMbqYBH
+          anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
+          anthropic_service_account_id: svac_01GhGfdWv1dYwL9WEPE2esoV
+          anthropic_workspace_id: wrkspc_0111jFg7osvhUziZXCNh5sfB
+          # The job token, so the action mints no Claude App token.
+          github_token: ${{ github.token }}
+          path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}
+          # Nothing may be posted from the action's buffered post-step.
+          classify_inline_comments: "false"
+          claude_args: >-
+            --model opus
+            --allowedTools Bash,Read,Edit,Write,Grep,Glob
+            --setting-sources user
+            --add-dir ${{ runner.temp }}/claude-agent
+          settings: |
+            {
+              "env": {
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "CI_PERF_OUTPUT_DIR": "${{ runner.temp }}/claude-agent",
+                "CI_PERF_RUN_URL": "${{ env.CI_PERF_RUN_URL }}"
+              }
+            }
           prompt: |
             Run the scheduled analysis described in
-            inspect_ai/.claude/skills/ci-perf/SKILL.md.
+            .claude/skills/ci-perf/SKILL.md.
             Collection is already complete in CI_PERF_OUTPUT_DIR. Read the
             raw snapshot, summary.json and previous-summaries.json there.
             The one-time baseline and archived report/ledger are under
-            inspect_ai/design/ci-perf/. The source being analyzed is inspect_ai/.
+            design/ci-perf/. The source being analyzed is the working directory.
 
             Write report.md and findings.json in CI_PERF_OUTPUT_DIR.
             Analyze only: do not edit the checkout, implement fixes,
@@ -318,22 +358,42 @@ jobs:
             Missing observations are not zero. Do not retry known permission
             blockers. Do not run the collector again.
 
-      # The broker runs as model-broker, so the runner user cannot signal it:
-      # it exits when this file appears. From here on the runner is the
-      # agent's; this step is diagnostics (the broker's log names each
-      # forwarded call by method and path) and authorizes nothing.
-      - name: Stop the model broker
-        if: always() && steps.broker.outcome == 'success'
-        env:
-          STOP_FILE: ${{ steps.broker.outputs.stop-file }}
-        run: |
-          touch "$STOP_FILE"
-          for _ in $(seq 1 20); do
-            pgrep -u model-broker -x python3 >/dev/null 2>&1 || break
-            sleep 0.5
-          done
-          cat /var/lib/model-broker/broker.log
+      # First after the agent, whatever its outcome: kills any survivor,
+      # removes the WIF ACL entries and the agent's config directory, and
+      # restores .git/config. The import is gated on it.
+      - name: Reclaim workspace from the agent
+        id: agentreclaim
+        if: always() && steps.agentuser.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+        with:
+          user: claude-agent
 
+      # The only runner-side read of the landing directory: each regular,
+      # single-link file owned by claude-agent, opened without following
+      # links and within the size caps, copied into a fresh runner-only
+      # directory. Anything else is skipped with a warning.
+      - name: Import the agent's files
+        id: import
+        if: always() && steps.agentreclaim.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
+        with:
+          mode: dir
+          dest: ${{ runner.temp }}/ci-perf-agent
+
+      # Only the two files the agent was asked for join the collected data.
+      # Its staged copies of the data are not used: the runner's own are.
+      - name: Assemble the evidence
+        if: always() && steps.import.outcome == 'success'
+        env:
+          AGENT_FILES: ${{ runner.temp }}/ci-perf-agent
+        run: |
+          for file in report.md findings.json; do
+            if test -f "$AGENT_FILES/$file"; then
+              cp -- "$AGENT_FILES/$file" "$CI_PERF_OUTPUT_DIR/$file"
+            fi
+          done
+
+      # Both read only $CI_PERF_OUTPUT_DIR, which the agent never had.
       - name: Show report
         if: always()
         env:

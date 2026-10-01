@@ -158,11 +158,32 @@ guarantee, and what is by design. To report a vulnerability, see
 
 ## Guarantees (true on `main`)
 
-- The `analyze` and `agent` jobs hold only the read-only job token; their
-  Anthropic keys (`CI_PERF_ANTHROPIC_API_KEY` and `TRIAGE_ANTHROPIC_API_KEY`,
-  each from a dedicated Console workspace with a spend cap; triage does not
-  use the `ANTHROPIC_API_KEY` the test suites run with) are never in the
-  agent's environment, files or reachable processes. Three Unix users carry
+- ci-perf's `analyze` job holds nothing the agent may not have: the
+  read-only job token, and the model credential, which is the declared
+  exception. That credential is an Anthropic workload identity federation
+  token for ci-perf's own Console workspace, which has a spend cap. It is
+  scoped to `workspace:inference`, lives at most 600 seconds, and is minted
+  under a rule that matches only `inspect-ai-ci-perf.yml` on `main`. The
+  job also holds the OIDC request token that mints it. No other relying
+  party is known to accept this repository's tokens: the Claude GitHub App
+  is not installed on it, and no other federation rule matches this
+  workflow. No long-lived Anthropic key is referenced in the workflow.
+  The agent runs as `claude-agent` through agents' `claude-agent-launcher`
+  and claude-code-action in agent mode, with `github_token` set to the job
+  token, in its own PID and mount namespace, as defence in depth. The
+  launcher's isolation check fails the job before the CLI starts if the
+  agent can `sudo`, reach Docker, or reach another user's processes, the
+  runner command files or the runner's install directory. The checkout is
+  read-only to the agent, and it writes only its landing directory. The
+  runner reads that directory only through `import-codex-final` (regular
+  files owned by the agent, opened without following links, size-capped),
+  and `Show report` and the evidence artifact read only the runner's own
+  directory, which the agent never had.
+- Triage's `agent` job holds only the read-only job token; its Anthropic
+  key (`TRIAGE_ANTHROPIC_API_KEY`, from a dedicated Console workspace with a
+  spend cap; triage does not use the `ANTHROPIC_API_KEY` the test suites
+  run with) is never in the agent's environment, files or reachable
+  processes. Three Unix users carry
   the separation. The runner user does the trusted bootstrap. The model
   broker (`.github/actions/model-broker`) reads the key into a process
   running as the `model-broker` user and forwards Messages API calls, and
@@ -278,8 +299,9 @@ guarantee, and what is by design. To report a vulnerability, see
   differentials beyond those they reject by name, and the marketplaces
   parse the uploaded package with their own readers.
 - Both agent jobs run under harden-runner's egress allow-list (Anthropic,
-  reached only by the broker; GitHub; the action's installer; for ci-perf
-  the Python package indexes). harden-runner does not disable sudo here: its
+  reached in triage only by the broker and in ci-perf by the agent's CLI;
+  GitHub; the Claude Code installer and the action's dependencies).
+  harden-runner does not disable sudo here: its
   hardening runs in a `pre` hook that GitHub runs before every step, so a
   `disable-sudo-and-containers` would take sudo away before the broker start
   and agent-user setup that need it; the agent is powerless because it runs
@@ -291,16 +313,22 @@ guarantee, and what is by design. To report a vulnerability, see
   summary, artifact, issue body and Slack text an agent job produces are
   published unscreened. What any of these can carry is what the agent can
   read: the run token, the read-only job token (this repository, expired
-  when the job ends) and the inputs, which are public. Agent output is not
-  screened for secrets because a screen on the agent's runner would be the
-  agent's to defeat and there is no reusable secret to screen for.
+  when the job ends) and the inputs, which are public. In ci-perf it can
+  also carry the minted Anthropic token, usable by whoever copies it for
+  the rest of its life (at most 600 seconds) for inference in the capped
+  workspace, and the identity JWT, which is single-use and audience-bound.
+  Agent output is not screened for secrets because a screen on the agent's
+  runner would be the agent's to defeat and there is no long-lived secret
+  to screen for.
 - The stubs pass the shared workflows exactly the secrets they name, never
   `secrets: inherit`.
 
 ## By design
 
-- The agent can spend the capped workspace budget through the broker for as
-  long as its job runs; the cap bounds it. GitHub's runner process holds the
+- The agent can spend the capped workspace budget for as long as its job
+  runs (triage through the broker; ci-perf with its own token, plus the
+  remaining life of the last token it minted); the cap bounds it. In
+  triage, GitHub's runner process holds the
   job's secrets in memory for masking (its design). The agent is a different
   Unix user from that process, so it cannot read its memory or environment,
   nor reach the .NET diagnostic socket that would let a same-user process ask
