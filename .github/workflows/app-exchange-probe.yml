@@ -1,0 +1,21 @@
+# Scratch check for design/agent-jobs-workload-identity.md P1 (before step 3
+# merges): with `id-token: write`, try the Claude GitHub App token exchange as
+# `runner`; it must fail now that the App is uninstalled. Delete this branch
+# after the run. No secrets.
+name: app exchange probe (scratch)
+on:
+  push:
+    branches: [scratch/app-exchange-probe]
+permissions:
+  contents: read
+  id-token: write
+cache-mode: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Claude App token exchange as runner (must be refused)
+        run: bash .github/scratch/app_token_exchange_probe.sh refused
