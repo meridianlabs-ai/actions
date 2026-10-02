@@ -315,12 +315,13 @@ jobs:
       # resolves to the latest Opus release. No anthropic_api_key: the
       # action ignores WIF when a key is set. --permission-mode default:
       # with no mode given, the release @v1 pins on 2026-10-01 (2.1.287)
-      # starts a headless run in auto mode, which hands every call no rule
-      # matches to a model classifier instead of refusing it. In default
-      # mode a headless run refuses whatever would prompt, so the tools in
-      # --allowedTools are the whole list. Those include Bash, Write and
-      # Edit without a path rule, so the mode does not confine the agent's
-      # writes; the read-only checkout and its namespace do.
+      # starts a headless run in auto mode, which hands a call that needs
+      # approval and matches no allow rule to a model classifier instead of
+      # refusing it. In default mode a headless run refuses such a call.
+      # Tools that need no approval (Agent, for one) stay available even
+      # when unlisted. Bash, Write and Edit are allowed without a path rule,
+      # so the mode does not confine the agent's writes; the read-only
+      # checkout and its namespace do.
       - name: Analyze CI performance
         id: analysis
         uses: anthropics/claude-code-action@v1

@@ -174,14 +174,14 @@ guarantee, and what is by design. To report a vulnerability, see
   launcher's isolation check fails the job before the CLI starts if the
   agent can `sudo`, reach Docker, or reach another user's processes, the
   runner command files or the runner's install directory. The checkout is
-  read-only to the agent, and it writes only its landing directory. Claude
-  Code runs in the `default` permission mode (`--permission-mode default`),
-  so a headless call to a tool outside its allow list is refused rather than
-  sent to a model classifier, as it is in the auto mode that 2.1.287, the
-  release `claude-code-action@v1` pins, starts without a mode. That allow
-  list includes Bash, Write and Edit with no path rule, so the mode does
-  not confine where the agent writes: the read-only mount and the
-  namespace do. The runner reads the landing directory only through
+  read-only to the agent, and it writes only its landing directory. With
+  `--permission-mode default`, this headless run refuses calls that need
+  approval and match no allow rule; without a mode, 2.1.287, the release
+  `claude-code-action@v1` pins, starts in auto mode and sends such calls
+  to a model classifier instead. Tools that need no approval, such as
+  `Agent`, remain available even when unlisted. Bash, Write and Edit are
+  broadly allowed, so the mode does not confine filesystem writes: the
+  read-only mount and the namespace do. The runner reads the landing directory only through
   `import-codex-final` (regular files owned by the agent, opened without
   following links, size-capped),
   and `Show report` and the evidence artifact read only the runner's own

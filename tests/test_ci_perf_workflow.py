@@ -517,7 +517,8 @@ def test_the_agent_step_args_and_settings():
     assert not any(a.startswith("--effort") for a in args)
     assert args[args.index("--allowedTools") + 1] == "Bash,Read,Edit,Write,Grep,Glob"
     # Without a mode, the pinned 2.1.287 runs headless in auto mode, which
-    # sends calls no rule allows to a classifier instead of refusing them.
+    # sends calls that need approval and match no rule to a classifier
+    # instead of refusing them.
     modes = [args[i + 1] for i, a in enumerate(args) if a == "--permission-mode"]
     assert modes == ["default"]
     assert not any(a.startswith("--permission-mode=") or a == "--dangerously-skip-permissions" for a in args)
