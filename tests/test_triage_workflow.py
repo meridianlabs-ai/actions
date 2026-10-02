@@ -11,11 +11,13 @@ output or the Slack destination; the step that composes the landing manifest fro
 fail_run error); and the agent's permission rules, whose allow list must not
 reach a write outside the landing directory. The step that collects the
 installed package versions of the failed run and the last passing run is
-tested too, against a fake `gh` on PATH. The job's other boundary, that the
-agent never holds the Anthropic key (the model broker of
-.github/actions/model-broker, tested in test_model_broker.py, holds it and
-the agent gets a per-run token), is a fact of the YAML and is asserted from
-the YAML at the end of this file. The `run:` blocks are lifted from the
+tested too, against a fake `gh` on PATH. The agent job's shape (the
+agent runs through meridianlabs-ai/agents' launcher and claude-code-action
+on Anthropic workload identity federation, and the job holds nothing but
+the read-only job token and that model credential) and the land job's
+refusal of every comment a forged manifest could carry are facts of the
+YAML, asserted from the YAML and, for land, against the agents validator.
+The `run:` blocks are lifted from the
 workflow and executed under bash exactly as the runner would. The rules are
 matched with an approximation of the glob semantics Claude Code documents
 for Bash rules (`*` matches any text, a compound command is checked one
@@ -500,6 +502,9 @@ def compose(tmp_path: Path, manifest_extra, *, outcome="success", files=(), cont
         (landing / "manifest-extra.json").write_text(text)
     extra = tmp_path / "landing-extra.json"
     step = agent_step("landing")
+    # The compose step reads the runner-only copy import-codex-final made,
+    # never the directory the agent wrote.
+    assert step["env"]["DIR"] == "${{ runner.temp }}/landing"
     env = {
         "DIR": str(landing),
         "EXTRA": str(extra),
@@ -760,6 +765,9 @@ def validator(tmp_path_factory) -> Path:
         pytest.xfail(f"the agents validator at {override or ref} predates the per-caller issue policy flags "
                      "(--allowed-issue-labels / --allowed-issue-assignees / --max-issues / --refuse-pr, Claude "
                      "Security finding 4628345); this workflow is blocked on that PR")
+    if "--comment-numbers" not in text:
+        pytest.xfail(f"the agents validator at {override or ref} predates `--comment-numbers` (step 3 of the "
+                     "agents design/untrusted-agent-job.md); this workflow is blocked on that change")
     return target
 
 
@@ -772,13 +780,18 @@ def land_validate(validator: Path, tmp_path: Path, extra: dict) -> subprocess.Co
     (tmp_path / "landing" / "manifest.json").write_text(json.dumps({**extra, **core}))
     inputs = land_inputs()
     assert inputs["refuse-bundle"] == "true" and inputs["refuse-pr"] == "true" and inputs["branch-prefix"] == "triage"
+    # land hands its pr-number / issue-number inputs to the validator as the
+    # event's numbers; triage passes neither.
+    assert "pr-number" not in inputs and "issue-number" not in inputs
     return subprocess.run(
         ["python3", str(validator), "--dir", str(tmp_path / "landing"), "--repo", "meridianlabs-ai/actions",
          "--run-id", "42", "--default-branch", "main", "--refused-branches", "main",
          "--allowed-issue-repos", inputs["allowed-issue-repos"], "--branch-prefix", "triage", "--refuse-bundle", "--refuse-pr",
          "--allowed-issue-labels", inputs["allowed-issue-labels"],
          "--allowed-issue-assignees", inputs["allowed-issue-assignees"],
-         "--max-issues", inputs["max-issues"]],
+         "--max-issues", inputs["max-issues"],
+         "--event-pr-number", "", "--event-issue-number", "",
+         "--comment-numbers", inputs["comment-numbers"]],
         text=True, capture_output=True, check=False,
     )
 
@@ -793,6 +806,9 @@ def test_land_enforces_the_triage_policies_from_the_workflow_env():
     assert inputs["allowed-issue-assignees"] == workflow_env("ISSUE_ASSIGNEE") == "ransomr"
     assert inputs["max-issues"] == "1"
     assert inputs["refuse-pr"] == "true"
+    # No comment outside issues[]: `event` with no event number refuses every one.
+    assert inputs["comment-numbers"] == "event"
+    assert "pr-number" not in inputs and "issue-number" not in inputs
 
 
 @pytest.mark.parametrize(
@@ -872,6 +888,35 @@ def test_land_refuses_a_manifest_crafted_past_the_composer(validator, tmp_path, 
 def test_land_refuses_pull_request_fields_forged_into_a_triage_manifest(validator, tmp_path, extra, needles):
     (tmp_path / "landing").mkdir(exist_ok=True)
     (tmp_path / "landing" / "body.md").write_text("Review fixture only.\n")
+    manifest = {**crafted(tmp_path, [], ["s.txt"]), **extra}
+    r = land_validate(validator, tmp_path, manifest)
+    assert r.returncode == 1, r.stdout + r.stderr
+    for needle in needles:
+        assert needle in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("extra, needles", [
+    # Under this workflow's boundary a compromise of the agent job's runner
+    # can upload any manifest after the composer ran. Generic comments on
+    # this repository (review round 1 of the WIF design: #17 and #18 passed
+    # under `comment-numbers: *`) would land as the machine account, which
+    # the MARVIN_TOKEN fallback lets write here. `event` with no event
+    # number refuses every one.
+    ({"comments": [{"number": 17, "body_file": "body.md"}, {"number": 18, "body_file": "body.md"}]},
+     ["comments[0]: number 17 is not this run's issue or PR (none; --comment-numbers event)",
+      "comments[1]: number 18 is not this run's issue or PR (none; --comment-numbers event)"]),
+    ({"comments": [{"number": 444, "body_file": "body.md"}]},
+     ["comments[0]: number 444 is not this run's issue or PR (none; --comment-numbers event)"]),
+    ({"review_comments": [{"path": "README.md", "line": 1, "body_file": "body.md"}]},
+     ["does not accept review fields (--allow-review is not set) but the manifest carries review_comments"]),
+    ({"replies": [{"review_comment_id": 5, "body_file": "body.md"}]},
+     ["refuses bundles (--refuse-bundle) but the manifest carries replies"]),
+    ({"resolve_threads": ["PRRT_fixture"]},
+     ["refuses bundles (--refuse-bundle) but the manifest carries resolve_threads"]),
+], ids=["comments-17-18", "comment-444", "review-comments", "replies", "resolve-threads"])
+def test_land_refuses_every_comment_forged_into_a_triage_manifest(validator, tmp_path, extra, needles):
+    (tmp_path / "landing").mkdir(exist_ok=True)
+    (tmp_path / "landing" / "body.md").write_text("Forged fixture only.\n")
     manifest = {**crafted(tmp_path, [], ["s.txt"]), **extra}
     r = land_validate(validator, tmp_path, manifest)
     assert r.returncode == 1, r.stdout + r.stderr
@@ -964,11 +1009,12 @@ def decision(command: str) -> str:
         "gh api repos/openai/openai-python/compare/v3.14.0...v3.14.1",
         "gh api repos/pytest-dev/pytest-flask/releases?per_page=10",
         "gh issue list --repo meridianlabs-ai/inspect_ai --state all --search 'Triage tests/foo/test_bar.py::test_baz in:title,body' --limit 20",
-        f"git -C inspect_ai log --oneline -50 {SHA}..origin/main",
-        f"git -C inspect_ai log --oneline {SHA}..origin/main -- src/inspect_ai/model/_openai.py",
-        "git -C inspect_ai show abc123",
-        "git -C inspect_ai blame -L 10,20 src/inspect_ai/model/_openai.py",
+        f"git log --oneline -50 {SHA}..origin/main",
+        f"git log --oneline {SHA}..origin/main -- src/inspect_ai/model/_openai.py",
+        "git show abc123",
+        "git blame -L 10,20 src/inspect_ai/model/_openai.py",
         "grep -n 'FAILED' triage/failed.log",
+        "grep -n -A1 '^name = \"openai\"$' uv.lock",
     ],
 )
 def test_reads_the_triage_needs_are_allowed(command):
@@ -979,9 +1025,10 @@ def test_reads_the_triage_needs_are_allowed(command):
     "command",
     [
         # Blocking finding, review round 1: git log/show write a file with --output.
-        "git -C inspect_ai log -1 --format=tformat:x --output=/tmp/outside-landing.txt",
-        "git -C inspect_ai log -1 --output /tmp/outside-landing.txt",
-        "git -C inspect_ai show HEAD --output=/tmp/outside-landing.txt",
+        "git log -1 --format=tformat:x --output=/tmp/outside-landing.txt",
+        "git log -1 --output /tmp/outside-landing.txt",
+        "git show HEAD --output=/tmp/outside-landing.txt",
+        "git -C .. log -1 --output=/tmp/outside-landing.txt",
         # The gh verbs and gh-api flags that write.
         "gh issue create --repo meridianlabs-ai/inspect_ai --title t --body b",
         "gh issue comment 444 --repo meridianlabs-ai/inspect_ai --body hi",
@@ -1018,12 +1065,15 @@ def test_writes_are_denied(command):
     "command",
     [
         # Not granted: no rule matches, and a headless run denies what would prompt.
-        "cd inspect_ai",
-        "cd inspect_ai && git log --oneline -5",
-        "git log --oneline -5",
-        "git -C inspect_ai push origin HEAD",
-        "git -C inspect_ai checkout main",
+        "cd ..",
+        "cd .. && git log --oneline -5",
+        "git push origin HEAD",
+        "git checkout main",
+        "git fetch origin",
         "git -C .. log -1",
+        "git -C /home/runner log -1",
+        "git -c core.pager=less log -1",
+        "git -C inspect_ai log -1",
         "gh api graphql -f query='{viewer{login}}'",
         "gh api user",
         "gh pr create --title t",
@@ -1053,16 +1103,19 @@ def test_everything_else_is_not_granted(command):
 def test_host_and_field_spellings_the_globs_cannot_close_are_closed_elsewhere(command):
     # What closes them is not a rule: harden-runner's egress allow-list
     # refuses the connection to attacker.example, and a POST to github.com
-    # carries nothing reusable, because the agent holds no model key (the
-    # broker does; see the YAML tests below) and the job token is read-only
-    # and expires with the job.
+    # carries only what the agent holds: the job token, read-only and
+    # expiring with the job, and its own model token, scoped to inference in
+    # the capped triage workspace and living at most 600 s (see the YAML
+    # tests below).
     assert decision(command) == "allow"
     assert agent_step("Harden runner")["with"]["egress-policy"] == "block"
 
 
 def test_file_writes_are_scoped_to_the_landing_directory():
     perms = permissions()
-    landing = f"Edit(//{RUNNER_TEMP.lstrip('/')}/landing/**)"
+    # The agent's landing directory, which the launcher makes and empties
+    # and the runner reads only through the import.
+    landing = f"Edit(//{RUNNER_TEMP.lstrip('/')}/claude-agent/**)"
     assert landing in perms["allow"], perms["allow"]
     # No bare Edit/Write/NotebookEdit grant, and no path rule that reaches
     # outside the landing directory (Edit rules govern Write too).
@@ -1072,11 +1125,15 @@ def test_file_writes_are_scoped_to_the_landing_directory():
     assert "Write" not in perms["allow"] and "Edit" not in perms["allow"]
 
 
-def test_agent_job_holds_no_secret_but_the_job_token_and_the_brokers_key():
+def test_agent_job_holds_no_secret_but_the_job_token():
+    # No model key at all: the model credential is minted by the action from
+    # the job's OIDC token (the WIF tests below).
     wf = load_workflow()
     agent = yaml.safe_dump(wf["jobs"]["agent"])
     secrets = set(re.findall(r"secrets\.([A-Z_]+)", agent))
-    assert secrets == {"TRIAGE_ANTHROPIC_API_KEY", "GITHUB_TOKEN"}, secrets
+    assert secrets == {"GITHUB_TOKEN"}, secrets
+    assert "TRIAGE_ANTHROPIC_API_KEY" not in WORKFLOW.read_text()
+    assert "ANTHROPIC_API_KEY" not in agent and "anthropic_api_key" not in agent
     # No marvin identity of any kind: not the PAT, not the app secrets that
     # mint one (already excluded above), not a minted token.
     assert "steps.mint" not in agent and "create-github-app-token" not in agent
@@ -1096,90 +1153,160 @@ def test_every_job_restores_caches_but_cannot_save_them():
     assert keys == ["cache-mode: read"], keys
 
 
-# --- The model key stays in the broker -----------------------------------------
+# --- The agent runs through the launcher, on workload identity federation ----
+#
+# Step 3 of design/agent-jobs-workload-identity.md: the agent job holds
+# nothing the agent may not have, the read-only job token and the model
+# credential (the declared exception), a WIF token claude-code-action mints
+# from the job's OIDC token. The agent runs as `claude-agent` through
+# meridianlabs-ai/agents' launcher, with the checkout read-only.
+
+AGENTS = "meridianlabs-ai/agents/.github/actions"
+# The Anthropic Console's addresses for triage (not secrets): Meridian's
+# organization, and the triage service account, workspace and federation
+# rule. The rule matches only this workflow file on main, for the events in
+# `on:` below.
+WIF = {
+    "anthropic_federation_rule_id": "fdrl_01GTpfwJqVdfsAbMYLqt3sLX",
+    "anthropic_organization_id": "be5d0086-bc43-45d2-9184-20ecdd647aa7",
+    "anthropic_service_account_id": "svac_01ECL7QyJY2BXoYakyth29mC",
+    "anthropic_workspace_id": "wrkspc_018fn8kNiyMdz73cBVeDzzGP",
+}
+AGENT_STEPS = [
+    "Harden runner",
+    "Checkout inspect_ai at tested commit",
+    "Download failed logs from upstream run",
+    "Collect installed package versions (failed run and last passing run)",
+    "Record the checked-out SHA",
+    "Create agent user",
+    "Create the scratch directory",
+    "Prepare the agent launch",
+    "Run Claude triage agent",
+    "Reclaim workspace from the agent",
+    "Import the landing files",
+    "Compose landing manifest",
+    "Emit landing manifest",
+]
 
 
-def test_triage_shares_no_secret_with_the_test_suites():
-    # A leak from triage must not reach the provider key the scheduled and
-    # nightly suites run with: triage's dedicated key is its own secret.
-    agent = yaml.safe_dump(load_workflow()["jobs"]["agent"])
-    suites = "".join((WORKFLOW.parent / name).read_text() for name in ("inspect-ai-scheduled-tests.yml", "inspect-swe-nightly-tests.yml"))
-    shared = set(re.findall(r"secrets\.([A-Z_]+)", agent)) & set(re.findall(r"secrets\.([A-Z_]+)", suites))
-    assert shared == {"GITHUB_TOKEN"}, shared
-
-
-def test_the_key_reaches_only_the_broker_and_the_whole_agent_is_isolated():
-    steps = load_workflow()["jobs"]["agent"]["steps"]
-    names = [s.get("name") for s in steps]
-    order = ["Check out the isolation actions", "Start the model broker", "Harden runner",
-             "Download failed logs from upstream run", "Run Claude triage agent",
-             "Stop the model broker", "Compose landing manifest", "Emit landing manifest"]
-    assert [n for n in names if n in order] == order
-    # The key secret is referenced only by the broker step; no ANTHROPIC_API_KEY
-    # of any kind reaches the agent step.
-    for s in steps:
-        if s.get("id") == "broker":
-            assert set(re.findall(r"secrets\.([A-Z_]+)", yaml.safe_dump(s))) == {"TRIAGE_ANTHROPIC_API_KEY"}
-        else:
-            assert "ANTHROPIC_API_KEY" not in yaml.safe_dump(s), s.get("name")
-    assert agent_step("broker")["uses"] == "./actions-repo/.github/actions/model-broker"
-    assert agent_step("broker")["with"] == {"api-key": "${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}", "lifetime-minutes": "60"}
-    checkout = agent_step("Check out the isolation actions")
-    assert checkout["with"] == {"path": "actions-repo", "sparse-checkout": ".github/actions", "persist-credentials": False}
-    # The whole Claude process runs through the isolated-agent action, not
-    # claude-code-action; the isolation check is that action's own first
-    # concern, so there is no separate check step to run as the runner user.
-    assert agent_step("claude")["uses"] == "./actions-repo/.github/actions/isolated-agent"
-    assert "anthropics/claude-code-action" not in yaml.safe_dump(load_workflow()["jobs"]["agent"])
-
-
-def test_agent_job_timeout_matches_the_broker_lifetime():
-    # The broker exits after lifetime-minutes whether or not the job is done;
-    # a job allowed to run longer would carry on with no model. Both are 60:
-    # triage runs took 2 to 12 minutes over 47 runs (2026-09-03 to 2026-09-22),
-    # and an explicit timeout stops a wedged agent holding the runner for
-    # GitHub's six-hour default (Ransom, 2026-09-22).
+def test_the_agent_job_runs_the_launcher_steps_in_order():
     job = load_workflow()["jobs"]["agent"]
+    assert [s.get("name") for s in job["steps"]] == AGENT_STEPS
+    # A wedged agent would otherwise hold the runner, minting model tokens,
+    # for GitHub's six-hour default.
     assert job["timeout-minutes"] == 60
-    assert agent_step("broker")["with"]["lifetime-minutes"] == str(job["timeout-minutes"])
+    text = yaml.safe_dump(job)
+    for gone in ("isolated-agent", "model-broker", "actions-repo", "steps.broker"):
+        assert gone not in text, gone
+
+
+def test_only_the_agent_job_can_mint_an_oidc_token_and_it_passes_the_job_token():
+    # The OIDC token is what the WIF exchange takes, and what the Claude App
+    # exchange would take too (the PR's merge prerequisite P1: no App on
+    # this repository). Exactly one job asks for it, and its one
+    # claude-code-action step passes the job token, so the action mints no
+    # App token.
+    wf = load_workflow()
+    minting = {name for name, job in wf["jobs"].items() if (job.get("permissions") or {}).get("id-token") == "write"}
+    assert minting == {"agent"}
+    assert wf["jobs"]["agent"]["permissions"] == {"contents": "read", "actions": "read", "id-token": "write"}
+    assert "permissions" not in wf
+    actions = [(name, s) for name, job in wf["jobs"].items() for s in job["steps"] if s.get("uses", "").startswith("anthropics/claude-code-action@")]
+    assert [(name, s.get("id")) for name, s in actions] == [("agent", "claude")]
+    assert actions[0][1]["uses"] == "anthropics/claude-code-action@v1"
+    assert actions[0][1]["with"]["github_token"] == "${{ github.token }}"
+    # The federation rule admits workflow_run and workflow_dispatch on main;
+    # no workflow_call, so no other workflow can run this one's jobs as its own.
+    assert set(wf["on"]) == {"workflow_run", "workflow_dispatch"}
+
+
+def test_the_agent_step_authenticates_with_wif_and_launches_through_the_wrapper():
+    claude = agent_step("claude")
+    w = claude["with"]
+    # Exactly these inputs: no anthropic_api_key (the action ignores WIF when
+    # a key is set), no allowed_bots, and nothing that would log the
+    # transcript (show_full_output, display_report).
+    assert set(w) == set(WIF) | {"github_token", "path_to_claude_code_executable", "classify_inline_comments",
+                                 "claude_args", "settings", "prompt"}
+    assert {k: w[k] for k in WIF} == WIF
+    assert w["path_to_claude_code_executable"] == "${{ steps.launcher.outputs.executable }}"
+    assert w["classify_inline_comments"] == "false"
+    # The Opus alias at default reasoning effort; the `default` permission
+    # mode, in which a headless run refuses what would prompt (with no mode,
+    # Claude Code 2.1.287 runs auto mode, which lets a model classifier
+    # approve it instead; THREAT_MODEL.md → "Verification notes"); no
+    # setting, hook, MCP server or CLAUDE.md from the checkout; the landing
+    # directory as a working directory.
+    assert w["claude_args"].split() == ("--model opus --permission-mode default --setting-sources user "
+                                        "--add-dir ${{ runner.temp }}/claude-agent").split()
+    settings = json.loads(w["settings"].replace("${{ runner.temp }}", RUNNER_TEMP))
+    assert set(settings) == {"env", "permissions"}
+    assert settings["env"] == {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+    assert "secrets." not in yaml.safe_dump(claude)
+    # The compose step reads the action's conclusion output, not a step outcome.
+    assert agent_step("landing")["env"]["CLAUDE_OUTCOME"] == "${{ steps.claude.outputs.conclusion }}"
+
+
+def test_the_agent_user_and_the_launcher_leave_the_checkout_read_only():
+    user = agent_step("agentuser")
+    assert user["uses"] == f"{AGENTS}/create-codex-user@main"
+    assert user["with"] == {"user": "claude-agent", "grant": "none"}
+    launcher = agent_step("launcher")
+    assert launcher["uses"] == f"{AGENTS}/claude-agent-launcher@main"
+    assert launcher["with"] == {"grant": "none"}
+    # The namespace binds the scratch directory under `grant: none`; it must
+    # exist, agent-owned and private.
+    scratch = agent_step("Create the scratch directory")
+    assert scratch["run"].strip() == 'sudo install -d -o claude-agent -g claude-agent -m 0700 "$RUNNER_TEMP/scratch"'
+    # The checkout is at the workspace root, where the launcher expects a
+    # repository, and the steps that write triage/ come after it.
+    checkout = agent_step("Checkout inspect_ai at tested commit")
+    assert checkout["with"] == {"repository": "UKGovernmentBEIS/inspect_ai", "ref": "${{ needs.context.outputs.sha }}",
+                                "fetch-depth": 0, "persist-credentials": False}
+    assert agent_step("base")["run"].count("git rev-parse HEAD") == 1
+
+
+def test_the_runner_reads_the_agents_files_only_through_the_import():
+    reclaim = agent_step("agentreclaim")
+    assert reclaim["uses"] == f"{AGENTS}/reclaim-codex-workspace@main"
+    assert reclaim["if"] == "always() && steps.agentuser.outcome == 'success'"
+    assert reclaim["with"] == {"user": "claude-agent"}
+    imp = agent_step("agentfiles")
+    assert imp["uses"] == f"{AGENTS}/import-codex-final@main"
+    # The defaults: source $RUNNER_TEMP/claude-agent, owner claude-agent,
+    # dest $RUNNER_TEMP/landing (the compose step's DIR and emit-landing's
+    # default landing-dir).
+    assert imp["with"] == {"mode": "dir"}
+    assert imp["if"] == ("always() && steps.agentreclaim.outcome == 'success' && steps.launcher.outcome == 'success' "
+                         "&& steps.claude.outcome != 'skipped'")
+    assert "landing-dir" not in agent_step("Emit landing manifest")["with"]
+    # No step but the agent's own names the directory the agent writes.
+    for s in load_workflow()["jobs"]["agent"]["steps"]:
+        if s.get("id") != "claude":
+            text = yaml.safe_dump(s)
+            assert "runner.temp }}/claude-agent" not in text and "RUNNER_TEMP/claude-agent" not in text, s["name"]
+    # The prompt and the rules point the agent there, not at the runner's copy.
+    prompt = agent_step("claude")["with"]["prompt"]
+    assert "${{ runner.temp }}/claude-agent/manifest-extra.json" in prompt
+    assert "runner.temp }}/landing" not in prompt and "inspect_ai/" not in prompt.replace("UKGovernmentBEIS/inspect_ai/", "")
 
 
 def test_harden_runner_blocks_egress_and_does_not_disable_sudo():
+    steps = load_workflow()["jobs"]["agent"]["steps"]
+    assert steps[0]["name"] == "Harden runner" and "if" not in steps[0]
     with_ = agent_step("Harden runner")["with"]
     assert with_["egress-policy"] == "block"
-    # B1: harden-runner's pre hook would drop sudo before the broker/agent-user
-    # bootstrap, so this workflow must NOT ask it to. The agent is powerless
-    # because it runs as an unprivileged user, checked by the isolated-agent
-    # action, not because the runner's sudo was removed here.
+    # B1: harden-runner's pre hook would drop sudo before the agent-user
+    # setup and the launcher, so this workflow must NOT ask it to. The agent
+    # is powerless because it runs as an unprivileged user, checked by the
+    # launcher, not because the runner's sudo was removed here.
     assert "disable-sudo-and-containers" not in with_ and "disable-sudo" not in with_
-    endpoints = with_["allowed-endpoints"].split()
-    assert all(e.endswith(":443") for e in endpoints)
-    assert {"api.anthropic.com:443", "api.github.com:443", "github.com:443"} <= set(endpoints)
-    # Only Anthropic, GitHub and the action's installer: no package index
-    # (triage installs nothing) and no other host.
-    assert set(endpoints) <= {"api.anthropic.com:443", "api.github.com:443", "github.com:443", "claude.ai:443",
-                              "downloads.claude.ai:443", "registry.npmjs.org:443", "release-assets.githubusercontent.com:443"}
-
-
-def test_the_agent_runs_as_the_isolated_user_pointed_at_the_broker():
-    claude = agent_step("claude")
-    assert claude["uses"] == "./actions-repo/.github/actions/isolated-agent"
-    w = claude["with"]
-    assert w["token"] == "${{ steps.broker.outputs.token }}"
-    assert w["base-url"] == "${{ steps.broker.outputs.base-url }}"
-    assert w["github-token"] == "${{ github.token }}"
-    assert w["write-dir"] == "${{ runner.temp }}/landing"
-    # The Opus alias, not a dated model id, at default reasoning effort.
-    assert w["claude-args"] == "--model opus"
-    # The agent step names no secret at all (the broker holds the key).
-    assert "secrets." not in yaml.safe_dump(claude)
-    # The compose step reads the action's conclusion output, not a step outcome.
-    compose = agent_step("landing")
-    assert compose["env"]["CLAUDE_OUTCOME"] == "${{ steps.claude.outputs.conclusion }}"
-    stop = agent_step("Stop the model broker")
-    assert stop["if"] == "always() && steps.broker.outcome == 'success'"
-    assert stop["env"] == {"STOP_FILE": "${{ steps.broker.outputs.stop-file }}"}
-    assert 'touch "$STOP_FILE"' in stop["run"]
+    # Anthropic (the agent's CLI), GitHub, the launcher's installer and the
+    # action's Bun install: no package index (triage installs nothing) and
+    # no other host.
+    assert sorted(with_["allowed-endpoints"].split()) == sorted([
+        "api.anthropic.com:443", "api.github.com:443", "github.com:443", "claude.ai:443",
+        "downloads.claude.ai:443", "registry.npmjs.org:443", "release-assets.githubusercontent.com:443"])
 
 
 def test_no_secret_input_or_step_output_expression_inside_a_run_script():
@@ -1569,7 +1696,9 @@ def test_the_agent_job_reads_the_context_job_and_has_no_outputs():
     assert "inspect_ai checkout is exact tested commit: ${{ needs.context.outputs.exact }}" in agent_step("claude")["with"]["prompt"]
     # Every step that reads the run or runs the agent waits for a good
     # context; the rest are the always() steps that report a failed triage.
-    ungated = {"Harden runner", "Stop the model broker", "Compose landing manifest", "Emit landing manifest"}
+    # The reclaim and the import are gated on the steps they follow.
+    ungated = {"Harden runner", "Reclaim workspace from the agent", "Import the landing files",
+               "Compose landing manifest", "Emit landing manifest"}
     for s in job["steps"]:
         if s["name"] in ungated:
             assert "needs.context" not in s.get("if", ""), s["name"]

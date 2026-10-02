@@ -13,41 +13,44 @@
 #
 # agent downloads the failed run's logs at the attempt context resolved,
 # checks out UKGovernmentBEIS/inspect_ai at the tested commit context
-# validated and runs the Claude triage agent. The agent's input is test output, which any code the tests exercise
-# can shape, and public fork issues, which anyone can write, so this job
-# holds only the job token (read-only): no MARVIN_TOKEN, no Slack token, and
-# not the Anthropic key either. The key (TRIAGE_ANTHROPIC_API_KEY, a key from
-# a dedicated Anthropic Console workspace with a spend cap, separate from the
-# ANTHROPIC_API_KEY the test suites run with) is held by two Unix users the
-# agent is not: the model broker (.github/actions/model-broker) reads it into
-# a process running as the model-broker user and forwards Messages API calls,
-# and nothing else, to api.anthropic.com; the Claude triage agent runs as a
-# third, unprivileged user (.github/actions/isolated-agent) whose whole
-# process tree gets only the broker's per-run token as ANTHROPIC_API_KEY (good
-# only for 127.0.0.1 while the broker is alive) and the broker as
-# ANTHROPIC_BASE_URL. That agent cannot read the broker user's key file or
-# memory, cannot read the runner process's memory or its .NET diagnostic
-# socket (where the runner keeps every job secret for masking), cannot sudo or
-# reach Docker, and gets none of the runner command files or OIDC request
-# variables in its environment. So disclosing its token through a network
-# request, an issue body or the Slack text yields nothing reusable, which is
-# why the landing bodies are not screened for a key. Until the secret exists
-# the broker step fails, and the land job reports the failed triage to the
-# Slack thread.
+# validated and runs the Claude triage agent. The agent's input is test
+# output, which any code the tests exercise can shape, and public fork
+# issues, which anyone can write, so the job holds nothing the agent may not
+# have (step 3 of design/agent-jobs-workload-identity.md): the read-only job
+# token, and the model credential, the declared exception. That credential
+# is an Anthropic workload identity federation (WIF) token: claude-code-action
+# exchanges the job's GitHub OIDC token (`id-token: write`) under a
+# federation rule that matches only this workflow on main, for a token
+# scoped to `workspace:inference` in the triage workspace (spend-capped,
+# separate from the one the test suites' ANTHROPIC_API_KEY bills), living at
+# most 600 s. The agent may read and leak it; what limits it is the cap, the
+# scope and the lifetime. No MARVIN_TOKEN, no Slack token and no long-lived
+# Anthropic key are in the job.
 #
-# harden-runner blocks egress to every host but Anthropic (the broker's
-# upstream), GitHub and the action's installer, so no tool the agent runs can
-# reach a host of its choosing. It does NOT disable sudo/containers: that
-# hardening runs in harden-runner's `pre` hook, before the broker start and
-# the agent-user setup, both of which need sudo (review round 1, B1); the
-# agent is powerless because it runs as an unprivileged user, not because the
+# The Claude process runs through meridianlabs-ai/agents' launcher, as the
+# agents repository's own jobs run it: Claude Code root-owned at the version
+# claude-code-action pins, started as the unprivileged `claude-agent` user in
+# its own PID and mount namespace, under an allow-listed environment (no
+# runner command-file or OIDC request variable), with the checkout mounted
+# read-only and the landing directory `$RUNNER_TEMP/claude-agent` its one
+# writable place. The launcher checks that before and inside the namespace,
+# and fails the job if it does not hold. The runner reads what the agent
+# wrote only through import-codex-final, after the reclaim.
+#
+# harden-runner blocks egress to every host but Anthropic (the agent's CLI),
+# GitHub and the action's and launcher's installers, so no tool the agent
+# runs can reach a host of its choosing. It does NOT disable sudo/containers:
+# that hardening runs in harden-runner's `pre` hook, before the agent-user
+# setup and the launcher, which need sudo (review round 1, B1); the agent is
+# powerless because it runs as an unprivileged user, not because the
 # runner's sudo was removed. The allow-list does not stop an upload to an
 # attacker's own github.com resource with a credential the attacker placed in
-# the text the agent reads; what that can carry is what the agent can read,
-# the read-only job token (this repository, expires with the job) and the
-# triage inputs. The isolated-agent action runs its own isolation check as the
-# agent user and fails the job before the agent if any of the boundary above
-# does not hold. The agent's tools are reads plus file writes under the
+# the text the agent reads; what that can carry is what the agent can read:
+# the read-only job token (this repository, expires with the job), a minted
+# Anthropic token (inference in the capped workspace for the rest of its
+# life), the single-use identity JWT and the triage inputs. That is why the
+# landing bodies are not screened: a screen on this runner would be the
+# agent's to defeat. The agent's tools are reads plus file writes under the
 # landing directory, and instead of creating issues, commenting or posting to
 # Slack it describes those writes in a landing manifest, which emit-landing
 # uploads as an artifact.
@@ -58,8 +61,12 @@
 # each issue it creates or adopts on Atlas at Todo by node ID — and posts
 # the Slack message to the channel and thread the context job validated
 # (never to a destination the manifest names; land reads no output of the
-# agent job). The marvin identity (the app secrets MARVIN_APP_CLIENT_ID /
-# MARVIN_APP_PRIVATE_KEY, the token they mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
+# agent job). Its validator refuses every comment the manifest could carry
+# (`comment-numbers: event` with no event number), so a manifest uploaded
+# past the composer, after a compromise of the agent's runner, can land only
+# the one fork issue action the issue policies allow. The marvin identity
+# (the app secrets MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY, the token
+# they mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
 # `land` only.
 #
 # The manifest's `slack` field, `issues[].assignees` / `issues[].reopen`,
@@ -338,9 +345,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Triaging against inspect_ai@$sha (exact tested commit: $exact); Slack channel '${channel:-<default>}' thread '${thread_ts:-<root>}'"
 
-  # UNTRUSTED once the agent has run: job token only; the Anthropic key is
-  # in the model broker, not in this job's environment. It has no outputs:
-  # land reads the context job's, not this job's.
+  # UNTRUSTED once the agent has run: the read-only job token and the
+  # agent's own WIF model credential, nothing else. It has no outputs: land
+  # reads the context job's, not this job's.
   agent:
     needs: context
     # Runs when context failed too, so that the failure reaches land as the
@@ -348,47 +355,39 @@ jobs:
     # upstream run or runs the agent is gated on the context job instead.
     if: always() && needs.context.result != 'skipped' && needs.context.result != 'cancelled'
     runs-on: ubuntu-latest
-    # Matches the broker's lifetime-minutes below, so the job cannot outlive
-    # its model access (a wedged agent would otherwise hold the runner for
-    # GitHub's six-hour default with no model). Triage runs took 2 to 12
-    # minutes over 47 runs, 2026-09-03 to 2026-09-22; 60 is a wide margin.
+    # A wedged agent would otherwise hold the runner, and keep minting model
+    # tokens, for GitHub's six-hour default. Triage runs took 2 to 12 minutes
+    # over 47 runs, 2026-09-03 to 2026-09-22; 60 is a wide margin.
     timeout-minutes: 60
     permissions:
       contents: read
       actions: read
+      # For claude-code-action's WIF exchange alone: the OIDC token for
+      # audience https://api.anthropic.com, which Anthropic exchanges under
+      # this workflow's own federation rule. The OIDC request variables stay
+      # in the runner's step environment; the launcher keeps them from the
+      # agent. No other relying party trusts this repository: the Claude
+      # GitHub App, whose exchange would mint a write token here from any
+      # such JWT, is not installed on it (the PR's merge prerequisite P1).
+      id-token: write
 
     steps:
-      # This repo's own code at the workflow's commit, for the local
-      # model-broker and isolated-agent actions. The fetch is to github.com,
-      # which the egress allow-list permits.
-      - name: Check out the isolation actions
-        if: needs.context.result == 'success'
-        uses: actions/checkout@v6
-        with:
-          path: actions-repo
-          sparse-checkout: .github/actions
-          persist-credentials: false
-
-      - name: Start the model broker
-        id: broker
-        if: needs.context.result == 'success'
-        uses: ./actions-repo/.github/actions/model-broker
-        with:
-          api-key: ${{ secrets.TRIAGE_ANTHROPIC_API_KEY }}
-          lifetime-minutes: "60"   # = the job's timeout-minutes above
-
-      # Egress allow-list for the rest of the job. The endpoints are ci-perf's
-      # observed set (inspect-ai-ci-perf.yml, "Egress") minus the Python
-      # package indexes, which triage does not use: Anthropic for the broker,
-      # GitHub for gh and the checkout, the action's Claude Code installer and
-      # its npm install. GitHub Actions infrastructure (artifact downloads
-      # included) is allowed without listing. A blocked call shows in the
-      # harden-runner step summary and as a job annotation. sudo and containers
-      # are deliberately NOT disabled: harden-runner does that in its `pre`
-      # hook, which runs before the broker start and the agent-user setup, both
-      # of which need sudo (review round 1, B1). The untrusted agent instead
-      # runs as its own unprivileged user (the isolated-agent action), which
-      # cannot alter the firewall or read another user's files as root.
+      # Egress allow-list for the whole job, so it is the first step. The
+      # endpoints are ci-perf's observed set (inspect-ai-ci-perf.yml,
+      # "Egress") minus the Python package indexes, which triage does not
+      # use: Anthropic for the agent's CLI (inference and the WIF token
+      # exchange), GitHub for gh and the checkout, claude.ai and
+      # downloads.claude.ai for the launcher's Claude Code installer, and
+      # npm and GitHub's release assets for the action's own Bun install.
+      # GitHub Actions infrastructure (artifact downloads and the OIDC token
+      # endpoint included) is allowed without listing. The agent's namespace
+      # shares the host network, so the list applies to it. A blocked call
+      # shows in the harden-runner step summary and as a job annotation. sudo
+      # and containers are deliberately NOT disabled: harden-runner does that
+      # in its `pre` hook, which runs before the agent-user setup and the
+      # launcher, both of which need sudo (review round 1, B1). The untrusted
+      # agent instead runs as its own unprivileged user, which cannot alter
+      # the firewall or read another user's files as root.
       - name: Harden runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
@@ -401,6 +400,21 @@ jobs:
             downloads.claude.ai:443
             registry.npmjs.org:443
             release-assets.githubusercontent.com:443
+
+      # At the workspace root, where the launcher expects a git checkout,
+      # and before the steps below write triage/ into it (a checkout cleans
+      # the workspace). The agent reads it read-only: create-codex-user and
+      # the launcher run with `grant: none`, and the namespace mounts it
+      # read-only.
+      - name: Checkout inspect_ai at tested commit
+        if: needs.context.result == 'success'
+        uses: actions/checkout@v6
+        with:
+          repository: UKGovernmentBEIS/inspect_ai
+          ref: ${{ needs.context.outputs.sha }}
+          fetch-depth: 0
+          # The agent never fetches or pushes; leave no token in .git/config.
+          persist-credentials: false
 
       - name: Download failed logs from upstream run
         if: needs.context.result == 'success'
@@ -514,49 +528,72 @@ jobs:
             echo '{}' > "$dir/passing-run.json"
           fi
 
-      - name: Checkout inspect_ai at tested commit
-        if: needs.context.result == 'success'
-        uses: actions/checkout@v6
-        with:
-          repository: UKGovernmentBEIS/inspect_ai
-          ref: ${{ needs.context.outputs.sha }}
-          path: inspect_ai
-          fetch-depth: 0
-          # The agent never fetches or pushes; leave no token in .git/config.
-          persist-credentials: false
-
-      # The commit the agent investigates — emit-landing's start-sha (the
-      # agent commits nothing, so head_sha equals it) — and the landing
-      # directory the agent writes its manifest and body files into, created
-      # here so it exists, runner-owned, before the agent starts.
-      - name: Record the checked-out SHA and prepare the landing directory
+      # The commit the agent investigates: emit-landing's start-sha (the
+      # agent commits nothing, so head_sha equals it). Read before any agent
+      # process exists.
+      - name: Record the checked-out SHA
         id: base
         if: needs.context.result == 'success'
-        env:
-          LANDING_DIR: ${{ runner.temp }}/landing
         run: |
           set -euo pipefail
-          sha=$(git -C inspect_ai rev-parse HEAD)
+          sha=$(git rev-parse HEAD)
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not read the inspect_ai HEAD"; exit 1; }
           { echo "sha<<EOF"; echo "$sha"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-          mkdir -p "$LANDING_DIR"
-          echo "inspect_ai checkout is at $sha; landing directory $LANDING_DIR"
+          echo "inspect_ai checkout is at $sha"
+
+      # ---- The agent user boundary (meridianlabs-ai/agents' launcher) -----
+      # `Create agent user` snapshots `.git/config` and the embedded
+      # repository list for the reclaim, creates `claude-agent`, checks the
+      # job PATH, writes `safe.directory` to the system git config and makes
+      # the landing directory `$RUNNER_TEMP/claude-agent` (runner:claude-agent
+      # 2775). `grant: none`: the checkout stays runner-owned and read-only
+      # to the agent. Step id is load-bearing: the reclaim gates on it.
+      - name: Create agent user
+        id: agentuser
+        if: needs.context.result == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/create-codex-user@main
+        with:
+          user: claude-agent
+          grant: none
+
+      # Under `grant: none` the agent's namespace binds `$RUNNER_TEMP/scratch`
+      # writable and the isolation check requires it. Triage uses no scratch
+      # space; the directory exists only to satisfy the bind.
+      - name: Create the scratch directory
+        if: needs.context.result == 'success'
+        run: sudo install -d -o claude-agent -g claude-agent -m 0700 "$RUNNER_TEMP/scratch"
+
+      # Claude Code root-owned at the version claude-code-action pins (read
+      # fail-closed from the downloaded action), the wrapper the action
+      # spawns as its CLI, the pre-action isolation check, a last kill of
+      # every `claude-agent` process, and an emptied landing directory.
+      - name: Prepare the agent launch
+        id: launcher
+        if: needs.context.result == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/claude-agent-launcher@main
+        with:
+          grant: none
 
       # No MARVIN_TOKEN, no Slack env, no Anthropic key: the agent needs only
       # reads — fork issues (public) and this run's own data via the job
-      # token — file writes under the landing directory, and the model
-      # broker on loopback (ANTHROPIC_BASE_URL; its per-run token is the
-      # anthropic_api_key, which the action passes to Claude Code as
-      # ANTHROPIC_API_KEY). The job token is passed as github_token so the
-      # action skips its App-token exchange: the App token would carry
+      # token — file writes under the landing directory, and the model, which
+      # it reaches with the WIF token the action mints. The four WIF inputs
+      # are addresses, not secrets (Meridian's organization, the triage
+      # service account, workspace and federation rule in the Anthropic
+      # Console); the rule matches only this workflow file on main, for the
+      # events this workflow runs on, so no other workflow or branch can mint
+      # with them. No `anthropic_api_key`: the action ignores WIF when a key
+      # is set. The job token is passed as github_token so the action skips
+      # its App-token exchange: the App token would carry
       # contents/issues/pull-requests WRITE on this repo, the job token is
-      # contents:read + actions:read.
+      # contents:read + actions:read, and the launcher's wrapper refuses to
+      # start the agent with any other token.
       #
       # Tools: the allow list is reads plus Edit (which governs Write too)
       # under the landing directory, given as an absolute-path rule (`//`
-      # prefix). git runs as `git -C inspect_ai <verb>` (the clone is a
-      # subdirectory and `cd` is not granted; Bash rules match each
-      # subcommand of a compound command on its own). No `sed -n`: sed's `w`
+      # prefix). git runs in the workspace root, which is the clone, as
+      # `git <verb>` (`cd` is not granted; Bash rules match each subcommand
+      # of a compound command on its own). No `sed -n`: sed's `w`
       # command writes a file and no pattern denies it without also denying
       # `/warning/p`; the Read tool's offset/limit covers line ranges. The
       # deny list closes the gh verbs and the gh-api flags that write, git's
@@ -567,8 +604,9 @@ jobs:
       # boundary: gh's `--repo HOST/OWNER/REPO` and pflag's joined `-Fk=v`
       # have no glob that does not also match legitimate searches, and what
       # stops a request to a host of the agent's choosing is harden-runner's
-      # egress allow-list, while what makes the request worthless is that
-      # the agent holds no reusable credential to put in it.
+      # egress allow-list, while what bounds a request to a listed host is
+      # what the agent holds: the read-only job token and its own capped,
+      # short-lived model token.
       # tests/test_triage_workflow.py checks these rules against the write
       # vectors named here. Guard rails: the boundary is that nothing in this
       # job can write as marvin or reach Slack — the land job does both, from
@@ -585,45 +623,65 @@ jobs:
       # the CLI's own permission engine, not an OS sandbox: it does not
       # reach what an allowed program writes through its own options (hence
       # the `git *--output*` deny), and it is a property of the Claude Code
-      # release the action installs — the revision `@v1` resolves to pins
-      # one internally, and the tag moves. The rule matcher in
-      # tests/test_triage_workflow.py approximates only the Bash-pattern
-      # step of this decision; THREAT_MODEL.md → "Verification notes" records
-      # which releases were checked against these settings and when to
-      # recheck.
+      # release the launcher installs — the one the revision `@v1` resolves
+      # to pins, and the tag moves. Behind it, the agent's uid cannot write
+      # the checkout (mounted read-only) or the runner's files at all. The
+      # rule matcher in tests/test_triage_workflow.py approximates only the
+      # Bash-pattern step of this decision; THREAT_MODEL.md → "Verification
+      # notes" records which releases were checked against these settings
+      # and when to recheck.
       #
-      # The whole Claude process runs as a dedicated unprivileged user (the
-      # isolated-agent action), pointed at the broker on loopback with its
-      # per-run token; the reusable key is never in this agent's environment,
-      # files or reachable processes (not the broker's, not the runner's .NET
-      # worker). The action's isolation check fails the job before the agent if
-      # that does not hold. `conclusion` (success/failure) is read by the
-      # compose step below. write-dir is the landing directory the agent writes
-      # its manifest and body files into.
+      # `--setting-sources user`: Claude Code loads no settings, hooks,
+      # .mcp.json, CLAUDE.md or skills from the checkout, which is upstream
+      # code at the tested commit (on a dispatch, any commit the triage
+      # context names). The settings below reach the CLI as the wrapper's
+      # root-owned flag settings file. `--add-dir` makes the landing
+      # directory a working directory too, as agents' reviewer passes it;
+      # the Edit rule below is what allows writes there. `--permission-mode
+      # default`: with no mode given, the release `@v1` pins on 2026-10-01
+      # (2.1.287) starts a headless run in auto mode, which allows writes in
+      # the working directory and hands every command no rule matches to a
+      # model classifier instead of refusing it (THREAT_MODEL.md →
+      # "Verification notes"). In `default` mode a headless run refuses
+      # whatever would prompt, so the rules below are the whole list.
+      # `conclusion` ("success" when the CLI ran to the end; unset when the
+      # step failed) is read by the compose step below.
       - name: Run Claude triage agent
         id: claude
         if: needs.context.result == 'success'
-        uses: ./actions-repo/.github/actions/isolated-agent
+        uses: anthropics/claude-code-action@v1
         with:
-          base-url: ${{ steps.broker.outputs.base-url }}
-          token: ${{ steps.broker.outputs.token }}
-          github-token: ${{ github.token }}
-          write-dir: ${{ runner.temp }}/landing
+          anthropic_federation_rule_id: fdrl_01GTpfwJqVdfsAbMYLqt3sLX
+          anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
+          anthropic_service_account_id: svac_01ECL7QyJY2BXoYakyth29mC
+          anthropic_workspace_id: wrkspc_018fn8kNiyMdz73cBVeDzzGP
+          github_token: ${{ github.token }}
+          # The launcher's wrapper, spawned in place of the CLI: it starts
+          # the real one as `claude-agent` in its own namespace.
+          path_to_claude_code_executable: ${{ steps.launcher.outputs.executable }}
+          # Skips the action's `Post buffered inline comments` post-step:
+          # nothing in this job may post.
+          classify_inline_comments: "false"
           # `opus` is the Claude Code alias for the Opus family; Claude Code
           # resolves it to that family's latest release, so triage follows new
           # models without a PR per release. Default reasoning effort on
           # purpose: no effort flag.
-          claude-args: "--model opus"
+          claude_args: >-
+            --model opus
+            --permission-mode default
+            --setting-sources user
+            --add-dir ${{ runner.temp }}/claude-agent
           settings: |
             {
+              "env": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
               "permissions": {
                 "allow": [
                   "Read", "Grep", "Glob",
-                  "Read(/${{ runner.temp }}/landing/**)",
-                  "Edit(/${{ runner.temp }}/landing/**)",
+                  "Read(/${{ runner.temp }}/claude-agent/**)",
+                  "Edit(/${{ runner.temp }}/claude-agent/**)",
                   "Bash(gh issue list *)", "Bash(gh issue view *)",
                   "Bash(gh run view *)", "Bash(gh api repos/*)",
-                  "Bash(git -C inspect_ai log *)", "Bash(git -C inspect_ai show *)", "Bash(git -C inspect_ai blame *)",
+                  "Bash(git log *)", "Bash(git show *)", "Bash(git blame *)",
                   "Bash(grep *)"
                 ],
                 "deny": [
@@ -642,6 +700,9 @@ jobs:
             You are triaging a failed scheduled test run for UKGovernmentBEIS/inspect_ai.
 
             # Available context (all paths relative to the workspace root)
+            The workspace root is a read-only clone of UKGovernmentBEIS/inspect_ai at the
+            exact commit that was tested. Investigate there; do NOT modify, push or open
+            PRs. The workflow wrote `triage/` into it; `triage/` is not part of inspect_ai.
             - `triage/failed.log` — output of failed pytest steps (may be truncated to last 2MB)
             - `triage/run.json` — metadata for the failed GitHub Actions run
             - `triage/versions/failing.txt` — the `Successfully installed ...` lines from
@@ -655,21 +716,19 @@ jobs:
               `(absent)` when a package is in only one; `a|b` when a run's jobs
               installed different versions — then read `failing.txt` for the failed
               job's own line), or a one-line note when a side is missing
-            - `inspect_ai/` — read-only clone of UKGovernmentBEIS/inspect_ai at the exact
-              commit that was tested. Investigate here; do NOT modify, push or open PRs.
 
             Upstream run: ${{ env.UPSTREAM_RUN_URL }}
             inspect_ai checkout: ${{ steps.base.outputs.sha }}
             inspect_ai checkout is exact tested commit: ${{ needs.context.outputs.exact }}
             This (triage) repo: ${{ github.repository }}
             Issues repo (where all tracking issues live): ${{ env.ISSUES_REPO }}
-            Landing directory (the ONLY place you may write): ${{ runner.temp }}/landing
+            Landing directory (the ONLY place you may write): ${{ runner.temp }}/claude-agent
 
             # How your actions reach GitHub and Slack
             You hold no credential that can create or comment on issues or post to
             Slack, and your tools are limited to reads plus files under the landing
             directory: the Read, Grep and Glob tools, `gh issue list/view`, `gh run
-            view`, `gh api repos/...` (reads), `git -C inspect_ai log/show/blame`, and
+            view`, `gh api repos/...` (reads), `git log/show/blame`, and
             `grep`. Nothing else runs (no `cd`, pipes into other commands, `head`,
             `jq`, `sed`); use the Read tool for line ranges and JSON files. Do NOT try
             `gh issue create`, `gh issue comment`, `gh issue edit`, `gh issue reopen`
@@ -678,7 +737,7 @@ jobs:
             writes you want in a landing manifest; after your run ends, a separate job
             validates it and performs exactly those writes as the machine account.
 
-            Write `${{ runner.temp }}/landing/manifest-extra.json`: ONE JSON object
+            Write `${{ runner.temp }}/claude-agent/manifest-extra.json`: ONE JSON object
             with at most these two keys and nothing else:
             - `issues`: an array with AT MOST ONE entry, either
               - a new tracking issue: `{"title": "Triage: <short summary>",
@@ -769,18 +828,17 @@ jobs:
             SHA" range to diff against).
 
             Otherwise, check whether inspect_ai main has moved past the tested commit in
-            a way that likely fixes the failure. The `inspect_ai/` clone has all history;
-            `origin/main` refs the current main. Run git with `-C inspect_ai` (you cannot
-            `cd`):
+            a way that likely fixes the failure. The clone has all history;
+            `origin/main` refs the current main:
 
-              git -C inspect_ai log --oneline -50 ${{ steps.base.outputs.sha }}..origin/main
+              git log --oneline -50 ${{ steps.base.outputs.sha }}..origin/main
 
             If there are commits since the tested SHA:
               - Identify the files implicated in the failure (from `triage/failed.log`).
-              - Run `git -C inspect_ai log --oneline ${{ steps.base.outputs.sha }}..origin/main -- <file>`
+              - Run `git log --oneline ${{ steps.base.outputs.sha }}..origin/main -- <file>`
                 for each to see whether those files have been modified on main.
               - Skim commit messages on main for keywords matching the failure (test name,
-                error message substring, module involved); `git -C inspect_ai show <sha>`
+                error message substring, module involved); `git show <sha>`
                 for a commit's diff.
 
             Set `ALREADY_FIXED_ON_MAIN = true` only with specific evidence: file + commit
@@ -790,7 +848,7 @@ jobs:
             ## DEPENDENCY_CHANGES — did a package release land, not an inspect_ai commit?
             Dependency versions float in the tested job: it installs inspect_ai with
             `pip install -e ".[dev]"`, so every third-party package is whatever PyPI
-            served that day, NOT the version pinned in `inspect_ai/uv.lock`. A failure
+            served that day, NOT the version pinned in inspect_ai's `uv.lock`. A failure
             that appears with no relevant inspect_ai commit is therefore often a
             dependency release: inspect_ai#499 spent five comments on a correct
             mechanism analysis and never noticed that the only difference between the
@@ -804,8 +862,8 @@ jobs:
             2. Read `triage/versions/failing.txt` for the versions the failed run
                installed (the job that failed matters most; the jobs normally agree).
                For each implicated package, find the locked version in
-               `inspect_ai/uv.lock` — for example
-                 grep -n -A1 '^name = "openai"$' inspect_ai/uv.lock
+               `uv.lock` — for example
+                 grep -n -A1 '^name = "openai"$' uv.lock
                (the `version = "..."` line follows) — and note where installed and
                locked differ.
             3. Read `triage/versions/diff.txt`: it is the diff of installed versions
@@ -814,7 +872,7 @@ jobs:
                run's id, URL, time and tested inspect_ai SHA (a passing run days
                older than this one makes the diff long; weigh it accordingly); when
                the SHA is set,
-                 git -C inspect_ai log --oneline <inspect_ai_sha>..${{ steps.base.outputs.sha }}
+                 git log --oneline <inspect_ai_sha>..${{ steps.base.outputs.sha }}
                shows what changed in inspect_ai between the two runs (nothing, or
                nothing near the failure, points at a dependency). When
                `triage/versions/passing.txt` holds no install log, say so and compare
@@ -918,7 +976,7 @@ jobs:
                    ## Proposed fix
                    <concrete description of the change, including a unified diff in a
                     ```diff fenced block if small enough, or per-file pseudocode if larger.
-                    Reference absolute paths under inspect_ai/ so a human can apply it.>
+                    Reference paths relative to the inspect_ai repository root so a human can apply it.>
 
                    ## Suggested follow-up
                    The fix above is written as a brief the autonomous agent can
@@ -976,27 +1034,38 @@ jobs:
               comment on one existing issue (its `reopen` and `assignees` are part of
               that single action). Never both, and never a new issue when
               `EXISTING_ISSUE` is set.
-            - Never modify files in `inspect_ai/` — treat it as read-only reference.
+            - Never modify files in the checkout — treat it as read-only reference.
             - Every run ends with Slack text; the manifest is how it gets posted.
             - If you hit any error you cannot resolve, still follow bucket-D behavior
               (a comment on EXISTING_ISSUE if set, otherwise a new D issue) and
               include the error in the body so a human can follow up.
 
-      # The broker runs as model-broker, so the runner user cannot signal it:
-      # it exits when this file appears. From here on the runner is the
-      # agent's; this step is diagnostics (the broker's log names each
-      # forwarded call by method and path) and authorizes nothing.
-      - name: Stop the model broker
-        if: always() && steps.broker.outcome == 'success'
-        env:
-          STOP_FILE: ${{ steps.broker.outputs.stop-file }}
-        run: |
-          touch "$STOP_FILE"
-          for _ in $(seq 1 20); do
-            pgrep -u model-broker -x python3 >/dev/null 2>&1 || break
-            sleep 0.5
-          done
-          cat /var/lib/model-broker/broker.log
+      # First after the agent, always: kill any `claude-agent` survivor,
+      # remove the WIF ACL entries and the agent's config directory, and
+      # restore `.git/config` from the wrapper's snapshot. The import below
+      # is gated on it.
+      - name: Reclaim workspace from the agent
+        id: agentreclaim
+        if: always() && steps.agentuser.outcome == 'success'
+        uses: meridianlabs-ai/agents/.github/actions/reclaim-codex-workspace@main
+        with:
+          user: claude-agent
+
+      # What the agent wrote crosses the user boundary once, here: each
+      # regular, single-link, `claude-agent`-owned file directly under
+      # `$RUNNER_TEMP/claude-agent` with a plain name, opened O_NOFOLLOW and
+      # size-capped, is copied into a fresh runner-only `$RUNNER_TEMP/landing`
+      # (the default `dest`), the directory the compose and emit steps read.
+      # Anything else is skipped with a warning, so no link the agent plants
+      # makes a runner step read or upload its target. Only for an agent that
+      # was launched: the launcher emptied the directory, and the agent step
+      # was entered.
+      - name: Import the landing files
+        id: agentfiles
+        if: always() && steps.agentreclaim.outcome == 'success' && steps.launcher.outcome == 'success' && steps.claude.outcome != 'skipped'
+        uses: meridianlabs-ai/agents/.github/actions/import-codex-final@main
+        with:
+          mode: dir
 
       # The agent's `manifest-extra.json` supplies `issues` and `slack` — those
       # two keys and nothing else: every other manifest field is the
@@ -1036,18 +1105,20 @@ jobs:
       # green: the job result is the runner's, not the manifest's, and land
       # runs under always() either way. The validator also enforces the
       # generic contract (schema and known keys, file references, the
-      # allowed issue repository, no bundle under refuse-bundle); the Slack
-      # destination is a land input, not a manifest field.
+      # allowed issue repository, no bundle under refuse-bundle, no comment
+      # under `comment-numbers: event`); the Slack destination is a land
+      # input, not a manifest field.
       - name: Compose landing manifest
         id: landing
         if: always()
         env:
           DIR: ${{ runner.temp }}/landing
           EXTRA: ${{ runner.temp }}/landing-extra.json
-          # The isolated-agent action's `conclusion` output: "success" when
-          # the agent exited 0, "failure" when it did not, and empty when the
-          # action failed before the agent ran (setup or isolation check). Any
-          # value but "success" makes this a failed triage that land reports.
+          # claude-code-action's `conclusion` output: "success" when the CLI
+          # ran to the end, and unset when the step failed (the CLI failed, or
+          # the action, the launcher's wrapper or its isolation check failed
+          # before it ran). Any value but "success" makes this a failed
+          # triage that land reports.
           CLAUDE_OUTCOME: ${{ steps.claude.outputs.conclusion }}
           # Anything but "success" means no step above read the run or ran
           # the agent; land reports it and posts no Slack reply.
@@ -1136,7 +1207,7 @@ jobs:
           echo "landing: issues=$n slack=${slack:-none} $(jq -c 'if .error then .error.message = "<\(.error.message | length) chars>" else . end' <<<"$extra")"
 
       # Last, always: package the manifest for the land job. read-only: the
-      # agent commits nothing (there is no repo at the workspace root), so no
+      # agent commits nothing (it cannot write the checkout), so no
       # git runs and head_sha is the start SHA — the inspect_ai commit the
       # agent investigated (github.sha, always 40 hex, when the checkout
       # failed). `branch` is a fixed name the land job's branch-prefix pins
@@ -1154,8 +1225,9 @@ jobs:
   # nothing. The `land` composite is the whole landing — download, validate
   # (refusing any manifest that carries commits or pull-request fields:
   # nothing here may push, open, adopt or label a PR, or post `@review`; or
-  # that names a label, another assignee or a second issue action, whatever
-  # the agent job uploaded), create, comment on, reopen and assign the fork's tracking issues as
+  # that names a label, another assignee, a second issue action or any
+  # comment outside `issues[]`, whatever the agent job uploaded), create,
+  # comment on, reopen and assign the fork's tracking issues as
   # marvin (created and adopted issues go on Atlas at Todo by node ID; the
   # assignee is added only to an unowned issue), post the Slack message to the
   # destination the context job validated, report the manifest's error and
@@ -1226,6 +1298,17 @@ jobs:
           allowed-issue-labels: ""
           allowed-issue-assignees: ${{ env.ISSUE_ASSIGNEE }}
           max-issues: "1"
+          # No `comments[]` at all. `event` admits only the run's own issue
+          # or PR (the `pr-number` / `issue-number` inputs), and triage
+          # passes neither, so every comment is refused. The composer never
+          # writes one, but this job assumes the agent job's runner may be
+          # compromised (design/agent-jobs-workload-identity.md → triage
+          # after the change): under the default `*` a manifest uploaded after
+          # the composer ran could post comments on any issue or PR of this
+          # repository, which the MARVIN_TOKEN fallback reaches. The one fork
+          # issue action triage may take travels in `issues[]`, under the
+          # policies above.
+          comment-numbers: event
           # The run names no PR; pin the manifest's (never pushed) branch to
           # the fixed name the agent job's emit-landing used.
           branch-prefix: triage
