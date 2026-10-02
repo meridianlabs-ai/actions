@@ -181,7 +181,7 @@ guarantee, and what is by design. To report a vulnerability, see
   root-owned at the release `claude-code-action@v1` pins, in its own PID
   and mount namespace, with an allow-listed environment (no runner
   command-file or OIDC request variable), the checkout mounted read-only
-  and `$RUNNER_TEMP/claude-agent` its one writable directory. The
+  and `$RUNNER_TEMP/claude-agent` as its output directory. The
   launcher's isolation check fails the job before the CLI starts if the
   agent can `sudo`, reach Docker, or reach another user's processes, the
   runner command files or the runner's install directory. The runner reads
@@ -302,9 +302,9 @@ guarantee, and what is by design. To report a vulnerability, see
   copies it for inference in the capped workspace for the rest of its life
   (at most 600 s), and the identity JWT, which is single-use and bound to
   Anthropic's audience. The agent jobs' outputs are published unscreened:
-  the job summary is visible while the job runs, the artifact can be
+  the job summary appears when the agent job finishes, the artifact can be
   downloaded once it is uploaded, and the issue body and Slack text are
-  posted after the job. They are not screened for secrets because a screen
+  posted by the later jobs. They are not screened for secrets because a screen
   on the agent's runner would be the agent's to defeat.
 - The stubs pass the shared workflows exactly the secrets they name, never
   `secrets: inherit`.
