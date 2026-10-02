@@ -5,7 +5,8 @@ Each stub is a copy of the matching file in meridianlabs-ai/agents
 recorded deviations. The YAML is the only place these facts live, so this
 file asserts the ones a resync must not lose: the machine account reaches the
 reusable workflows as the GitHub App's two secrets, named one by one (never
-`secrets: inherit`, never the retired PAT); every agent job restores the
+`secrets: inherit`, never the retired PAT), and not the OpenAI key, which
+the codex jobs no longer read (agents#199); every agent job restores the
 Actions cache and never saves it (Claude Security finding 4629157); the
 reviewer runs on demand only (decision: Ransom, 2026-09-14, actions#112); and
 the `@auto` loop's `workflow_run` trigger names CI workflows that exist here
@@ -54,6 +55,17 @@ def test_every_job_passes_the_app_secrets_one_by_one_and_not_the_pat(stub):
         assert "MARVIN_TOKEN" not in secrets, name
         for key, value in secrets.items():
             assert value == "${{ secrets.%s }}" % key, (name, key, value)
+
+
+@pytest.mark.parametrize("stub", STUBS)
+def test_every_job_leaves_the_openai_key_out_and_keeps_the_oidc_token(stub):
+    # agents#199: the codex jobs reach OpenAI by workload identity federation,
+    # exchanging the job's GitHub OIDC token, so no reusable job reads
+    # OPENAI_API_KEY; passing it only sends an unused long-lived key into the
+    # run. The calling job still grants `id-token: write` for that exchange.
+    for name, job in load(stub)["jobs"].items():
+        assert "OPENAI_API_KEY" not in job["secrets"], name
+        assert job["permissions"].get("id-token") == "write", name
 
 
 @pytest.mark.parametrize("stub", STUBS)
