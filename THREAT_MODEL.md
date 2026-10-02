@@ -158,41 +158,34 @@ guarantee, and what is by design. To report a vulnerability, see
 
 ## Guarantees (true on `main`)
 
-- ci-perf's `analyze` job holds only the read-only job token; its
-  Anthropic key (`CI_PERF_ANTHROPIC_API_KEY`, from a dedicated Console
-  workspace with a spend cap) is never in the
-  agent's environment, files or reachable processes. Three Unix users carry
-  the separation. The runner user does the trusted bootstrap. The model
-  broker (`.github/actions/model-broker`) reads the key into a process
-  running as the `model-broker` user and forwards Messages API calls, and
-  nothing else, to `api.anthropic.com`. The whole Claude process and every
-  tool it spawns run as a third, unprivileged user (`claude-agent`, chosen so
-  its home does not collide with harden-runner's `/home/agent`) through
-  `.github/actions/isolated-agent`, whose `ANTHROPIC_API_KEY` is only the
-  broker's per-run token (usable only against the broker on loopback while
-  the job runs) and whose `ANTHROPIC_BASE_URL` is the broker. That agent
-  cannot read the broker user's key file or memory; cannot read the runner
-  process's memory or its .NET diagnostic socket, where GitHub's runner keeps
-  every job secret for masking; cannot `sudo` or reach Docker; and runs under
-  `env -i` with no runner command-file variables (so it cannot rewrite a
-  later trusted step) and no OIDC request variables (so it cannot mint
-  tokens). Its reach into the filesystem is explicit: the runner's home is
-  private, so the action gives the agent user search-only (`--x`) ACL entries
-  on the ancestors of the workspace, the staged prompt and the output
-  directory that deny it traversal, and nothing else (no read, so it cannot
-  list those directories; no recursive or other-user change, and a
-  directory's existing ACL mask is kept so no other entry's effective rights
-  move; the step fails instead where that mask would have to widen another
-  principal), then verifies
-  as the agent that those paths, the check script and the Claude Code
-  install are reachable. Files under a granted directory keep their own
-  modes, so what the runner keeps private stays private, and what it leaves
-  world-readable under its home (its install directory, whose
-  `.credentials` holds the OAuth client id and token URL) is reachable by
-  name. The isolated-agent action runs an isolation check as the agent user
-  and fails the job before the agent if any of that does not hold, including
-  if the runner's registration private key (`.credentials_rsaparams`, 0600
-  on hosted runners) is readable.
+- ci-perf's `analyze` job holds nothing the agent may not have: the
+  read-only job token, and the model credential, which is the declared
+  exception. That credential is an Anthropic workload identity federation
+  token for ci-perf's own Console workspace, which has a spend cap. It is
+  scoped to `workspace:inference`, lives at most 600 seconds, and is minted
+  under a rule that matches only `inspect-ai-ci-perf.yml` on `main`. The
+  job also holds the OIDC request token that mints it. No other relying
+  party is known to accept this repository's tokens: the Claude GitHub App
+  is not installed on it, and no other federation rule matches this
+  workflow. No long-lived Anthropic key is referenced in the workflow.
+  The agent runs as `claude-agent` through agents' `claude-agent-launcher`
+  and claude-code-action in agent mode, with `github_token` set to the job
+  token, in its own PID and mount namespace, as defence in depth. The
+  launcher's isolation check fails the job before the CLI starts if the
+  agent can `sudo`, reach Docker, or reach another user's processes, the
+  runner command files or the runner's install directory. The checkout is
+  read-only to the agent, and it writes only its landing directory. With
+  `--permission-mode default`, this headless run refuses calls that need
+  approval and match no allow rule; without a mode, 2.1.287, the release
+  `claude-code-action@v1` pins, starts in auto mode and sends such calls
+  to a model classifier instead. Tools that need no approval, such as
+  `Agent`, remain available even when unlisted. Bash, Write and Edit are
+  broadly allowed, so the mode does not confine filesystem writes: the
+  read-only mount and the namespace do. The runner reads the landing directory only through
+  `import-codex-final` (regular files owned by the agent, opened without
+  following links, size-capped),
+  and `Show report` and the evidence artifact read only the runner's own
+  directory, which the agent never had.
 - Triage's `agent` job holds nothing the agent may not have: the read-only
   job token and the model credential, the declared exception. That
   credential is an Anthropic workload identity federation token that
@@ -306,12 +299,12 @@ guarantee, and what is by design. To report a vulnerability, see
   differentials beyond those they reject by name, and the marketplaces
   parse the uploaded package with their own readers.
 - Both agent jobs run under harden-runner's egress allow-list (Anthropic,
-  reached by ci-perf's broker and by triage's agent; GitHub; the action's
-  and the launcher's installers; for ci-perf the Python package indexes).
+  reached by each job's agent CLI; GitHub; the action's and the
+  launcher's installers).
   harden-runner does not disable sudo here: its
   hardening runs in a `pre` hook that GitHub runs before every step, so a
-  `disable-sudo-and-containers` would take sudo away before the broker start,
-  agent-user setup and launcher that need it; the agent is powerless because it runs
+  `disable-sudo-and-containers` would take sudo away before the agent-user
+  setup and launcher that need it; the agent is powerless because it runs
   as an unprivileged user, not because the runner's sudo was removed. The
   allow-list stops connections to any other host. It does not stop an
   upload to an attacker-owned resource on a listed multi-tenant host
@@ -320,20 +313,19 @@ guarantee, and what is by design. To report a vulnerability, see
   summary, artifact, issue body and Slack text an agent job produces are
   published unscreened. What any of these can carry is what the agent can
   read: the run token, the read-only job token (this repository, expired
-  when the job ends) and the inputs, which are public; for triage also its
-  minted model token and the single-use identity token (see triage's
+  when the job ends) and the inputs, which are public, and each job's
+  minted model token and single-use identity token (see each job's
   guarantee above). Agent output is not screened for secrets because a
-  screen on the agent's runner would be the agent's to defeat; in ci-perf
-  there is also no reusable secret to screen for.
+  screen on the agent's runner would be the agent's to defeat, and there
+  is no long-lived secret to screen for.
 - The stubs pass the shared workflows exactly the secrets they name, never
   `secrets: inherit`.
 
 ## By design
 
-- The ci-perf agent can spend its capped workspace budget through the
-  broker for as long as its job runs, and the triage agent its own through
-  its WIF token for the job's lifetime plus the remaining life of the last
-  token it minted; the caps bound both. GitHub's runner process holds the
+- Each agent can spend its own capped workspace budget through its WIF
+  token for the job's lifetime plus the remaining life of the last token
+  it minted; the caps bound both. GitHub's runner process holds the
   job's secrets in memory for masking (its design). The agent is a different
   Unix user from that process, so it cannot read its memory or environment,
   nor reach the .NET diagnostic socket that would let a same-user process ask
