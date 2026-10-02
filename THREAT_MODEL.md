@@ -158,67 +158,53 @@ guarantee, and what is by design. To report a vulnerability, see
 
 ## Guarantees (true on `main`)
 
-- ci-perf's `analyze` job holds nothing the agent may not have: the
-  read-only job token, and the model credential, which is the declared
-  exception. That credential is an Anthropic workload identity federation
-  token for ci-perf's own Console workspace, which has a spend cap. It is
-  scoped to `workspace:inference`, lives at most 600 seconds, and is minted
-  under a rule that matches only `inspect-ai-ci-perf.yml` on `main`. The
-  job also holds the OIDC request token that mints it. No other relying
-  party is known to accept this repository's tokens: the Claude GitHub App
-  is not installed on it, and no other federation rule matches this
-  workflow. No long-lived Anthropic key is referenced in the workflow.
-  The agent runs as `claude-agent` through agents' `claude-agent-launcher`
-  and claude-code-action in agent mode, with `github_token` set to the job
-  token, in its own PID and mount namespace, as defence in depth. The
+- The two agent jobs, ci-perf's `analyze` and triage's `agent`, hold
+  nothing the agent may not have: the read-only job token, and the model
+  credential, which is the declared exception. That credential is an
+  Anthropic workload identity federation token that `claude-code-action`
+  mints from the job's GitHub OIDC token, with `github_token` set to the
+  job token. It is for the workflow's own Console workspace, which has a
+  spend cap (triage's is not the one the test suites' `ANTHROPIC_API_KEY`
+  bills). It is scoped to `workspace:inference`, lives at most 600
+  seconds, and is minted under a rule that matches only that workflow file
+  on `main`, for the events it runs on. The job also holds the OIDC
+  request token that mints it, in the runner's step environment and not
+  the agent's. Nothing else exchanges that token: the Claude GitHub App is
+  not installed on this repository, and no other federation rule admits
+  either workflow. No long-lived Anthropic key, marvin credential or Slack
+  token is in either job. The agent can read its model token and put it in
+  any output it controls. What bounds it is the cap, the scope and the
+  lifetime: the agent, or whoever copies the token, can spend the
+  workspace while the job runs and for up to 600 s after the last mint.
+  As defence in depth the agent runs as `claude-agent` through
+  `meridianlabs-ai/agents`' `claude-agent-launcher`: Claude Code
+  root-owned at the release `claude-code-action@v1` pins, in its own PID
+  and mount namespace, with an allow-listed environment (no runner
+  command-file or OIDC request variable), the checkout mounted read-only
+  and `$RUNNER_TEMP/claude-agent` as its output directory. The
   launcher's isolation check fails the job before the CLI starts if the
   agent can `sudo`, reach Docker, or reach another user's processes, the
-  runner command files or the runner's install directory. The checkout is
-  read-only to the agent, and it writes only its landing directory. With
-  `--permission-mode default`, this headless run refuses calls that need
-  approval and match no allow rule; without a mode, 2.1.287, the release
-  `claude-code-action@v1` pins, starts in auto mode and sends such calls
-  to a model classifier instead. Tools that need no approval, such as
-  `Agent`, remain available even when unlisted. Bash, Write and Edit are
-  broadly allowed, so the mode does not confine filesystem writes: the
-  read-only mount and the namespace do. The runner reads the landing directory only through
-  `import-codex-final` (regular files owned by the agent, opened without
-  following links, size-capped),
-  and `Show report` and the evidence artifact read only the runner's own
-  directory, which the agent never had.
-- Triage's `agent` job holds nothing the agent may not have: the read-only
-  job token and the model credential, the declared exception. That
-  credential is an Anthropic workload identity federation token that
-  `claude-code-action` mints from the job's GitHub OIDC token, for triage's
-  own spend-capped Console workspace (not the one the test suites'
-  `ANTHROPIC_API_KEY` bills), scoped to `workspace:inference` and living at
-  most 600 s, under a federation rule that matches only this workflow file
-  on `main`, for the events it runs on. The job also holds the OIDC request
-  token that mints it, in the runner's step environment and not the
-  agent's. Nothing else exchanges that token: the Claude GitHub App is not
-  installed on this repository, and no other federation rule admits this
-  workflow. No long-lived Anthropic key, marvin credential or Slack token is
-  in the job. The agent can read its model token and put it in any output
-  it controls. What bounds it is the cap, the scope and the lifetime: the
-  agent, or whoever copies the token, can spend triage's workspace while the
-  job runs and for up to 600 s after the last mint. As defence in depth the
-  agent runs as `claude-agent` through `meridianlabs-ai/agents`' launcher:
-  Claude Code root-owned at the release `claude-code-action@v1` pins, in its
-  own PID and mount namespace, with an allow-listed environment (no runner
-  command-file or OIDC request variable), the checkout mounted read-only and
-  `$RUNNER_TEMP/claude-agent` its one writable directory. The launcher's
-  isolation check fails the job before the agent if that does not hold.
-  Claude Code loads no settings, hooks or instructions from the checkout
-  (`--setting-sources user`), and the runner reads the agent's files only
-  through `import-codex-final`, which copies regular, single-link,
-  agent-owned files and follows no link. The agent's tools are reads plus
-  file writes under the landing directory; the writes it wants are a
-  manifest that the `land` job validates and performs. In the `default`
-  permission mode the job passes, Claude Code checks the target of a shell
-  output redirect against those same file rules, so an allowed read command
-  such as `grep` is not a write outside the landing directory through `>`
-  or `>>` in the releases checked under "Verification notes"; that check
-  belongs to the installed Claude Code release, not to this repo.
+  runner command files or the runner's install directory. The runner reads
+  the agent's files only through `import-codex-final`, which copies
+  regular, single-link, agent-owned files, size-capped, and follows no
+  link. ci-perf's `Show report` and evidence artifact read only the
+  runner's own directory, which the agent never had. Claude Code loads no
+  settings, hooks or instructions from the checkout
+  (`--setting-sources user`). With `--permission-mode default`, which both
+  jobs pass, a headless run refuses calls that need approval and match no
+  allow rule; without a mode, 2.1.287, the release `claude-code-action@v1`
+  pins, starts in auto mode and sends such calls to a model classifier
+  instead. Tools that need no approval, such as `Agent`, remain available
+  even when unlisted. ci-perf allows Bash, Write and Edit broadly, so there
+  the mode does not confine filesystem writes: the read-only mount and the
+  namespace do. Triage's tools are reads plus file writes under the
+  landing directory; the writes it wants are a manifest that the `land`
+  job validates and performs. In the `default` mode Claude Code checks the
+  target of a shell output redirect against those same file rules, so an
+  allowed read command such as `grep` is not a write outside the landing
+  directory through `>` or `>>` in the releases checked under
+  "Verification notes"; that check belongs to the installed Claude Code
+  release, not to this repo.
 - The two agent workflows perform their GitHub and Atlas writes in separate
   jobs on fresh runners, from artifacts those jobs validate first, under a
   GitHub App token minted for that job and scoped to the `inspect_ai` fork
@@ -309,15 +295,17 @@ guarantee, and what is by design. To report a vulnerability, see
   allow-list stops connections to any other host. It does not stop an
   upload to an attacker-owned resource on a listed multi-tenant host
   (`github.com`, `api.github.com`, `registry.npmjs.org`) authenticated with
-  a credential the attacker placed in the agent's input, and the job
-  summary, artifact, issue body and Slack text an agent job produces are
-  published unscreened. What any of these can carry is what the agent can
-  read: the run token, the read-only job token (this repository, expired
-  when the job ends) and the inputs, which are public, and each job's
-  minted model token and single-use identity token (see each job's
-  guarantee above). Agent output is not screened for secrets because a
-  screen on the agent's runner would be the agent's to defeat, and there
-  is no long-lived secret to screen for.
+  a credential the attacker placed in the agent's input. What such an
+  upload, or any agent output, can carry is what the agent can read: the
+  read-only job token (this repository, expired when the job ends), the
+  inputs, which are public, a minted Anthropic token, usable by whoever
+  copies it for inference in the capped workspace for the rest of its life
+  (at most 600 s), and the identity JWT, which is single-use and bound to
+  Anthropic's audience. The agent jobs' outputs are published unscreened:
+  the job summary appears when the agent job finishes, the artifact can be
+  downloaded once it is uploaded, and the issue body and Slack text are
+  posted by the later jobs. They are not screened for secrets because a screen
+  on the agent's runner would be the agent's to defeat.
 - The stubs pass the shared workflows exactly the secrets they name, never
   `secrets: inherit`.
 
@@ -325,13 +313,8 @@ guarantee, and what is by design. To report a vulnerability, see
 
 - Each agent can spend its own capped workspace budget through its WIF
   token for the job's lifetime plus the remaining life of the last token
-  it minted; the caps bound both. GitHub's runner process holds the
-  job's secrets in memory for masking (its design). The agent is a different
-  Unix user from that process, so it cannot read its memory or environment,
-  nor reach the .NET diagnostic socket that would let a same-user process ask
-  the runtime to dump itself; `kernel.yama.ptrace_scope` of 1 or stricter,
-  which the isolation check requires, is defence in depth behind that user
-  boundary.
+  it minted; the caps bound both. No long-lived model key reaches either
+  job, so GitHub's runner process holds none in memory.
 - ci-perf analyzes upstream `main` only (decision: Ransom, 2026-09-30).
   The job that runs the analyzed commit's scripts holds a credential, so
   it runs only a trusted ref: the tier-2 rule of agents' THREAT_MODEL.md says

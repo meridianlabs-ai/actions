@@ -19,7 +19,9 @@ name: tests
       - ".github/workflows/inspect-swe-nightly-tests.yml"
       - ".github/workflows/release-please-vscode.yml"
       - ".github/workflows/tests.yml"
-      - ".github/actions/**"
+      - ".github/workflows/keep-alive.yml"
+      - ".github/workflows/pr-title-lint.yml"
+      - ".github/workflows/release-please-python.yml"
       - "slack-release-announce/**"
       - "tests/**"
   pull_request:
@@ -33,7 +35,9 @@ name: tests
       - ".github/workflows/inspect-swe-nightly-tests.yml"
       - ".github/workflows/release-please-vscode.yml"
       - ".github/workflows/tests.yml"
-      - ".github/actions/**"
+      - ".github/workflows/keep-alive.yml"
+      - ".github/workflows/pr-title-lint.yml"
+      - ".github/workflows/release-please-python.yml"
       - "slack-release-announce/**"
       - "tests/**"
 

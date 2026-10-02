@@ -19,17 +19,9 @@ tested in `tests/`: each test file lifts the scripts out of the YAML and
 executes them under bash, with stand-ins for `gh` and `pytest` on `PATH`
 where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`;
-`tests/test_slack_release_announce.py` covers the announce converter;
-`tests/test_model_broker.py` covers the model broker of
-`.github/actions/model-broker` in-process and, when a Docker daemon is
-available, the whole `.github/actions/isolated-agent` lifecycle — the agent
-user's isolation from the broker and from a runner/.NET-diagnostic sentinel,
-the bootstrap's reach into a workspace under the runner's private home, and
-the `env -i` launch — end to end in an Ubuntu container laid out like a
-hosted runner; and, when the suite itself runs on a GitHub-hosted runner,
-the same three step scripts in place against that runner's real layout,
-Runner.Worker, Yama and command files). Both actions live under the
-`.github/actions/**` path `tests.yml` lists.
+`tests/test_slack_release_announce.py` covers the announce converter, and
+`tests/test_repository.py` checks that no workflow names a retired
+Anthropic key).
 `.github/workflows/tests.yml` runs them in CI on every push and pull request
 that touches a path it lists.
 
@@ -55,7 +47,7 @@ the real permission engine and when to repeat them.
 
 ```
 pip install pytest pyyaml        # or a venv; the repo has no lock file
-python3 -m pytest -q tests       # the broker's container tests need Docker; MODEL_BROKER_SKIP_DOCKER=1 skips them
+python3 -m pytest -q tests
 actionlint .github/workflows/<changed>.yml
 python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflows/<changed>.yml
 ```
@@ -73,15 +65,19 @@ clean.
   a shape (a 40-hex SHA, a Slack channel ID) before they become a ref, an
   output or a destination, and step outputs are written with heredoc
   delimiters.
-- A job that runs an agent over untrusted input holds only the job token;
-  the model key is held by the model broker (`.github/actions/model-broker`,
-  a separate Unix user) and the whole Claude process runs as a third,
-  unprivileged user through `.github/actions/isolated-agent` with only the
-  broker's per-run loopback token, so the key is not in the agent's
-  environment, files or reachable processes (not the broker's, not the
-  runner's .NET worker). harden-runner keeps sudo here on purpose: its
-  hardening is a `pre` hook that runs before the bootstrap that needs sudo,
-  so the agent's powerlessness comes from its user, not from disabling sudo.
+- A job that runs an agent over untrusted input holds only the read-only
+  job token and its model credential: an Anthropic workload identity
+  federation token that `claude-code-action` mints, with
+  `github_token: ${{ github.token }}`, for the workflow's own spend-capped
+  workspace. The job requests `id-token: write` for that exchange alone,
+  under a dedicated federation rule pinned to the workflow file on `main`,
+  and no agent job references a long-lived model key. The agent may read
+  that token; the cap, its `workspace:inference` scope and its 600-second
+  life bound what it is worth. The Claude process runs as an unprivileged
+  user through agents' `claude-agent-launcher`, in its own namespace.
+  harden-runner keeps sudo here on purpose: its hardening is a `pre` hook
+  that runs before the launcher setup that needs sudo, so the agent's
+  powerlessness comes from its user, not from disabling sudo.
   Writes to issues and Slack happen in a separate job from a validated
   manifest (see the headers of `triage-test-failures.yml` and
   `inspect-ai-ci-perf.yml`). Do not widen an agent job's permissions or allow
