@@ -174,9 +174,16 @@ guarantee, and what is by design. To report a vulnerability, see
   launcher's isolation check fails the job before the CLI starts if the
   agent can `sudo`, reach Docker, or reach another user's processes, the
   runner command files or the runner's install directory. The checkout is
-  read-only to the agent, and it writes only its landing directory. The
-  runner reads that directory only through `import-codex-final` (regular
-  files owned by the agent, opened without following links, size-capped),
+  read-only to the agent, and it writes only its landing directory. Claude
+  Code runs in the `default` permission mode (`--permission-mode default`),
+  so a headless call to a tool outside its allow list is refused rather than
+  sent to a model classifier, as it is in the auto mode that 2.1.287, the
+  release `claude-code-action@v1` pins, starts without a mode. That allow
+  list includes Bash, Write and Edit with no path rule, so the mode does
+  not confine where the agent writes: the read-only mount and the
+  namespace do. The runner reads the landing directory only through
+  `import-codex-final` (regular files owned by the agent, opened without
+  following links, size-capped),
   and `Show report` and the evidence artifact read only the runner's own
   directory, which the agent never had.
 - Triage's `agent` job holds only the read-only job token; its Anthropic
