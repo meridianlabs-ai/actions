@@ -222,7 +222,9 @@ def build_yml(*specs: str, temporary: str = """      - name: Install inspect_sen
     return out
 
 
-def run_sentinel_step(tmp_path: Path, build: str | None, *, installed: bool = False) -> tuple[subprocess.CompletedProcess, list[str]]:
+def run_sentinel_step(tmp_path: Path, build: str | None, *, installed: bool = False, sentinel_tree: bool = True) -> tuple[subprocess.CompletedProcess, list[str]]:
+    if sentinel_tree:
+        (tmp_path / "src" / "inspect_ai" / "_sentinel").mkdir(parents=True)
     if build is not None:
         (tmp_path / ".github" / "workflows").mkdir(parents=True)
         (tmp_path / ".github" / "workflows" / "build.yml").write_text(build)
@@ -255,8 +257,9 @@ def test_both_jobs_install_inspect_sentinel_with_the_same_script_between_install
     ],
     ids=["one-line", "block"],
 )
-def test_sentinel_pin_is_read_from_the_temporary_step_only_and_installed_without_deps(temporary, tmp_path):
-    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC, SENTINEL_SPEC, temporary=temporary))
+@pytest.mark.parametrize("installed", [False, True], ids=["absent", "already-installed"])
+def test_sentinel_pin_is_read_from_the_temporary_step_only_and_installed_without_deps(temporary, installed, tmp_path):
+    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC, SENTINEL_SPEC, temporary=temporary), installed=installed)
     assert r.returncode == 0, r.stdout + r.stderr
     assert calls == [f"install --no-deps {SENTINEL_SPEC}"]
 
@@ -268,6 +271,13 @@ def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentin
     assert calls == ["show inspect_sentinel"]
 
 
+def test_no_pin_is_a_notice_for_a_commit_that_predates_inspect_sentinel(tmp_path):
+    r, calls = run_sentinel_step(tmp_path, "jobs: {}\n", sentinel_tree=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::notice::This inspect_ai commit predates inspect_sentinel" in r.stdout
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "build",
     [
@@ -276,6 +286,9 @@ def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentin
         build_yml(SENTINEL_SPEC, SENTINEL_SPEC.replace(SHA, "f" * 40)),
         build_yml(SENTINEL_SPEC.replace("meridianlabs-ai/", "someone-else/")),
         build_yml(SENTINEL_SPEC.replace(SHA, "main")),
+        build_yml(SENTINEL_SPEC + "ff"),
+        build_yml(SENTINEL_SPEC + "#subdirectory=x"),
+        build_yml("my_" + SENTINEL_SPEC),
         build_yml(SENTINEL_SPEC, temporary="""      # - name: Install inspect_sentinel (TEMPORARY)
       #   run: uv pip install --no-deps "{spec}"
 """),
@@ -283,12 +296,15 @@ def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentin
         uses: some/action@v1
 """),
     ],
-    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha", "step-commented-out", "step-without-run"],
+    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha", "longer-than-sha", "trailing-fragment", "other-name", "step-commented-out", "step-without-run"],
 )
 def test_a_missing_ambiguous_or_unexpected_sentinel_pin_fails_before_installing(build, tmp_path):
     r, calls = run_sentinel_step(tmp_path, build)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "::error::Expected one inspect_sentinel git pin" in r.stdout
+    other = SENTINEL_SPEC.replace(SHA, "f" * 40)
+    found = f"{SENTINEL_SPEC}; {other}" if build is not None and other in build else "none"
+    assert f"found: {found} (" in r.stdout, r.stdout
     assert not any(c.startswith("install") for c in calls)
 
 
