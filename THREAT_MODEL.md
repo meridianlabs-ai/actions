@@ -77,7 +77,8 @@ guarantee, and what is by design. To report a vulnerability, see
   artifact.
 - **Jobs that run the dependency closure hold nothing that reaches beyond
   the job.** The scheduled suites install upstream's dev closure from PyPI
-  unlocked (the point of the run) and execute it. Their job token is
+  unlocked (the point of the run), plus inspect_sentinel from GitHub at the
+  SHA upstream's build.yml pins, and execute it. Their job token is
   declared read-only in the workflow (`permissions: contents: read`, with
   `actions: read` only on the jobs that read this repository's run data),
   so its reach does not depend on the repository's default token setting;

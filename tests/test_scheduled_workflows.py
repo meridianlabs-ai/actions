@@ -202,17 +202,22 @@ if [ "$1" = show ]; then [ "${FAKE_PIP_SHOW:-0}" = 1 ]; fi
 """
 
 
-def build_yml(*specs: str) -> str:
-    """An upstream build.yml with one TEMPORARY install step per spec (two jobs pin it today)."""
+DECOY_SPEC = SENTINEL_SPEC.replace(SHA, "d" * 40)
+
+
+def build_yml(*specs: str, temporary: str = """      - name: Install inspect_sentinel (TEMPORARY)
+        if: env.RUN_TESTS == 'true'
+        run: uv pip install --no-deps "{spec}"
+""") -> str:
+    """An upstream build.yml with one TEMPORARY install step per spec (two jobs pin it today), between steps that pin a decoy."""
     out = "jobs:\n"
     for i, spec in enumerate(specs):
         out += f"""  job{i}:
     steps:
       - name: Install dev deps
-        run: uv pip install inspect_sentinel_lookalike
-      - name: Install inspect_sentinel (TEMPORARY)
-        if: env.RUN_TESTS == 'true'
-        run: uv pip install --no-deps "{spec}"
+        run: uv pip install "{DECOY_SPEC}"
+{temporary.format(spec=spec)}      - name: Run tests
+        run: echo "{DECOY_SPEC}"
 """
     return out
 
@@ -235,8 +240,23 @@ def test_both_jobs_install_inspect_sentinel_with_the_same_script_between_install
     assert step(SCHEDULED, "slow-tests", SENTINEL_STEP)["run"] == step(SCHEDULED, "static-analysis", SENTINEL_STEP)["run"]
 
 
-def test_sentinel_pin_is_read_from_upstream_build_yml_and_installed_without_deps(tmp_path):
-    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC, SENTINEL_SPEC))
+@pytest.mark.parametrize(
+    "temporary",
+    [
+        """      - name: Install inspect_sentinel (TEMPORARY)
+        if: env.RUN_TESTS == 'true'
+        run: uv pip install --no-deps "{spec}"
+""",
+        """      - name: Install inspect_sentinel (TEMPORARY)
+        run: |
+          uv pip install --no-deps \\
+            "{spec}"
+""",
+    ],
+    ids=["one-line", "block"],
+)
+def test_sentinel_pin_is_read_from_the_temporary_step_only_and_installed_without_deps(temporary, tmp_path):
+    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC, SENTINEL_SPEC, temporary=temporary))
     assert r.returncode == 0, r.stdout + r.stderr
     assert calls == [f"install --no-deps {SENTINEL_SPEC}"]
 
@@ -244,7 +264,7 @@ def test_sentinel_pin_is_read_from_upstream_build_yml_and_installed_without_deps
 def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentinel(tmp_path):
     r, calls = run_sentinel_step(tmp_path, "jobs: {}\n", installed=True)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "::notice::" in r.stdout and "remove this step" in r.stdout
+    assert "::notice::No inspect_sentinel pin" in r.stdout and "remove this one" in r.stdout
     assert calls == ["show inspect_sentinel"]
 
 
@@ -256,13 +276,19 @@ def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentin
         build_yml(SENTINEL_SPEC, SENTINEL_SPEC.replace(SHA, "f" * 40)),
         build_yml(SENTINEL_SPEC.replace("meridianlabs-ai/", "someone-else/")),
         build_yml(SENTINEL_SPEC.replace(SHA, "main")),
+        build_yml(SENTINEL_SPEC, temporary="""      # - name: Install inspect_sentinel (TEMPORARY)
+      #   run: uv pip install --no-deps "{spec}"
+"""),
+        build_yml(SENTINEL_SPEC, temporary="""      - name: Install inspect_sentinel (TEMPORARY)
+        uses: some/action@v1
+"""),
     ],
-    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha"],
+    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha", "step-commented-out", "step-without-run"],
 )
 def test_a_missing_ambiguous_or_unexpected_sentinel_pin_fails_before_installing(build, tmp_path):
     r, calls = run_sentinel_step(tmp_path, build)
     assert r.returncode == 1, r.stdout + r.stderr
-    assert "::error::Expected one pinned inspect_sentinel git install" in r.stdout
+    assert "::error::Expected one inspect_sentinel git pin" in r.stdout
     assert not any(c.startswith("install") for c in calls)
 
 
