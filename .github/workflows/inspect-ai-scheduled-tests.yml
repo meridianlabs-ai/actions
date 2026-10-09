@@ -6,11 +6,12 @@
 # slow-tests and static-analysis execute code this repository does not
 # control: `pip install -e ".[dev]"` resolves upstream's whole dev closure
 # against PyPI on the day (no lock file, on purpose: the point of the run is
-# the frontier resolution a new user would get), and pytest and mypy then
-# import it together with upstream's tests. THREAT_MODEL.md names that code as an
-# adversary that can take over its job's runner and read what is there (the
-# provider keys). What these jobs must not have is anything that reaches
-# beyond that one job:
+# the frontier resolution a new user would get), a TEMPORARY step installs
+# inspect_sentinel from GitHub at the SHA upstream's build.yml pins, and
+# pytest and mypy then import it together with upstream's tests.
+# THREAT_MODEL.md names that code as an adversary that can take over its
+# job's runner and read what is there (the provider keys). What these jobs
+# must not have is anything that reaches beyond that one job:
 #
 # - The job token is declared read-only (workflow-level `permissions`), so
 #   its reach does not depend on the repository's default token setting, and
@@ -317,6 +318,29 @@ jobs:
           # pip-installing it mid-run on the xdist critical path (~9s).
           pip install --no-deps ./tests/test_package
 
+      # TEMPORARY, like the step it copies in upstream's build.yml: until
+      # inspect_sentinel is on PyPI and in inspect_ai's dev requirements,
+      # mypy and the sentinel tests need it installed separately. The pin is read
+      # from that step's body in build.yml at the tested commit, so it
+      # follows upstream; when upstream drops its step and the dev install
+      # provides the package, this step says so and can be removed.
+      - name: Install inspect_sentinel (TEMPORARY)
+        run: |
+          build=.github/workflows/build.yml
+          specs=$(awk '/^[[:space:]]*- / { f = 0 } /^[[:space:]]*- name: Install inspect_sentinel \(TEMPORARY\)[[:space:]]*$/ { f = 1; next } f' "$build" \
+            | grep -oE '"inspect_sentinel @ git\+https://github\.com/meridianlabs-ai/inspect_sentinel@[0-9a-f]{40}"' | tr -d '"' | sort -u || true)
+          if [ -n "$specs" ] && [[ "$specs" != *$'\n'* ]]; then
+            pip install --no-deps "$specs"
+          elif [ -z "$specs" ] && [ ! -d src/inspect_ai/_sentinel ]; then
+            echo "::notice::This inspect_ai commit predates inspect_sentinel; nothing to install."
+          elif [ -z "$specs" ] && pip show inspect_sentinel > /dev/null 2>&1; then
+            echo "::notice::No inspect_sentinel pin in an 'Install inspect_sentinel (TEMPORARY)' step of $build, and the dev install provides the package; if upstream dropped its step, remove this one."
+          else
+            found=${specs//$'\n'/; }
+            echo "::error::Expected one inspect_sentinel git pin in the 'Install inspect_sentinel (TEMPORARY)' steps of $build, found: ${found:-none} (step renamed or removed, or pin not in the expected form?)"
+            exit 1
+          fi
+
       - name: Run slow tests (${{ matrix.mode }})
         timeout-minutes: 180
         env:
@@ -407,6 +431,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --only-binary=all -e ".[dev]"
+
+      # Same step as in slow-tests; see the comment there.
+      - name: Install inspect_sentinel (TEMPORARY)
+        run: |
+          build=.github/workflows/build.yml
+          specs=$(awk '/^[[:space:]]*- / { f = 0 } /^[[:space:]]*- name: Install inspect_sentinel \(TEMPORARY\)[[:space:]]*$/ { f = 1; next } f' "$build" \
+            | grep -oE '"inspect_sentinel @ git\+https://github\.com/meridianlabs-ai/inspect_sentinel@[0-9a-f]{40}"' | tr -d '"' | sort -u || true)
+          if [ -n "$specs" ] && [[ "$specs" != *$'\n'* ]]; then
+            pip install --no-deps "$specs"
+          elif [ -z "$specs" ] && [ ! -d src/inspect_ai/_sentinel ]; then
+            echo "::notice::This inspect_ai commit predates inspect_sentinel; nothing to install."
+          elif [ -z "$specs" ] && pip show inspect_sentinel > /dev/null 2>&1; then
+            echo "::notice::No inspect_sentinel pin in an 'Install inspect_sentinel (TEMPORARY)' step of $build, and the dev install provides the package; if upstream dropped its step, remove this one."
+          else
+            found=${specs//$'\n'/; }
+            echo "::error::Expected one inspect_sentinel git pin in the 'Install inspect_sentinel (TEMPORARY)' steps of $build, found: ${found:-none} (step renamed or removed, or pin not in the expected form?)"
+            exit 1
+          fi
 
       - name: Run ruff
         run: |
