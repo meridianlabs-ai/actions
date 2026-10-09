@@ -191,6 +191,88 @@ def test_pytest_args_outside_the_allowlist_fail_before_pytest_runs(workflow, job
     assert argv is None
 
 
+# --- inspect_sentinel install (TEMPORARY) -------------------------------------------
+
+SENTINEL_STEP = "Install inspect_sentinel (TEMPORARY)"
+SENTINEL_SPEC = f"inspect_sentinel @ git+https://github.com/meridianlabs-ai/inspect_sentinel@{SHA}"
+FAKE_PIP = """#!/usr/bin/env bash
+# Record each pip call; `pip show` succeeds only when FAKE_PIP_SHOW=1.
+printf '%s\\n' "$*" >> "$FAKE_PIP_CALLS"
+if [ "$1" = show ]; then [ "${FAKE_PIP_SHOW:-0}" = 1 ]; fi
+"""
+
+
+def build_yml(*specs: str) -> str:
+    """An upstream build.yml with one TEMPORARY install step per spec (two jobs pin it today)."""
+    out = "jobs:\n"
+    for i, spec in enumerate(specs):
+        out += f"""  job{i}:
+    steps:
+      - name: Install dev deps
+        run: uv pip install inspect_sentinel_lookalike
+      - name: Install inspect_sentinel (TEMPORARY)
+        if: env.RUN_TESTS == 'true'
+        run: uv pip install --no-deps "{spec}"
+"""
+    return out
+
+
+def run_sentinel_step(tmp_path: Path, build: str | None, *, installed: bool = False) -> tuple[subprocess.CompletedProcess, list[str]]:
+    if build is not None:
+        (tmp_path / ".github" / "workflows").mkdir(parents=True)
+        (tmp_path / ".github" / "workflows" / "build.yml").write_text(build)
+    calls = tmp_path / "pip_calls"
+    env = {"PATH": f"{bin_dir(tmp_path, pip=FAKE_PIP)}:{os.environ['PATH']}", "FAKE_PIP_CALLS": str(calls), "FAKE_PIP_SHOW": "1" if installed else "0"}
+    r = run_bash(step(SCHEDULED, "slow-tests", SENTINEL_STEP)["run"], cwd=tmp_path, env=env)
+    return r, calls.read_text().splitlines() if calls.exists() else []
+
+
+def test_both_jobs_install_inspect_sentinel_with_the_same_script_between_install_and_use():
+    for job, user in [("slow-tests", "Run slow tests"), ("static-analysis", "Run mypy")]:
+        names = [s.get("name", "") for s in steps(SCHEDULED, job)]
+        sentinel = names.index(SENTINEL_STEP)
+        assert names.index("Install dependencies") < sentinel < next(i for i, n in enumerate(names) if n.startswith(user)), job
+    assert step(SCHEDULED, "slow-tests", SENTINEL_STEP)["run"] == step(SCHEDULED, "static-analysis", SENTINEL_STEP)["run"]
+
+
+def test_sentinel_pin_is_read_from_upstream_build_yml_and_installed_without_deps(tmp_path):
+    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC, SENTINEL_SPEC))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls == [f"install --no-deps {SENTINEL_SPEC}"]
+
+
+def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentinel(tmp_path):
+    r, calls = run_sentinel_step(tmp_path, "jobs: {}\n", installed=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::notice::" in r.stdout and "remove this step" in r.stdout
+    assert calls == ["show inspect_sentinel"]
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        None,
+        "jobs: {}\n",
+        build_yml(SENTINEL_SPEC, SENTINEL_SPEC.replace(SHA, "f" * 40)),
+        build_yml(SENTINEL_SPEC.replace("meridianlabs-ai/", "someone-else/")),
+        build_yml(SENTINEL_SPEC.replace(SHA, "main")),
+    ],
+    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha"],
+)
+def test_a_missing_ambiguous_or_unexpected_sentinel_pin_fails_before_installing(build, tmp_path):
+    r, calls = run_sentinel_step(tmp_path, build)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "::error::Expected one pinned inspect_sentinel git install" in r.stdout
+    assert not any(c.startswith("install") for c in calls)
+
+
+def test_only_the_matched_sentinel_spec_reaches_pip(tmp_path):
+    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC.replace(SHA, SHA + '"; echo INJECTED; "')))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls == [f"install --no-deps {SENTINEL_SPEC}"]
+    assert "INJECTED" not in r.stdout + r.stderr
+
+
 # --- The last-inspect-ai-sha artifact ---------------------------------------------------
 
 FAKE_GH = r'''#!/usr/bin/env python3

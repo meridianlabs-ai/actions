@@ -317,6 +317,27 @@ jobs:
           # pip-installing it mid-run on the xdist critical path (~9s).
           pip install --no-deps ./tests/test_package
 
+      # TEMPORARY, like the step it copies in upstream's build.yml: until
+      # inspect_sentinel is on PyPI and in inspect_ai's dev requirements,
+      # mypy and tests/sentinel need it installed separately. The pin is read
+      # from build.yml at the tested commit so it follows upstream; when
+      # upstream drops its step and the dev install provides the package,
+      # this step says so and can be removed.
+      - name: Install inspect_sentinel (TEMPORARY)
+        run: |
+          build=.github/workflows/build.yml
+          specs=$(awk '/name: Install inspect_sentinel \(TEMPORARY\)/ { f = 1; next } f && /run:/ { print; f = 0 }' "$build" \
+            | grep -oE 'inspect_sentinel @ git\+https://github\.com/meridianlabs-ai/inspect_sentinel@[0-9a-f]{40}' | sort -u || true)
+          if [ -n "$specs" ] && [[ "$specs" != *$'\n'* ]]; then
+            pip install --no-deps "$specs"
+          elif [ -z "$specs" ] && pip show inspect_sentinel > /dev/null 2>&1; then
+            echo "::notice::$build no longer pins inspect_sentinel and the dev install provides it; remove this step."
+          else
+            found=${specs//$'\n'/; }
+            echo "::error::Expected one pinned inspect_sentinel git install under 'Install inspect_sentinel (TEMPORARY)' in $build, found: ${found:-none}"
+            exit 1
+          fi
+
       - name: Run slow tests (${{ matrix.mode }})
         timeout-minutes: 180
         env:
@@ -407,6 +428,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --only-binary=all -e ".[dev]"
+
+      # Same step as in slow-tests; see the comment there.
+      - name: Install inspect_sentinel (TEMPORARY)
+        run: |
+          build=.github/workflows/build.yml
+          specs=$(awk '/name: Install inspect_sentinel \(TEMPORARY\)/ { f = 1; next } f && /run:/ { print; f = 0 }' "$build" \
+            | grep -oE 'inspect_sentinel @ git\+https://github\.com/meridianlabs-ai/inspect_sentinel@[0-9a-f]{40}' | sort -u || true)
+          if [ -n "$specs" ] && [[ "$specs" != *$'\n'* ]]; then
+            pip install --no-deps "$specs"
+          elif [ -z "$specs" ] && pip show inspect_sentinel > /dev/null 2>&1; then
+            echo "::notice::$build no longer pins inspect_sentinel and the dev install provides it; remove this step."
+          else
+            found=${specs//$'\n'/; }
+            echo "::error::Expected one pinned inspect_sentinel git install under 'Install inspect_sentinel (TEMPORARY)' in $build, found: ${found:-none}"
+            exit 1
+          fi
 
       - name: Run ruff
         run: |
