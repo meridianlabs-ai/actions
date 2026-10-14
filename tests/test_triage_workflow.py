@@ -1213,7 +1213,7 @@ def test_only_the_agent_job_can_mint_an_oidc_token_and_it_passes_the_job_token()
     assert "permissions" not in wf
     actions = [(name, s) for name, job in wf["jobs"].items() for s in job["steps"] if s.get("uses", "").startswith("anthropics/claude-code-action@")]
     assert [(name, s.get("id")) for name, s in actions] == [("agent", "claude")]
-    assert actions[0][1]["uses"] == "anthropics/claude-code-action@v1"
+    assert re.fullmatch(r"anthropics/claude-code-action@[0-9a-f]{40}", actions[0][1]["uses"])
     assert actions[0][1]["with"]["github_token"] == "${{ github.token }}"
     # The federation rule admits workflow_run and workflow_dispatch on main;
     # no workflow_call, so no other workflow can run this one's jobs as its own.
