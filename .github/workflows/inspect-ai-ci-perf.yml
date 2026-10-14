@@ -172,7 +172,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout upstream source at the resolved commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.resolve.outputs.sha }}
@@ -180,7 +180,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -240,14 +240,14 @@ jobs:
       # At the workspace root: the launcher's composites need a git checkout
       # there, and mount it read-only into the agent's namespace.
       - name: Checkout upstream source for analysis
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -324,7 +324,7 @@ jobs:
       # checkout and its namespace do.
       - name: Analyze CI performance
         id: analysis
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
         with:
           anthropic_federation_rule_id: fdrl_011HrZrxamS56HuRWRMbqYBH
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
@@ -419,7 +419,7 @@ jobs:
 
       - name: Retain CI evidence outside Git
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-perf/
@@ -460,7 +460,7 @@ jobs:
       - name: Mint a fork-scoped marvin token
         id: mint
         if: env.MARVIN_APP_CONFIGURED == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
           private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
@@ -470,7 +470,7 @@ jobs:
           permission-organization-projects: write
 
       - name: Checkout the upstream source the analysis used
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.resolve.outputs.sha }}
@@ -478,12 +478,12 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
       - name: Download CI evidence
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.CI_PERF_OUTPUT_DIR }}
@@ -582,7 +582,7 @@ jobs:
 
       - name: Retain published issue URLs outside Git
         if: always() && steps.publish.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-perf-${{ github.run_id }}-${{ github.run_attempt }}-published
           path: ${{ env.CI_PERF_OUTPUT_DIR }}/published.json

@@ -496,7 +496,7 @@ def test_only_analyze_can_request_an_oidc_token_and_its_agent_passes_the_job_tok
 
 def test_the_agent_step_authenticates_with_wif_through_the_launcher():
     agent = analyze_step("analysis")
-    assert agent["uses"] == "anthropics/claude-code-action@v1"
+    assert re.fullmatch(r"anthropics/claude-code-action@[0-9a-f]{40}", agent["uses"])
     w = agent["with"]
     assert {k: w[k] for k in WIF} == WIF
     assert w["github_token"] == "${{ github.token }}"
