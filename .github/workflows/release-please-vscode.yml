@@ -174,6 +174,111 @@ jobs:
           # The target-branch input remains an optional explicit override.
           target-branch: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
 
+      # Release Please's changelog template hard-codes "### ⚠ BREAKING CHANGES"
+      # (no config option changes it) and rewrites the release PR on every
+      # update. Rename it to "### Breaking Changes" in the open release PR's
+      # body, which becomes the GitHub Release notes when the PR is merged, and
+      # in the newest section of CHANGELOG.md on its branch. Changes nothing
+      # when the heading is absent or already renamed. The commit is made with
+      # the App token, so it starts the release PR's pull_request checks. A
+      # failure must not block a release, so the step continues on error; the
+      # next run renames what it missed.
+      - name: Rename the breaking changes heading
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          TARGET_BRANCH: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, subprocess, sys, tempfile
+
+          HEADING_RE = re.compile(r"^### \u26a0 BREAKING CHANGES(?=\r?$)", re.MULTILINE)
+          HEADING = "### Breaking Changes"
+          SECTION_RE = re.compile(r"^## ", re.MULTILINE)
+          CHANGELOG = "CHANGELOG.md"
+          CREATE_COMMIT = "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }"
+
+
+          def gh(*args, payload=None):
+              """Run gh; with `payload`, send it as the JSON request body."""
+              if payload is None:
+                  return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+              with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                  json.dump(payload, f)
+              try:
+                  return gh(*args, "--input", f.name)
+              finally:
+                  os.unlink(f.name)
+
+
+          def rename(text):
+              return HEADING_RE.sub(HEADING, text)
+
+
+          def rename_newest_section(changelog):
+              starts = [m.start() for m in SECTION_RE.finditer(changelog)]
+              if not starts:
+                  return changelog
+              end = starts[1] if len(starts) > 1 else len(changelog)
+              return changelog[: starts[0]] + rename(changelog[starts[0] : end]) + changelog[end:]
+
+
+          def release_prs(repo, target):
+              """Open release PRs on `target` from this repository's Release Please branches."""
+              prs = json.loads(gh("pr", "list", "--repo", repo, "--base", target, "--state", "open", "--label", "autorelease: pending", "--limit", "100", "--json", "number,body,headRefName,isCrossRepository"))
+              branch = f"release-please--branches--{target}"
+              return [pr for pr in prs if not pr["isCrossRepository"] and (pr["headRefName"] == branch or pr["headRefName"].startswith(branch + "--components--"))]
+
+
+          def read_changelog(repo, sha):
+              try:
+                  blob = gh("api", f"repos/{repo}/contents/{CHANGELOG}?ref={sha}", "-H", "Accept: application/vnd.github.object", "--jq", ".sha").strip()
+              except subprocess.CalledProcessError as e:
+                  if "(HTTP 404)" in (e.stderr or ""):
+                      return None
+                  raise
+              return base64.b64decode(gh("api", f"repos/{repo}/git/blobs/{blob}", "--jq", ".content")).decode("utf-8")
+
+
+          def fix(repo, pr):
+              branch = pr["headRefName"]
+              head = gh("api", f"repos/{repo}/branches/{branch}", "--jq", ".commit.sha").strip()
+              changelog = read_changelog(repo, head)
+              if changelog is None:
+                  print(f"{branch} has no {CHANGELOG}")
+              elif (renamed := rename_newest_section(changelog)) != changelog:
+                  commit = {
+                      "branch": {"repositoryNameWithOwner": repo, "branchName": branch},
+                      # A push after the head was read fails the commit instead of being overwritten.
+                      "expectedHeadOid": head,
+                      "message": {"headline": f"chore: use the Breaking Changes heading in {CHANGELOG}"},
+                      "fileChanges": {"additions": [{"path": CHANGELOG, "contents": base64.b64encode(renamed.encode("utf-8")).decode("ascii")}]},
+                  }
+                  gh("api", "graphql", payload={"query": CREATE_COMMIT, "variables": {"input": commit}})
+                  print(f"Renamed the heading in {CHANGELOG} on {branch}")
+              if (body := rename(pr["body"])) != pr["body"]:
+                  gh("api", "-X", "PATCH", f"repos/{repo}/pulls/{pr['number']}", payload={"body": body})
+                  print(f"Renamed the heading in the body of #{pr['number']}")
+
+
+          def main():
+              repo, target = os.environ["REPO"], os.environ["TARGET_BRANCH"]
+              prs = release_prs(repo, target)
+              if not prs:
+                  print(f"No open release PR on {target}")
+              for pr in prs:
+                  fix(repo, pr)
+
+
+          if __name__ == "__main__":
+              try:
+                  main()
+              except subprocess.CalledProcessError as e:
+                  print(f"::error::{' '.join(e.cmd)} failed: {(e.stderr or '').strip()}")
+                  sys.exit(1)
+          PY
+
       # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
       # @-mention the right people.
       - name: Fetch Slack ID map
