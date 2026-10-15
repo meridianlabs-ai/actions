@@ -15,6 +15,8 @@ Shared release automation for Meridian repos. **See the [release runbook](https:
 
 Both release-please workflows post a **Slack "awaiting approval"** ping when a release is cut, if the secret `SLACK_APPROVALS_WEBHOOK_URL` is set (a **dedicated approvals channel** webhook, separate from any general update stream). GitHub's own deployment-review notifications are unreliable, so this ensures approvers hear about it. The ping fires from the release-please job (before the environment gate), links to the repo's Actions, no-ops silently if the secret is absent, and **@-mentions the approvers** passed via the `approvers` input (space/comma-separated GitHub logins), resolved to Slack IDs through **`slack-ids.json`** (login → Slack member ID; fill in the `TODO`s). Since the Slack app is incoming-webhook only (no bot token), mentions in the approvals channel are used rather than true DMs.
 
+After Release Please runs, both release-please workflows rename its hard-coded `### ⚠ BREAKING CHANGES` heading to `### Breaking Changes` in the open release PR's body (which becomes the GitHub Release notes) and in the newest section of the release branch's root `CHANGELOG.md`. Callers need no change. While a release PR is open with a breaking change, every Release run rewrites the release PR, because Release Please no longer finds its body unchanged.
+
 Minimal caller examples are in each workflow's header comment.
 
 ## Workflows
