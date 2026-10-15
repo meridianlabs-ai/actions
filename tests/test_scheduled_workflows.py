@@ -264,6 +264,14 @@ def test_sentinel_pin_is_read_from_the_temporary_step_only_and_installed_without
     assert calls == [f"install --no-deps {SENTINEL_SPEC}"]
 
 
+@pytest.mark.parametrize("installed", [False, True], ids=["absent", "already-installed"])
+def test_a_main_pin_is_installed(installed, tmp_path):
+    spec = SENTINEL_SPEC.replace(SHA, "main")
+    r, calls = run_sentinel_step(tmp_path, build_yml(spec, spec), installed=installed)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls == [f"install --no-deps {spec}"]
+
+
 def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentinel(tmp_path):
     r, calls = run_sentinel_step(tmp_path, "jobs: {}\n", installed=True)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -285,7 +293,9 @@ def test_no_pin_is_a_notice_for_a_commit_that_predates_inspect_sentinel(tmp_path
         "jobs: {}\n",
         build_yml(SENTINEL_SPEC, SENTINEL_SPEC.replace(SHA, "f" * 40)),
         build_yml(SENTINEL_SPEC.replace("meridianlabs-ai/", "someone-else/")),
-        build_yml(SENTINEL_SPEC.replace(SHA, "main")),
+        build_yml(SENTINEL_SPEC.replace(SHA, "develop")),
+        build_yml(SENTINEL_SPEC.replace(SHA, "mainline")),
+        build_yml(SENTINEL_SPEC.replace(SHA, "main/x")),
         build_yml(SENTINEL_SPEC + "ff"),
         build_yml(SENTINEL_SPEC + "#subdirectory=x"),
         build_yml("my_" + SENTINEL_SPEC),
@@ -296,7 +306,7 @@ def test_no_pin_is_a_notice_for_a_commit_that_predates_inspect_sentinel(tmp_path
         uses: some/action@v1
 """),
     ],
-    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha", "longer-than-sha", "trailing-fragment", "other-name", "step-commented-out", "step-without-run"],
+    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha-or-main", "longer-than-main", "under-main", "longer-than-sha", "trailing-fragment", "other-name", "step-commented-out", "step-without-run"],
 )
 def test_a_missing_ambiguous_or_unexpected_sentinel_pin_fails_before_installing(build, tmp_path):
     r, calls = run_sentinel_step(tmp_path, build)
