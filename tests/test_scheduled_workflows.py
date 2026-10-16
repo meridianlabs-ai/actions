@@ -14,10 +14,13 @@ save one (`cache-mode: read`); and the report job, the
 only producer of the two artifacts later runs trust, refuses a name another
 job took and records the identity of the triage-context it uploaded for the
 triage consumer (tests/test_triage_workflow.py checks that consumer against
-this producer). The scripts are lifted from the YAML and executed under bash
-with stand-ins for gh and pytest on PATH.
+this producer). A failed or cancelled nightly uploads its Inspect logs only
+after a check that withholds any log holding a provider key. The scripts are
+lifted from the YAML and executed under bash with stand-ins for gh and pytest
+on PATH.
 
-Run with `python3 -m pytest` from the repo root (needs pytest, PyYAML and jq;
+Run with `python3 -m pytest` from the repo root (needs pytest, PyYAML, jq and,
+before Python 3.14, zipfile-zstd;
 `.github/workflows/tests.yml` does the same in CI).
 """
 
@@ -27,6 +30,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -712,3 +716,165 @@ def test_a_malformed_upload_output_records_nothing_and_fails(tmp_path, artifact_
     assert r.returncode == 1
     assert "triage-context-artifact id=" not in r.stdout
     assert "::error::upload-artifact returned no artifact id and digest" in r.stdout
+
+
+# --- The nightly's .eval logs ---------------------------------------------------------
+#
+# A failed or cancelled nightly uploads the Inspect logs its tests wrote. The
+# logs record model inputs and outputs, not the provider keys, but the step
+# before the upload checks every log for the literal key values and withholds
+# a file that holds one or that it cannot read.
+
+ANTHROPIC = "sk-ant-api03-" + "a" * 40
+GOOGLE = "AIza" + "g" * 35
+OPENAI = "sk-proj-" + "o" * 40
+LOG_DIR_EXPR = "${{ runner.temp }}/inspect-logs"
+
+
+def zstd_zipfile():
+    """zipfile with zstd, the compression inspect_ai writes .eval members with."""
+    import zipfile
+
+    if sys.version_info < (3, 14):
+        pytest.importorskip("zipfile_zstd", reason="the log checks need zstd: pip install zipfile-zstd")
+    return zipfile
+
+
+def write_eval(path: Path, members: dict[str, str]) -> Path:
+    zipfile = zstd_zipfile()
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_ZSTANDARD) as z:
+        for name, text in members.items():
+            z.writestr(name, text)
+    return path
+
+
+def scan_logs(tmp_path: Path, log_dir: Path, **keys: str) -> subprocess.CompletedProcess:
+    zstd_zipfile()
+    s = step(NIGHTLY, "nightly-tests", "log_scan")
+    # The step runs the job's `python`; here that is the interpreter running pytest.
+    path = f"{Path(sys.executable).parent}:{os.environ['PATH']}"
+    env = {"PATH": path, "INSPECT_LOG_DIR": str(log_dir), "ANTHROPIC_API_KEY": "", "GOOGLE_API_KEY": "", "OPENAI_API_KEY": "", **keys}
+    return run_bash(s["run"], cwd=tmp_path, env=env)
+
+
+def test_the_tests_scan_and_upload_share_one_log_directory():
+    run_tests = step(NIGHTLY, "nightly-tests", "Run tests (fast + slow)")
+    scan = step(NIGHTLY, "nightly-tests", "log_scan")
+    upload = step(NIGHTLY, "nightly-tests", "eval_logs")
+    assert run_tests["env"]["INSPECT_LOG_DIR"] == LOG_DIR_EXPR
+    assert scan["env"] == {
+        "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
+        "GOOGLE_API_KEY": "${{ secrets.GOOGLE_API_KEY }}",
+        "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
+        "INSPECT_LOG_DIR": LOG_DIR_EXPR,
+    }
+    # The scan covers every key the tests held.
+    assert {k for k in run_tests["env"] if k.endswith("_API_KEY")} == {k for k in scan["env"] if k.endswith("_API_KEY")}
+    assert upload["with"]["path"] == LOG_DIR_EXPR + "/"
+
+
+def test_the_logs_upload_only_after_a_failure_and_a_clean_scan():
+    names = [s.get("id") or s.get("name") for s in steps(NIGHTLY, "nightly-tests")]
+    assert names.index("log_scan") == names.index("Run tests (fast + slow)") + 1
+    assert names.index("eval_logs") == names.index("log_scan") + 1
+    assert step(NIGHTLY, "nightly-tests", "log_scan")["if"] == "failure() || cancelled()"
+    upload = step(NIGHTLY, "nightly-tests", "eval_logs")
+    assert upload["if"] == "(failure() || cancelled()) && steps.log_scan.outcome == 'success'"
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload["uses"])
+    assert upload["with"] == {
+        "name": "inspect-swe-eval-logs-${{ github.run_id }}-${{ github.run_attempt }}",
+        "path": LOG_DIR_EXPR + "/",
+        "retention-days": 14,
+        "if-no-files-found": "warn",
+    }
+
+
+def test_the_slack_report_only_compares_the_upload_flag():
+    # The flag comes from the job that ran third-party code, so it may decide
+    # between two fixed messages but never become text in the payload.
+    jobs = workflow_jobs(NIGHTLY)
+    assert jobs["nightly-tests"]["outputs"]["eval_logs"] == "${{ steps.eval_logs.outputs.artifact-id != '' }}"
+    payload = jobs["report"]["steps"][0]["with"]["payload"]
+    uses = re.findall(r"needs\.nightly-tests\.outputs\.eval_logs[^&|}]*", payload)
+    assert uses == ["needs.nightly-tests.outputs.eval_logs == 'true' "]
+
+
+def test_clean_logs_are_all_kept(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_eval(logs / "a.eval", {"header.json": '{"model": "anthropic/claude"}', "samples/1.json": '{"messages": []}'})
+    (logs / "b.json").write_text('{"status": "error"}')
+    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC, GOOGLE_API_KEY=GOOGLE, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in logs.iterdir()) == ["a.eval", "b.json"]
+    assert "Checked 2 log file(s); withheld 0." in r.stdout
+    assert "::warning::" not in r.stdout
+
+
+@pytest.mark.parametrize("key_var, key", [("ANTHROPIC_API_KEY", ANTHROPIC), ("GOOGLE_API_KEY", GOOGLE), ("OPENAI_API_KEY", OPENAI)])
+def test_a_log_holding_any_key_is_withheld_and_the_key_is_not_printed(tmp_path, key_var, key):
+    logs = tmp_path / "logs"
+    (logs / "sub").mkdir(parents=True)
+    write_eval(logs / "clean.eval", {"header.json": "{}"})
+    # The key sits in a compressed member, so only a scan of the
+    # decompressed content finds it; the padding puts it across the scan's
+    # 1 MiB chunk boundary.
+    head = '{"output": "'
+    leak = f"env: {key_var}="
+    padding = "x" * ((1 << 20) - 10 - len(head) - len(leak))
+    sample = head + padding + leak + key + '"}'
+    assert sample.index(key) < 1 << 20 < sample.index(key) + len(key)
+    write_eval(logs / "leak.eval", {"header.json": "{}", "samples/1.json": sample})
+    (logs / "sub" / "leak.json").write_text(f'{{"error": "Bearer {key}"}}')
+    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC, GOOGLE_API_KEY=GOOGLE, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(str(p.relative_to(logs)) for p in logs.rglob("*") if p.is_file()) == ["clean.eval"]
+    assert "::warning::Withheld leak.eval from the upload: it holds a provider key." in r.stdout
+    assert "::warning::Withheld sub/leak.json from the upload: it holds a provider key." in r.stdout
+    assert "Checked 3 log file(s); withheld 2." in r.stdout
+    assert key not in r.stdout + r.stderr
+
+
+def test_an_unreadable_eval_log_is_withheld(tmp_path):
+    # A log cut off mid-write (a cancelled run) cannot be checked, so it is not uploaded.
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_eval(logs / "ok.eval", {"header.json": "{}"})
+    (logs / "partial.eval").write_bytes(write_eval(tmp_path / "whole.eval", {"header.json": "{}" * 500}).read_bytes()[:60])
+    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in logs.iterdir()) == ["ok.eval"]
+    assert "::warning::Withheld partial.eval from the upload: it could not be read." in r.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_a_log_grep_cannot_read_is_withheld(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "locked.json").write_text("{}")
+    (logs / "locked.json").chmod(0)
+    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert list(logs.iterdir()) == []
+    assert "::warning::Withheld locked.json from the upload: it could not be read." in r.stdout
+
+
+def test_an_unset_key_is_not_an_empty_pattern_that_matches_every_log(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_eval(logs / "a.eval", {"header.json": '{"model": "openai/gpt"}'})
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (logs / "a.eval").exists()
+    assert "withheld 0." in r.stdout
+    r = scan_logs(tmp_path, logs)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (logs / "a.eval").exists()
+    assert "No provider key is set, so no log can hold one." in r.stdout
+
+
+def test_no_log_directory_is_a_warning_not_a_failure(tmp_path):
+    # e.g. the install step failed before any test ran.
+    r = scan_logs(tmp_path, tmp_path / "missing", ANTHROPIC_API_KEY=ANTHROPIC)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::warning::No Inspect logs were written; there is nothing to upload." in r.stdout
