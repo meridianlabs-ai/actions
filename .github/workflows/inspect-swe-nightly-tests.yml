@@ -22,6 +22,22 @@ name: Inspect SWE Nightly Tests
 # workflow-level `cache-mode: read` makes the job token refuse a save, so the
 # closure cannot write one with the token Runner.Worker holds.
 # tests/test_scheduled_workflows.py checks this contract.
+#
+# When the tests fail or the run is cancelled (a timeout), the job uploads
+# the run's Inspect `.eval` logs as an artifact, so the provider errors and
+# transcripts behind a failure can be read rather than inferred from the
+# pytest output. The logs hold model inputs and outputs, not the provider
+# keys: inspect_ai records request bodies but not headers, and the agents run
+# in docker sandboxes that get placeholder keys. The step before the upload
+# still checks every log for the literal key values (its path, its raw bytes,
+# and an .eval's decompressed members). It copies each regular file into a
+# separate directory first and checks the copy, which is what gets uploaded,
+# so what it checked is what goes up even if a log changes meanwhile; a copy
+# that holds a key or cannot be read is removed, and links and special files
+# are never copied.
+# That check guards against an accidental leak, not against the code above,
+# which held the keys and the runner already. Nothing in this repository downloads the artifact; it is for
+# people diagnosing the run.
 
 "on":
   schedule:
@@ -40,8 +56,9 @@ name: Inspect SWE Nightly Tests
         default: ""
         type: string
 
-# Read-only job token; nothing in this workflow reads or writes this
-# repository's Actions data.
+# Read-only job token. The failure upload of the `.eval` logs goes through
+# the runner's own artifact credential, not this token, and nothing in this
+# workflow reads Actions data back.
 permissions:
   contents: read
 
@@ -58,6 +75,9 @@ jobs:
       sha: ${{ steps.swe_commit.outputs.sha }}
       short_sha: ${{ steps.swe_commit.outputs.short_sha }}
       ref: ${{ steps.swe_commit.outputs.ref }}
+      # A boolean the report job only compares, so nothing this job writes
+      # reaches the Slack payload as text.
+      eval_logs: ${{ steps.eval_logs.outputs.artifact-id != '' }}
 
     steps:
       # Fail before the checkout so an invalid ref gets this message rather
@@ -130,6 +150,9 @@ jobs:
           # progress bars in the CI log (they render as thousands of wrapped
           # junk lines when 20 tests dump captured output).
           INSPECT_DISPLAY: plain
+          # Every eval() in the suite takes its log directory from here (none
+          # passes log_dir), so the upload below knows where the logs are.
+          INSPECT_LOG_DIR: ${{ runner.temp }}/inspect-logs
           PYTEST_ARGS: ${{ inputs.pytest_args }}
         run: |
           # pytest_args reaches this step through env: and is split on
@@ -177,6 +200,194 @@ jobs:
           # --durations=15 keeps that measurement coming, so the ceiling can
           # be re-tuned from data instead of guesswork.
           pytest --runslow -n auto --timeout=900 --timeout-method=signal --durations=15 --tb=short -o log_level=warning "${extra_args[@]}"
+
+      # See the header. The keys are read from the environment inside Python,
+      # never passed as arguments or written to a file, and never printed.
+      # Nor is a log's name: it is one of the things checked, so the step
+      # reports counts only, and any error (a directory it cannot list, a copy
+      # that fails, a missing zstd reader) prints a fixed message, fails the
+      # step, and so stops the upload. The upload takes CHECKED_LOG_DIR, never
+      # INSPECT_LOG_DIR: upload-artifact follows links, and only regular-file
+      # copies that passed their check are in it. Each log is opened once,
+      # without following a link, and copied from that descriptor; the checks
+      # then read the copy, never the log again, so a log rewritten or
+      # replaced after it was copied changes nothing that is uploaded.
+      # Nothing is deleted from the logs.
+      # This is the job's own Python, the one that ran the tests: on 3.11 it
+      # reads the logs' zstd members through zipfile_zstd, which inspect_ai
+      # installs for Pythons before 3.14 (3.14's zipfile has zstd built in).
+      - name: Copy the logs that hold no provider key for upload
+        id: log_scan
+        if: failure() || cancelled()
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          INSPECT_LOG_DIR: ${{ runner.temp }}/inspect-logs
+          CHECKED_LOG_DIR: ${{ runner.temp }}/inspect-logs-checked
+        run: |
+          python -I - <<'PY'
+          import os
+          import sys
+
+
+          def main():
+              import errno
+              import stat
+              import zipfile
+
+              if sys.version_info < (3, 14):
+                  import zipfile_zstd  # noqa: F401
+
+              log_dir = os.environ["INSPECT_LOG_DIR"]
+              checked_dir = os.environ["CHECKED_LOG_DIR"]
+              # A fresh directory, so it holds nothing but what this run checked.
+              os.mkdir(checked_dir, 0o700)
+              if os.path.islink(log_dir):
+                  raise RuntimeError("the log directory is a link")
+              if not os.path.isdir(log_dir):
+                  print("::warning::No Inspect logs were written; there is nothing to upload.")
+                  return
+
+              # A key that is not set is left out: an empty pattern would
+              # match every log.
+              names = ("ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY")
+              keys = [os.environ[name].encode() for name in names if os.environ.get(name)]
+              overlap = max((len(key) for key in keys), default=1) - 1
+
+              def holds_key(stream):
+                  # Read in chunks, carrying the end of each into the next,
+                  # so a key split across two chunks is still found.
+                  tail = b""
+                  while chunk := stream.read(1 << 20):
+                      window = tail + chunk
+                      if any(key in window for key in keys):
+                          return True
+                      tail = window[len(window) - overlap :]
+                  return False
+
+              def check(copy):
+                  # The copy's raw bytes (for an .eval, that covers the zip's
+                  # member names, comments and other metadata, which are
+                  # stored uncompressed), then an .eval's members decompressed.
+                  with open(copy, "rb") as stream:
+                      if holds_key(stream):
+                          return True
+                  if copy.endswith(".eval"):
+                      with zipfile.ZipFile(copy) as archive:
+                          for member in archive.infolist():
+                              with archive.open(member) as stream:
+                                  if holds_key(stream):
+                                      return True
+                  return False
+
+              # O_NOFOLLOW: a link is refused, not followed. O_NONBLOCK: a
+              # fifo opens without waiting for a writer, and fstat then
+              # refuses it.
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+
+              def snapshot(path, copy):
+                  """Copy the log at path to copy through one descriptor.
+
+                  Returns None once copied, "other" for a link or special file,
+                  "unreadable" when the log cannot be opened or read (it may
+                  have gone). A failure to write the copy raises.
+                  """
+                  try:
+                      source = os.open(path, flags)
+                  except OSError as error:
+                      return "other" if error.errno == errno.ELOOP else "unreadable"
+                  try:
+                      if not stat.S_ISREG(os.fstat(source).st_mode):
+                          return "other"
+                      os.makedirs(os.path.dirname(copy), mode=0o700, exist_ok=True)
+                      target = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                      try:
+                          while True:
+                              try:
+                                  chunk = os.read(source, 1 << 20)
+                              except OSError:
+                                  return "unreadable"
+                              if not chunk:
+                                  return None
+                              view = memoryview(chunk)
+                              while view:
+                                  view = view[os.write(target, view) :]
+                      finally:
+                          os.close(target)
+                  finally:
+                      os.close(source)
+
+              def refuse(error):
+                  raise error
+
+              checked = keyed = unreadable = other = 0
+              # Links are not followed; a directory that cannot be listed
+              # raises (onerror), which fails the step.
+              for root, dirs, files in os.walk(log_dir, onerror=refuse):
+                  for name in list(dirs):
+                      if os.path.islink(os.path.join(root, name)):
+                          dirs.remove(name)
+                          checked += 1
+                          other += 1
+                  for name in files:
+                      path = os.path.join(root, name)
+                      relative = os.path.relpath(path, log_dir)
+                      checked += 1
+                      # The artifact keeps the path, so it is checked too.
+                      if any(key in os.fsencode(relative) for key in keys):
+                          keyed += 1
+                          continue
+                      copy = os.path.join(checked_dir, relative)
+                      outcome = snapshot(path, copy)
+                      if outcome is None:
+                          try:
+                              outcome = "keyed" if check(copy) else None
+                          except Exception:
+                              # A log cut off mid-write (a cancelled run) is
+                              # not a zip it can read, so it is not uploaded.
+                              outcome = "unreadable"
+                      if outcome is None:
+                          continue
+                      if os.path.lexists(copy):
+                          os.remove(copy)
+                      if outcome == "keyed":
+                          keyed += 1
+                      elif outcome == "unreadable":
+                          unreadable += 1
+                      else:
+                          other += 1
+
+              withheld = keyed + unreadable + other
+              if withheld:
+                  print(
+                      f"::warning::Withheld {withheld} of {checked} log entries from the upload: "
+                      f"{keyed} held a provider key, {unreadable} could not be read, "
+                      f"{other} were links or special files."
+                  )
+              print(f"Checked {checked} log entries; withheld {withheld}.")
+
+
+          try:
+              main()
+          except BaseException:
+              # The exception would name the path it failed on, and a path can
+              # hold a key: say only that the check failed.
+              print("::error::The log check did not complete, so no logs will be uploaded.")
+              sys.exit(1)
+          PY
+
+      - name: Upload Inspect logs
+        id: eval_logs
+        if: (failure() || cancelled()) && steps.log_scan.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # One name per attempt: a re-run uploads again rather than colliding
+          # with the first attempt's artifact.
+          name: inspect-swe-eval-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inspect-logs-checked/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Cleanup Docker resources
         if: always()
@@ -228,7 +439,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "${{ needs.nightly-tests.result != 'success' && '<!channel> The nightly tests have failed. Please investigate.' || 'All tests completed successfully! 🎉' }}"
+                    "text": "${{ needs.nightly-tests.result == 'success' && 'All tests completed successfully! 🎉' || needs.nightly-tests.outputs.eval_logs == 'true' && format('<!channel> The nightly tests have failed. Please investigate. The Inspect logs are attached to the run: <https://github.com/{0}/actions/runs/{1}#artifacts|Artifacts>', github.repository, github.run_id) || '<!channel> The nightly tests have failed. Please investigate.' }}"
                   }
                 },
                 {
