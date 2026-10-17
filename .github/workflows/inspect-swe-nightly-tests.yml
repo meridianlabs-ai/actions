@@ -30,10 +30,11 @@ name: Inspect SWE Nightly Tests
 # keys: inspect_ai records request bodies but not headers, and the agents run
 # in docker sandboxes that get placeholder keys. The step before the upload
 # still checks every log for the literal key values (its path, its raw bytes,
-# and an .eval's decompressed members) and withholds any file that holds one
-# or cannot be read. That check guards against an accidental
-# leak, not against the code above, which held the keys and the runner
-# already. Nothing in this repository downloads the artifact; it is for
+# and an .eval's decompressed members) and copies only the regular files that
+# pass into a separate directory, which is what gets uploaded; a log that
+# holds a key, cannot be read, or is a link or special file is left behind.
+# That check guards against an accidental leak, not against the code above,
+# which held the keys and the runner already. Nothing in this repository downloads the artifact; it is for
 # people diagnosing the run.
 
 "on":
@@ -201,13 +202,15 @@ jobs:
       # See the header. The keys are read from the environment inside Python,
       # never passed as arguments or written to a file, and never printed.
       # Nor is a log's name: it is one of the things checked, so the step
-      # reports counts only.
+      # reports counts only, and any error (a directory it cannot list, a copy
+      # that fails, a missing zstd reader) prints a fixed message, fails the
+      # step, and so stops the upload. The upload takes CHECKED_LOG_DIR, never
+      # INSPECT_LOG_DIR: upload-artifact follows links, and only files copied
+      # here after their check are in it. Nothing is deleted from the logs.
       # This is the job's own Python, the one that ran the tests: on 3.11 it
       # reads the logs' zstd members through zipfile_zstd, which inspect_ai
       # installs for Pythons before 3.14 (3.14's zipfile has zstd built in).
-      # Any error before the upload decision, a missing zstd reader included,
-      # fails the step, and then nothing is uploaded.
-      - name: Withhold any log that holds a provider key
+      - name: Copy the logs that hold no provider key for upload
         id: log_scan
         if: failure() || cancelled()
         env:
@@ -215,80 +218,117 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           INSPECT_LOG_DIR: ${{ runner.temp }}/inspect-logs
+          CHECKED_LOG_DIR: ${{ runner.temp }}/inspect-logs-checked
         run: |
           python -I - <<'PY'
           import os
           import sys
-          import zipfile
-
-          if sys.version_info < (3, 14):
-              import zipfile_zstd  # noqa: F401
-
-          log_dir = os.environ["INSPECT_LOG_DIR"]
-          if not os.path.isdir(log_dir):
-              print("::warning::No Inspect logs were written; there is nothing to upload.")
-              sys.exit(0)
-
-          # A key that is not set is left out: an empty pattern would match
-          # every log.
-          names = ("ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY")
-          keys = [os.environ[name].encode() for name in names if os.environ.get(name)]
-          if not keys:
-              print("No provider key is set, so no log can hold one.")
-              sys.exit(0)
-          overlap = max(len(key) for key in keys) - 1
 
 
-          def holds_key(stream):
-              # Read in chunks, carrying the end of each into the next, so a
-              # key split across two chunks is still found.
-              tail = b""
-              while chunk := stream.read(1 << 20):
-                  window = tail + chunk
-                  if any(key in window for key in keys):
+          def main():
+              import shutil
+              import stat
+              import zipfile
+
+              if sys.version_info < (3, 14):
+                  import zipfile_zstd  # noqa: F401
+
+              log_dir = os.environ["INSPECT_LOG_DIR"]
+              checked_dir = os.environ["CHECKED_LOG_DIR"]
+              # A fresh directory, so it holds nothing but what this run checked.
+              os.mkdir(checked_dir)
+              if os.path.islink(log_dir):
+                  raise RuntimeError("the log directory is a link")
+              if not os.path.isdir(log_dir):
+                  print("::warning::No Inspect logs were written; there is nothing to upload.")
+                  return
+
+              # A key that is not set is left out: an empty pattern would
+              # match every log.
+              names = ("ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY")
+              keys = [os.environ[name].encode() for name in names if os.environ.get(name)]
+              overlap = max((len(key) for key in keys), default=1) - 1
+
+              def holds_key(stream):
+                  # Read in chunks, carrying the end of each into the next,
+                  # so a key split across two chunks is still found.
+                  tail = b""
+                  while chunk := stream.read(1 << 20):
+                      window = tail + chunk
+                      if any(key in window for key in keys):
+                          return True
+                      tail = window[len(window) - overlap :]
+                  return False
+
+              def check(path, relative):
+                  # Everything the artifact would carry: the path under the
+                  # log directory (the artifact keeps it), the file's raw
+                  # bytes (for an .eval, that covers the zip's member names,
+                  # comments and other metadata, which are stored
+                  # uncompressed), and an .eval's members decompressed.
+                  if any(key in os.fsencode(relative) for key in keys):
                       return True
-                  tail = window[len(window) - overlap :]
-              return False
+                  with open(path, "rb") as stream:
+                      if holds_key(stream):
+                          return True
+                  if path.endswith(".eval"):
+                      with zipfile.ZipFile(path) as archive:
+                          for member in archive.infolist():
+                              with archive.open(member) as stream:
+                                  if holds_key(stream):
+                                      return True
+                  return False
 
+              def refuse(error):
+                  raise error
 
-          def check(path):
-              # Everything the artifact would carry: the path under the log
-              # directory (the artifact keeps it), the file's raw bytes (for an
-              # .eval, that covers the zip's member names, comments and other
-              # metadata, which are stored uncompressed), and an .eval's
-              # members decompressed.
-              if any(key in os.fsencode(os.path.relpath(path, log_dir)) for key in keys):
-                  return True
-              with open(path, "rb") as stream:
-                  if holds_key(stream):
-                      return True
-              if path.endswith(".eval"):
-                  with zipfile.ZipFile(path) as archive:
-                      for member in archive.infolist():
-                          with archive.open(member) as stream:
-                              if holds_key(stream):
-                                  return True
-              return False
-
-
-          checked = keyed = unreadable = 0
-          for root, _, files in os.walk(log_dir):
-              for name in files:
-                  path = os.path.join(root, name)
-                  checked += 1
-                  try:
-                      if not check(path):
+              checked = keyed = unreadable = other = 0
+              # Links are not followed; a directory that cannot be listed
+              # raises (onerror), which fails the step.
+              for root, dirs, files in os.walk(log_dir, onerror=refuse):
+                  for name in list(dirs):
+                      if os.path.islink(os.path.join(root, name)):
+                          dirs.remove(name)
+                          checked += 1
+                          other += 1
+                  for name in files:
+                      path = os.path.join(root, name)
+                      relative = os.path.relpath(path, log_dir)
+                      checked += 1
+                      if not stat.S_ISREG(os.lstat(path).st_mode):
+                          other += 1
                           continue
-                      keyed += 1
-                  except Exception:
-                      # A log cut off mid-write (a cancelled run) or one that
-                      # cannot be opened is not checked, so it is not uploaded.
-                      unreadable += 1
-                  os.remove(path)
-          withheld = keyed + unreadable
-          if withheld:
-              print(f"::warning::Withheld {withheld} of {checked} log file(s) from the upload: {keyed} held a provider key, {unreadable} could not be read.")
-          print(f"Checked {checked} log file(s); withheld {withheld}.")
+                      try:
+                          if check(path, relative):
+                              keyed += 1
+                              continue
+                      except Exception:
+                          # A log cut off mid-write (a cancelled run) or one
+                          # that cannot be opened is not checked, so it is
+                          # not uploaded.
+                          unreadable += 1
+                          continue
+                      target = os.path.join(checked_dir, relative)
+                      os.makedirs(os.path.dirname(target), exist_ok=True)
+                      shutil.copyfile(path, target, follow_symlinks=False)
+
+              withheld = keyed + unreadable + other
+              if withheld:
+                  print(
+                      f"::warning::Withheld {withheld} of {checked} log entries from the upload: "
+                      f"{keyed} held a provider key, {unreadable} could not be read, "
+                      f"{other} were links or special files."
+                  )
+              print(f"Checked {checked} log entries; withheld {withheld}.")
+
+
+          try:
+              main()
+          except BaseException:
+              # The exception would name the path it failed on, and a path can
+              # hold a key: say only that the check failed.
+              print("::error::The log check did not complete, so no logs will be uploaded.")
+              sys.exit(1)
           PY
 
       - name: Upload Inspect logs
@@ -299,7 +339,7 @@ jobs:
           # One name per attempt: a re-run uploads again rather than colliding
           # with the first attempt's artifact.
           name: inspect-swe-eval-logs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/inspect-logs/
+          path: ${{ runner.temp }}/inspect-logs-checked/
           retention-days: 14
           if-no-files-found: warn
 

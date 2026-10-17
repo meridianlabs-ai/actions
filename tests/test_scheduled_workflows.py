@@ -722,13 +722,17 @@ def test_a_malformed_upload_output_records_nothing_and_fails(tmp_path, artifact_
 #
 # A failed or cancelled nightly uploads the Inspect logs its tests wrote. The
 # logs record model inputs and outputs, not the provider keys, but the step
-# before the upload checks every log for the literal key values and withholds
-# a file that holds one or that it cannot read.
+# before the upload checks every log for the literal key values and copies
+# only the regular files that pass into the directory the upload takes, so
+# the uploaded set is exactly the checked set. It names no file, and any error
+# fails it with a fixed message.
 
 ANTHROPIC = "sk-ant-api03-" + "a" * 40
 GOOGLE = "AIza" + "g" * 35
 OPENAI = "sk-proj-" + "o" * 40
 LOG_DIR_EXPR = "${{ runner.temp }}/inspect-logs"
+CHECKED_DIR_EXPR = "${{ runner.temp }}/inspect-logs-checked"
+FAILED = "::error::The log check did not complete, so no logs will be uploaded.\n"
 
 
 def zstd_zipfile():
@@ -753,8 +757,25 @@ def scan_logs(tmp_path: Path, log_dir: Path, **keys: str) -> subprocess.Complete
     s = step(NIGHTLY, "nightly-tests", "log_scan")
     # The step runs the job's `python`; here that is the interpreter running pytest.
     path = f"{Path(sys.executable).parent}:{os.environ['PATH']}"
-    env = {"PATH": path, "INSPECT_LOG_DIR": str(log_dir), "ANTHROPIC_API_KEY": "", "GOOGLE_API_KEY": "", "OPENAI_API_KEY": "", **keys}
-    return run_bash(s["run"], cwd=tmp_path, env=env)
+    env = {"PATH": path, "INSPECT_LOG_DIR": str(log_dir), "CHECKED_LOG_DIR": str(tmp_path / "checked"), "ANTHROPIC_API_KEY": "", "GOOGLE_API_KEY": "", "OPENAI_API_KEY": "", **keys}
+    # run_bash, with a timeout: a scan that opens a fifo blocks forever.
+    return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]], cwd=tmp_path, env={**os.environ, **env}, text=True, capture_output=True, check=False, timeout=60)
+
+
+def uploaded(tmp_path: Path) -> list[str]:
+    """What the upload would take: every path under the checked directory, links included."""
+    root = tmp_path / "checked"
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() or p.is_symlink())
+
+
+ALL_KEYS = {"ANTHROPIC_API_KEY": ANTHROPIC, "GOOGLE_API_KEY": GOOGLE, "OPENAI_API_KEY": OPENAI}
+
+
+def assert_no_key_printed(r: subprocess.CompletedProcess) -> None:
+    out = r.stdout + r.stderr
+    for key in ALL_KEYS.values():
+        assert key not in out and key[-20:] not in out
+    assert "Traceback" not in out
 
 
 def test_the_tests_scan_and_upload_share_one_log_directory():
@@ -767,10 +788,12 @@ def test_the_tests_scan_and_upload_share_one_log_directory():
         "GOOGLE_API_KEY": "${{ secrets.GOOGLE_API_KEY }}",
         "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
         "INSPECT_LOG_DIR": LOG_DIR_EXPR,
+        "CHECKED_LOG_DIR": CHECKED_DIR_EXPR,
     }
     # The scan covers every key the tests held.
     assert {k for k in run_tests["env"] if k.endswith("_API_KEY")} == {k for k in scan["env"] if k.endswith("_API_KEY")}
-    assert upload["with"]["path"] == LOG_DIR_EXPR + "/"
+    # The upload takes the checked copies, never the log directory itself.
+    assert upload["with"]["path"] == CHECKED_DIR_EXPR + "/"
 
 
 def test_the_logs_upload_only_after_a_failure_and_a_clean_scan():
@@ -783,7 +806,7 @@ def test_the_logs_upload_only_after_a_failure_and_a_clean_scan():
     assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload["uses"])
     assert upload["with"] == {
         "name": "inspect-swe-eval-logs-${{ github.run_id }}-${{ github.run_attempt }}",
-        "path": LOG_DIR_EXPR + "/",
+        "path": CHECKED_DIR_EXPR + "/",
         "retention-days": 14,
         "if-no-files-found": "warn",
     }
@@ -799,19 +822,21 @@ def test_the_slack_report_only_compares_the_upload_flag():
     assert uses == ["needs.nightly-tests.outputs.eval_logs == 'true' "]
 
 
-def test_clean_logs_are_all_kept(tmp_path):
+def test_clean_logs_are_all_copied_and_the_originals_left_alone(tmp_path):
     logs = tmp_path / "logs"
-    logs.mkdir()
+    (logs / "sub").mkdir(parents=True)
     write_eval(logs / "a.eval", {"header.json": '{"model": "anthropic/claude"}', "samples/1.json": '{"messages": []}'})
-    (logs / "b.json").write_text('{"status": "error"}')
-    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC, GOOGLE_API_KEY=GOOGLE, OPENAI_API_KEY=OPENAI)
+    (logs / "sub" / "b.json").write_text('{"status": "error"}')
+    r = scan_logs(tmp_path, logs, **ALL_KEYS)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert sorted(p.name for p in logs.iterdir()) == ["a.eval", "b.json"]
-    assert "Checked 2 log file(s); withheld 0." in r.stdout
-    assert "::warning::" not in r.stdout
+    assert uploaded(tmp_path) == ["a.eval", "sub/b.json"]
+    assert (tmp_path / "checked" / "a.eval").read_bytes() == (logs / "a.eval").read_bytes()
+    assert not (tmp_path / "checked" / "a.eval").is_symlink()
+    assert sorted(str(p.relative_to(logs)) for p in logs.rglob("*") if p.is_file()) == ["a.eval", "sub/b.json"]
+    assert r.stdout == "Checked 2 log entries; withheld 0.\n"
 
 
-@pytest.mark.parametrize("key_var, key", [("ANTHROPIC_API_KEY", ANTHROPIC), ("GOOGLE_API_KEY", GOOGLE), ("OPENAI_API_KEY", OPENAI)])
+@pytest.mark.parametrize("key_var, key", list(ALL_KEYS.items()))
 def test_a_log_holding_any_key_is_withheld_and_the_key_is_not_printed(tmp_path, key_var, key):
     logs = tmp_path / "logs"
     (logs / "sub").mkdir(parents=True)
@@ -826,12 +851,12 @@ def test_a_log_holding_any_key_is_withheld_and_the_key_is_not_printed(tmp_path, 
     assert sample.index(key) < 1 << 20 < sample.index(key) + len(key)
     write_eval(logs / "leak.eval", {"header.json": "{}", "samples/1.json": sample})
     (logs / "sub" / "leak.json").write_text(f'{{"error": "Bearer {key}"}}')
-    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC, GOOGLE_API_KEY=GOOGLE, OPENAI_API_KEY=OPENAI)
+    r = scan_logs(tmp_path, logs, **ALL_KEYS)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert sorted(str(p.relative_to(logs)) for p in logs.rglob("*") if p.is_file()) == ["clean.eval"]
-    assert "::warning::Withheld 2 of 3 log file(s) from the upload: 2 held a provider key, 0 could not be read." in r.stdout
-    assert "Checked 3 log file(s); withheld 2." in r.stdout
-    assert key not in r.stdout + r.stderr
+    assert uploaded(tmp_path) == ["clean.eval"]
+    assert "::warning::Withheld 2 of 3 log entries from the upload: 2 held a provider key, 0 could not be read, 0 were links or special files." in r.stdout
+    assert "Checked 3 log entries; withheld 2." in r.stdout
+    assert_no_key_printed(r)
 
 
 @pytest.mark.parametrize("where", ["file name", "directory name", "member name", "archive comment", "member comment"])
@@ -864,25 +889,50 @@ def test_a_key_in_a_name_or_zip_metadata_is_withheld_and_never_printed(tmp_path,
         rewritten.replace(path)
     r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert sorted(p.name for p in logs.rglob("*") if p.is_file()) == ["clean.eval"]
-    assert "::warning::Withheld 1 of 2 log file(s) from the upload: 1 held a provider key, 0 could not be read." in r.stdout
-    assert OPENAI not in r.stdout + r.stderr
-    assert OPENAI[8:] not in r.stdout + r.stderr
+    assert uploaded(tmp_path) == ["clean.eval"]
+    assert "::warning::Withheld 1 of 2 log entries from the upload: 1 held a provider key, 0 could not be read, 0 were links or special files." in r.stdout
+    assert_no_key_printed(r)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
-def test_a_withheld_files_name_is_never_printed(tmp_path):
-    # A file withheld for its contents may also carry the key in its name.
+@pytest.mark.parametrize("target", ["directory", "file"])
+def test_a_link_is_never_followed_or_copied(tmp_path, target):
+    # Review pass 2, F1: upload-artifact follows links, and the walk does
+    # not, so a link could carry unchecked files (or a key in its own name)
+    # into the artifact. Links are left out of the checked copy and counted.
     logs = tmp_path / "logs"
     logs.mkdir()
-    write_eval(logs / f"{ANTHROPIC}.eval", {"samples/1.json": f'{{"output": "{ANTHROPIC}"}}'})
-    (logs / f"{GOOGLE}.json").write_bytes(b"\x00")
-    (logs / f"{GOOGLE}.json").chmod(0)
-    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write_eval(outside / "leak.eval", {"samples/1.json": f'{{"output": "{OPENAI}"}}'})
+    write_eval(logs / "clean.eval", {"header.json": "{}"})
+    (logs / "linked").symlink_to(outside if target == "directory" else outside / "leak.eval")
+    (logs / f"named-{OPENAI}").symlink_to(outside / "leak.eval")
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert list(logs.iterdir()) == []
-    out = r.stdout + r.stderr
-    assert ANTHROPIC not in out and GOOGLE not in out and ".eval" not in out and ".json" not in out
+    assert uploaded(tmp_path) == ["clean.eval"]
+    assert "::warning::Withheld 2 of 3 log entries from the upload: 0 held a provider key, 0 could not be read, 2 were links or special files." in r.stdout
+    assert_no_key_printed(r)
+
+
+def test_a_linked_log_directory_fails_the_check(tmp_path):
+    real = tmp_path / "real-logs"
+    real.mkdir()
+    write_eval(real / "a.eval", {"header.json": "{}"})
+    (tmp_path / "logs").symlink_to(real)
+    r = scan_logs(tmp_path, tmp_path / "logs", OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 1
+    assert r.stdout == FAILED and r.stderr == ""
+    assert uploaded(tmp_path) == []
+
+
+def test_a_fifo_is_withheld_without_being_read(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    os.mkfifo(logs / "pipe.json")
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert uploaded(tmp_path) == []
+    assert "0 held a provider key, 0 could not be read, 1 were links or special files." in r.stdout
 
 
 def test_an_unreadable_eval_log_is_withheld(tmp_path):
@@ -893,20 +943,72 @@ def test_an_unreadable_eval_log_is_withheld(tmp_path):
     (logs / "partial.eval").write_bytes(write_eval(tmp_path / "whole.eval", {"header.json": "{}" * 500}).read_bytes()[:60])
     r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert sorted(p.name for p in logs.iterdir()) == ["ok.eval"]
-    assert "::warning::Withheld 1 of 2 log file(s) from the upload: 0 held a provider key, 1 could not be read." in r.stdout
+    assert uploaded(tmp_path) == ["ok.eval"]
+    assert "::warning::Withheld 1 of 2 log entries from the upload: 0 held a provider key, 1 could not be read, 0 were links or special files." in r.stdout
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
-def test_a_log_grep_cannot_read_is_withheld(tmp_path):
+NOT_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+
+
+@NOT_ROOT
+def test_an_unreadable_file_is_withheld_and_its_key_bearing_name_is_not_printed(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()
-    (logs / "locked.json").write_text("{}")
-    (logs / "locked.json").chmod(0)
+    (logs / f"{GOOGLE}.json").write_text("{}")
+    (logs / f"{GOOGLE}.json").chmod(0)
     r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert list(logs.iterdir()) == []
-    assert "::warning::Withheld 1 of 1 log file(s) from the upload: 0 held a provider key, 1 could not be read." in r.stdout
+    assert uploaded(tmp_path) == []
+    assert "::warning::Withheld 1 of 1 log entries from the upload: 0 held a provider key, 1 could not be read, 0 were links or special files." in r.stdout
+    assert_no_key_printed(r)
+
+
+@NOT_ROOT
+def test_a_key_named_log_in_a_read_only_directory_is_withheld_without_a_delete(tmp_path):
+    # Review pass 2, F2: withholding used to delete the log, and a failed
+    # delete printed its key-bearing path in a traceback. Nothing is deleted
+    # now; the log is just not copied.
+    logs = tmp_path / "logs"
+    (logs / "ro").mkdir(parents=True)
+    write_eval(logs / "ro" / f"run-{OPENAI}.eval", {"header.json": "{}"})
+    (logs / "ro").chmod(0o555)
+    try:
+        r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    finally:
+        (logs / "ro").chmod(0o755)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert uploaded(tmp_path) == []
+    assert (logs / "ro" / f"run-{OPENAI}.eval").exists()
+    assert_no_key_printed(r)
+
+
+@NOT_ROOT
+def test_a_directory_that_cannot_be_listed_fails_the_check_without_naming_it(tmp_path):
+    # Review pass 2, F2: a traversal error is not a partial success. The
+    # step fails (so nothing is uploaded) and says only that it failed.
+    logs = tmp_path / "logs"
+    (logs / f"task-{OPENAI}").mkdir(parents=True)
+    write_eval(logs / "clean.eval", {"header.json": "{}"})
+    (logs / f"task-{OPENAI}").chmod(0)
+    try:
+        r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    finally:
+        (logs / f"task-{OPENAI}").chmod(0o755)
+    assert r.returncode == 1
+    assert r.stdout == FAILED and r.stderr == ""
+    assert_no_key_printed(r)
+
+
+def test_a_leftover_checked_directory_fails_the_check(tmp_path):
+    # The checked directory must be fresh, so it holds only what this run
+    # checked; a leftover one fails the step rather than uploading a mix.
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_eval(logs / "run.eval", {"header.json": "{}"})
+    (tmp_path / "checked").mkdir()
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 1
+    assert r.stdout == FAILED and r.stderr == ""
 
 
 def test_an_unset_key_is_not_an_empty_pattern_that_matches_every_log(tmp_path):
@@ -915,16 +1017,19 @@ def test_an_unset_key_is_not_an_empty_pattern_that_matches_every_log(tmp_path):
     write_eval(logs / "a.eval", {"header.json": '{"model": "openai/gpt"}'})
     r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert (logs / "a.eval").exists()
-    assert "withheld 0." in r.stdout
+    assert uploaded(tmp_path) == ["a.eval"]
+    assert r.stdout == "Checked 1 log entries; withheld 0.\n"
+    import shutil
+
+    shutil.rmtree(tmp_path / "checked")
     r = scan_logs(tmp_path, logs)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert (logs / "a.eval").exists()
-    assert "No provider key is set, so no log can hold one." in r.stdout
+    assert uploaded(tmp_path) == ["a.eval"]
 
 
 def test_no_log_directory_is_a_warning_not_a_failure(tmp_path):
     # e.g. the install step failed before any test ran.
     r = scan_logs(tmp_path, tmp_path / "missing", ANTHROPIC_API_KEY=ANTHROPIC)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "::warning::No Inspect logs were written; there is nothing to upload." in r.stdout
+    assert r.stdout == "::warning::No Inspect logs were written; there is nothing to upload.\n"
+    assert uploaded(tmp_path) == []
