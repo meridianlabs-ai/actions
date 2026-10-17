@@ -829,10 +829,60 @@ def test_a_log_holding_any_key_is_withheld_and_the_key_is_not_printed(tmp_path, 
     r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC, GOOGLE_API_KEY=GOOGLE, OPENAI_API_KEY=OPENAI)
     assert r.returncode == 0, r.stdout + r.stderr
     assert sorted(str(p.relative_to(logs)) for p in logs.rglob("*") if p.is_file()) == ["clean.eval"]
-    assert "::warning::Withheld leak.eval from the upload: it holds a provider key." in r.stdout
-    assert "::warning::Withheld sub/leak.json from the upload: it holds a provider key." in r.stdout
+    assert "::warning::Withheld 2 of 3 log file(s) from the upload: 2 held a provider key, 0 could not be read." in r.stdout
     assert "Checked 3 log file(s); withheld 2." in r.stdout
     assert key not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("where", ["file name", "directory name", "member name", "archive comment", "member comment"])
+def test_a_key_in_a_name_or_zip_metadata_is_withheld_and_never_printed(tmp_path, where):
+    # Review pass 1, F1: the artifact carries the log's path and the zip's
+    # metadata as well as the decompressed members, so all are checked, and
+    # the step never names a file (a withheld file's name may be the leak).
+    zipfile = zstd_zipfile()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_eval(logs / "clean.eval", {"header.json": "{}"})
+    name, directory, member = "leak.eval", logs, "header.json"
+    if where == "file name":
+        name = f"run-{OPENAI}.eval"
+    elif where == "directory name":
+        directory = logs / f"task-{OPENAI}"
+        directory.mkdir()
+    elif where == "member name":
+        member = f"samples/{OPENAI}.json"
+    path = write_eval(directory / name, {member: '{"clean": true}'})
+    if where == "archive comment":
+        with zipfile.ZipFile(path, "a") as z:
+            z.comment = f"key {OPENAI}".encode()
+    elif where == "member comment":
+        rewritten = tmp_path / "rewritten.eval"
+        with zipfile.ZipFile(path) as src, zipfile.ZipFile(rewritten, "w") as dst:
+            for info in src.infolist():
+                info.comment = f"key {OPENAI}".encode()
+                dst.writestr(info, src.read(info), compress_type=zipfile.ZIP_ZSTANDARD)
+        rewritten.replace(path)
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in logs.rglob("*") if p.is_file()) == ["clean.eval"]
+    assert "::warning::Withheld 1 of 2 log file(s) from the upload: 1 held a provider key, 0 could not be read." in r.stdout
+    assert OPENAI not in r.stdout + r.stderr
+    assert OPENAI[8:] not in r.stdout + r.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_a_withheld_files_name_is_never_printed(tmp_path):
+    # A file withheld for its contents may also carry the key in its name.
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_eval(logs / f"{ANTHROPIC}.eval", {"samples/1.json": f'{{"output": "{ANTHROPIC}"}}'})
+    (logs / f"{GOOGLE}.json").write_bytes(b"\x00")
+    (logs / f"{GOOGLE}.json").chmod(0)
+    r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert list(logs.iterdir()) == []
+    out = r.stdout + r.stderr
+    assert ANTHROPIC not in out and GOOGLE not in out and ".eval" not in out and ".json" not in out
 
 
 def test_an_unreadable_eval_log_is_withheld(tmp_path):
@@ -844,7 +894,7 @@ def test_an_unreadable_eval_log_is_withheld(tmp_path):
     r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
     assert r.returncode == 0, r.stdout + r.stderr
     assert sorted(p.name for p in logs.iterdir()) == ["ok.eval"]
-    assert "::warning::Withheld partial.eval from the upload: it could not be read." in r.stdout
+    assert "::warning::Withheld 1 of 2 log file(s) from the upload: 0 held a provider key, 1 could not be read." in r.stdout
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
@@ -856,7 +906,7 @@ def test_a_log_grep_cannot_read_is_withheld(tmp_path):
     r = scan_logs(tmp_path, logs, ANTHROPIC_API_KEY=ANTHROPIC)
     assert r.returncode == 0, r.stdout + r.stderr
     assert list(logs.iterdir()) == []
-    assert "::warning::Withheld locked.json from the upload: it could not be read." in r.stdout
+    assert "::warning::Withheld 1 of 1 log file(s) from the upload: 0 held a provider key, 1 could not be read." in r.stdout
 
 
 def test_an_unset_key_is_not_an_empty_pattern_that_matches_every_log(tmp_path):

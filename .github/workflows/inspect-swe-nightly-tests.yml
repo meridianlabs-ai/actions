@@ -29,8 +29,9 @@ name: Inspect SWE Nightly Tests
 # pytest output. The logs hold model inputs and outputs, not the provider
 # keys: inspect_ai records request bodies but not headers, and the agents run
 # in docker sandboxes that get placeholder keys. The step before the upload
-# still checks every log for the literal key values and withholds any file
-# that holds one or cannot be read. That check guards against an accidental
+# still checks every log for the literal key values (its path, its raw bytes,
+# and an .eval's decompressed members) and withholds any file that holds one
+# or cannot be read. That check guards against an accidental
 # leak, not against the code above, which held the keys and the runner
 # already. Nothing in this repository downloads the artifact; it is for
 # people diagnosing the run.
@@ -199,6 +200,8 @@ jobs:
 
       # See the header. The keys are read from the environment inside Python,
       # never passed as arguments or written to a file, and never printed.
+      # Nor is a log's name: it is one of the things checked, so the step
+      # reports counts only.
       # This is the job's own Python, the one that ran the tests: on 3.11 it
       # reads the logs' zstd members through zipfile_zstd, which inspect_ai
       # installs for Pythons before 3.14 (3.14's zipfile has zstd built in).
@@ -249,34 +252,42 @@ jobs:
 
 
           def check(path):
-              # An .eval log is a zip archive of compressed JSON members, so
-              # each member is matched decompressed.
+              # Everything the artifact would carry: the path under the log
+              # directory (the artifact keeps it), the file's raw bytes (for an
+              # .eval, that covers the zip's member names, comments and other
+              # metadata, which are stored uncompressed), and an .eval's
+              # members decompressed.
+              if any(key in os.fsencode(os.path.relpath(path, log_dir)) for key in keys):
+                  return True
+              with open(path, "rb") as stream:
+                  if holds_key(stream):
+                      return True
               if path.endswith(".eval"):
                   with zipfile.ZipFile(path) as archive:
                       for member in archive.infolist():
                           with archive.open(member) as stream:
                               if holds_key(stream):
                                   return True
-                  return False
-              with open(path, "rb") as stream:
-                  return holds_key(stream)
+              return False
 
 
-          checked = withheld = 0
+          checked = keyed = unreadable = 0
           for root, _, files in os.walk(log_dir):
-              for name in sorted(files):
+              for name in files:
                   path = os.path.join(root, name)
                   checked += 1
                   try:
-                      reason = "holds a provider key" if check(path) else None
+                      if not check(path):
+                          continue
+                      keyed += 1
                   except Exception:
                       # A log cut off mid-write (a cancelled run) or one that
                       # cannot be opened is not checked, so it is not uploaded.
-                      reason = "could not be read"
-                  if reason:
-                      os.remove(path)
-                      withheld += 1
-                      print(f"::warning::Withheld {os.path.relpath(path, log_dir)} from the upload: it {reason}.")
+                      unreadable += 1
+                  os.remove(path)
+          withheld = keyed + unreadable
+          if withheld:
+              print(f"::warning::Withheld {withheld} of {checked} log file(s) from the upload: {keyed} held a provider key, {unreadable} could not be read.")
           print(f"Checked {checked} log file(s); withheld {withheld}.")
           PY
 
