@@ -30,9 +30,11 @@ name: Inspect SWE Nightly Tests
 # keys: inspect_ai records request bodies but not headers, and the agents run
 # in docker sandboxes that get placeholder keys. The step before the upload
 # still checks every log for the literal key values (its path, its raw bytes,
-# and an .eval's decompressed members) and copies only the regular files that
-# pass into a separate directory, which is what gets uploaded; a log that
-# holds a key, cannot be read, or is a link or special file is left behind.
+# and an .eval's decompressed members). It copies each regular file into a
+# separate directory first and checks the copy, which is what gets uploaded,
+# so what it checked is what goes up even if a log changes meanwhile; a copy
+# that holds a key or cannot be read is removed, and links and special files
+# are never copied.
 # That check guards against an accidental leak, not against the code above,
 # which held the keys and the runner already. Nothing in this repository downloads the artifact; it is for
 # people diagnosing the run.
@@ -205,8 +207,12 @@ jobs:
       # reports counts only, and any error (a directory it cannot list, a copy
       # that fails, a missing zstd reader) prints a fixed message, fails the
       # step, and so stops the upload. The upload takes CHECKED_LOG_DIR, never
-      # INSPECT_LOG_DIR: upload-artifact follows links, and only files copied
-      # here after their check are in it. Nothing is deleted from the logs.
+      # INSPECT_LOG_DIR: upload-artifact follows links, and only regular-file
+      # copies that passed their check are in it. Each log is opened once,
+      # without following a link, and copied from that descriptor; the checks
+      # then read the copy, never the log again, so a log rewritten or
+      # replaced after it was copied changes nothing that is uploaded.
+      # Nothing is deleted from the logs.
       # This is the job's own Python, the one that ran the tests: on 3.11 it
       # reads the logs' zstd members through zipfile_zstd, which inspect_ai
       # installs for Pythons before 3.14 (3.14's zipfile has zstd built in).
@@ -226,7 +232,7 @@ jobs:
 
 
           def main():
-              import shutil
+              import errno
               import stat
               import zipfile
 
@@ -236,7 +242,7 @@ jobs:
               log_dir = os.environ["INSPECT_LOG_DIR"]
               checked_dir = os.environ["CHECKED_LOG_DIR"]
               # A fresh directory, so it holds nothing but what this run checked.
-              os.mkdir(checked_dir)
+              os.mkdir(checked_dir, 0o700)
               if os.path.islink(log_dir):
                   raise RuntimeError("the log directory is a link")
               if not os.path.isdir(log_dir):
@@ -260,24 +266,57 @@ jobs:
                       tail = window[len(window) - overlap :]
                   return False
 
-              def check(path, relative):
-                  # Everything the artifact would carry: the path under the
-                  # log directory (the artifact keeps it), the file's raw
-                  # bytes (for an .eval, that covers the zip's member names,
-                  # comments and other metadata, which are stored
-                  # uncompressed), and an .eval's members decompressed.
-                  if any(key in os.fsencode(relative) for key in keys):
-                      return True
-                  with open(path, "rb") as stream:
+              def check(copy):
+                  # The copy's raw bytes (for an .eval, that covers the zip's
+                  # member names, comments and other metadata, which are
+                  # stored uncompressed), then an .eval's members decompressed.
+                  with open(copy, "rb") as stream:
                       if holds_key(stream):
                           return True
-                  if path.endswith(".eval"):
-                      with zipfile.ZipFile(path) as archive:
+                  if copy.endswith(".eval"):
+                      with zipfile.ZipFile(copy) as archive:
                           for member in archive.infolist():
                               with archive.open(member) as stream:
                                   if holds_key(stream):
                                       return True
                   return False
+
+              # O_NOFOLLOW: a link is refused, not followed. O_NONBLOCK: a
+              # fifo opens without waiting for a writer, and fstat then
+              # refuses it.
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+
+              def snapshot(path, copy):
+                  """Copy the log at path to copy through one descriptor.
+
+                  Returns None once copied, "other" for a link or special file,
+                  "unreadable" when the log cannot be opened or read (it may
+                  have gone). A failure to write the copy raises.
+                  """
+                  try:
+                      source = os.open(path, flags)
+                  except OSError as error:
+                      return "other" if error.errno == errno.ELOOP else "unreadable"
+                  try:
+                      if not stat.S_ISREG(os.fstat(source).st_mode):
+                          return "other"
+                      os.makedirs(os.path.dirname(copy), mode=0o700, exist_ok=True)
+                      target = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                      try:
+                          while True:
+                              try:
+                                  chunk = os.read(source, 1 << 20)
+                              except OSError:
+                                  return "unreadable"
+                              if not chunk:
+                                  return None
+                              view = memoryview(chunk)
+                              while view:
+                                  view = view[os.write(target, view) :]
+                      finally:
+                          os.close(target)
+                  finally:
+                      os.close(source)
 
               def refuse(error):
                   raise error
@@ -295,22 +334,29 @@ jobs:
                       path = os.path.join(root, name)
                       relative = os.path.relpath(path, log_dir)
                       checked += 1
-                      if not stat.S_ISREG(os.lstat(path).st_mode):
-                          other += 1
+                      # The artifact keeps the path, so it is checked too.
+                      if any(key in os.fsencode(relative) for key in keys):
+                          keyed += 1
                           continue
-                      try:
-                          if check(path, relative):
-                              keyed += 1
-                              continue
-                      except Exception:
-                          # A log cut off mid-write (a cancelled run) or one
-                          # that cannot be opened is not checked, so it is
-                          # not uploaded.
+                      copy = os.path.join(checked_dir, relative)
+                      outcome = snapshot(path, copy)
+                      if outcome is None:
+                          try:
+                              outcome = "keyed" if check(copy) else None
+                          except Exception:
+                              # A log cut off mid-write (a cancelled run) is
+                              # not a zip it can read, so it is not uploaded.
+                              outcome = "unreadable"
+                      if outcome is None:
+                          continue
+                      if os.path.lexists(copy):
+                          os.remove(copy)
+                      if outcome == "keyed":
+                          keyed += 1
+                      elif outcome == "unreadable":
                           unreadable += 1
-                          continue
-                      target = os.path.join(checked_dir, relative)
-                      os.makedirs(os.path.dirname(target), exist_ok=True)
-                      shutil.copyfile(path, target, follow_symlinks=False)
+                      else:
+                          other += 1
 
               withheld = keyed + unreadable + other
               if withheld:

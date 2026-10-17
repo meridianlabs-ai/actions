@@ -910,8 +910,108 @@ def test_a_link_is_never_followed_or_copied(tmp_path, target):
     r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
     assert r.returncode == 0, r.stdout + r.stderr
     assert uploaded(tmp_path) == ["clean.eval"]
-    assert "::warning::Withheld 2 of 3 log entries from the upload: 0 held a provider key, 0 could not be read, 2 were links or special files." in r.stdout
+    # The key-named link is caught by its path before it is ever opened.
+    assert "::warning::Withheld 2 of 3 log entries from the upload: 1 held a provider key, 0 could not be read, 1 were links or special files." in r.stdout
     assert_no_key_printed(r)
+
+
+# Review pass 3, F1: a log can change while the step runs. The step opens each
+# log once, copies it from that descriptor and checks the copy, so the check
+# and the upload see the same bytes. These tests change the log at a chosen
+# line of the step's script (a trace hook, as in the review's reproduction):
+# just before the log is opened, and after it was copied but before the copy
+# is checked.
+
+INTERLEAVE = r"""
+import os, pathlib, sys
+source, marker, mode, log, outside = sys.argv[1:]
+lines = source.splitlines()
+(target,) = [i for i, line in enumerate(lines, 1) if line.strip().startswith(marker)]
+fired = []
+
+def act():
+    log_path = pathlib.Path(log)
+    if mode == "rewrite":
+        log_path.write_text(pathlib.Path(outside).read_text())
+        return
+    log_path.unlink()
+    if mode == "symlink":
+        log_path.symlink_to(outside)
+    elif mode == "fifo":
+        os.mkfifo(log_path)
+
+def trace(frame, event, arg):
+    if not fired and event == "line" and frame.f_code.co_filename == "<log-scan>" and frame.f_lineno == target:
+        fired.append(True)
+        act()
+    return trace
+
+sys.settrace(trace)
+try:
+    exec(compile(source, "<log-scan>", "exec"), {"__name__": "__main__"})
+finally:
+    sys.settrace(None)
+    print("FIRED" if fired else "NOT FIRED", file=sys.stderr)
+"""
+
+BEFORE_OPEN = "source = os.open(path, flags)"
+AFTER_COPY = 'outcome = "keyed" if check(copy) else None'
+
+
+def scan_with_interleaving(tmp_path: Path, marker: str, mode: str) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    zstd_zipfile()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "run.json"
+    log.write_text('{"status": "error"}')
+    outside = tmp_path / "outside.json"
+    outside.write_text(f'{{"error": "{OPENAI}"}}')
+    run = step(NIGHTLY, "nightly-tests", "log_scan")["run"]
+    source = run.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    env = {**os.environ, "INSPECT_LOG_DIR": str(logs), "CHECKED_LOG_DIR": str(tmp_path / "checked"), "ANTHROPIC_API_KEY": "", "GOOGLE_API_KEY": "", "OPENAI_API_KEY": OPENAI}
+    r = subprocess.run([sys.executable, "-I", "-c", INTERLEAVE, source, marker, mode, str(log), str(outside)], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=60)
+    assert r.stderr.endswith("FIRED\n") and not r.stderr.endswith("NOT FIRED\n"), r.stderr
+    return r, tmp_path / "checked", log
+
+
+def assert_checked_dir_holds_no_key_or_link(checked: Path) -> None:
+    for p in checked.rglob("*"):
+        assert not p.is_symlink(), p
+        if p.is_file():
+            assert OPENAI.encode() not in p.read_bytes(), p
+
+
+@pytest.mark.parametrize("mode", ["rewrite", "symlink"])
+def test_a_log_changed_after_it_was_copied_changes_nothing_uploaded(tmp_path, mode):
+    # The review's interleaving: the log passes, then is rewritten with a key
+    # or swapped for a link to one. The check reads the copy, and nothing
+    # reads the log again, so the clean copy is what goes up.
+    r, checked, _ = scan_with_interleaving(tmp_path, AFTER_COPY, mode)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == "Checked 1 log entries; withheld 0.\n"
+    assert (checked / "run.json").read_text() == '{"status": "error"}'
+    assert_checked_dir_holds_no_key_or_link(checked)
+
+
+@pytest.mark.parametrize(
+    "mode, counts",
+    [
+        ("rewrite", "1 held a provider key, 0 could not be read, 0 were links or special files."),
+        ("symlink", "0 held a provider key, 0 could not be read, 1 were links or special files."),
+        ("fifo", "0 held a provider key, 0 could not be read, 1 were links or special files."),
+        ("delete", "0 held a provider key, 1 could not be read, 0 were links or special files."),
+    ],
+)
+def test_a_log_changed_after_the_walk_found_it_is_judged_by_what_is_opened(tmp_path, mode, counts):
+    # Between the walk and the open the log may be rewritten, swapped for a
+    # link or a fifo, or removed. The open does not follow a link or wait for
+    # a fifo's writer, and the descriptor, not an earlier path lookup, decides
+    # what the log is.
+    r, checked, _ = scan_with_interleaving(tmp_path, BEFORE_OPEN, mode)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"::warning::Withheld 1 of 1 log entries from the upload: {counts}" in r.stdout
+    assert [p for p in checked.rglob("*") if p.is_file() or p.is_symlink()] == []
+    assert OPENAI not in r.stdout + r.stderr
 
 
 def test_a_linked_log_directory_fails_the_check(tmp_path):
