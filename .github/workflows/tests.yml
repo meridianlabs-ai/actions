@@ -55,9 +55,10 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      # zipfile-zstd: the nightly's log check reads .eval logs, whose members
-      # are zstd-compressed, and Python 3.12's zipfile cannot.
-      - run: pip install pytest pyyaml zipfile-zstd
+      # inspect_ai: the nightly's log check reads .eval logs through Inspect's
+      # own zip reader (zstd, multi-frame members), and its tests read the
+      # rebuilt logs back with inspect_ai.log.
+      - run: pip install pytest pyyaml inspect_ai
       # The VS Code release tests run the publish job's cross-check step against
       # vsce's own reader: install the vsce release-please-vscode.yml pins.
       - run: npm install -g --ignore-scripts @vscode/vsce@3.9.2

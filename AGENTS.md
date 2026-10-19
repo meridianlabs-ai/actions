@@ -47,7 +47,7 @@ the real permission engine and when to repeat them.
 ## Checks
 
 ```
-pip install pytest pyyaml zipfile-zstd   # or a venv; the repo has no lock file
+pip install pytest pyyaml inspect_ai   # or a venv; the repo has no lock file
 python3 -m pytest -q tests
 actionlint .github/workflows/<changed>.yml
 python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflows/<changed>.yml

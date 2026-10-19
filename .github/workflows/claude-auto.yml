@@ -91,7 +91,7 @@ jobs:
       # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
       provision: |
         uv venv --python 3.12
-        uv pip install pytest pyyaml zipfile-zstd
+        uv pip install pytest pyyaml inspect_ai
       head_branch: ${{ github.event.workflow_run.head_branch }}
       pr_number: ${{ github.event.workflow_run.pull_requests[0].number }}
       ci_run_id: ${{ github.event.workflow_run.id }}
@@ -155,7 +155,7 @@ jobs:
       # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
       provision: |
         uv venv --python 3.12
-        uv pip install pytest pyyaml zipfile-zstd
+        uv pip install pytest pyyaml inspect_ai
       pr_number: ${{ github.event.issue.number }}
       comment_author: ${{ github.event.comment.user.login }}
       # allow_build_config (optional, default false; agents repo:

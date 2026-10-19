@@ -106,7 +106,7 @@ def ci_recipe() -> str:
 def test_the_ci_recipe_is_what_tests_yml_installs():
     # Pin the derivation, so a tests.yml change that the helper misreads
     # (a second install step, a moved Python pin) fails here, not silently.
-    assert ci_recipe() == "uv venv --python 3.12\nuv pip install pytest pyyaml zipfile-zstd\n"
+    assert ci_recipe() == "uv venv --python 3.12\nuv pip install pytest pyyaml inspect_ai\n"
 
 
 @pytest.mark.parametrize("stub", STUBS)

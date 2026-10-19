@@ -29,12 +29,16 @@ name: Inspect SWE Nightly Tests
 # pytest output. The logs hold model inputs and outputs, not the provider
 # keys: inspect_ai records request bodies but not headers, and the agents run
 # in docker sandboxes that get placeholder keys. The step before the upload
-# still checks every log for the literal key values (its path, its raw bytes,
-# and an .eval's decompressed members). It copies each regular file into a
-# separate directory first and checks the copy, which is what gets uploaded,
-# so what it checked is what goes up even if a log changes meanwhile; a copy
-# that holds a key or cannot be read is removed, and links and special files
-# are never copied.
+# still checks every log for the literal key values and puts only what it
+# checked into a separate directory, which is what gets uploaded. An .eval
+# log is rebuilt there: each member the archive lists is read with Inspect's
+# own zip reader, its name and decompressed bytes are checked, and it is
+# written to a fresh zip, so bytes no member lists (Inspect prunes entries
+# without compacting), comments and extra fields are never uploaded. Any other
+# log is copied and the copy's bytes checked. Either way what was checked is
+# what goes up, even if a log changes meanwhile; a log with a key in its path
+# or content, one that cannot be read, and links and special files are left
+# out.
 # That check guards against an accidental leak, not against the code above,
 # which held the keys and the runner already. Nothing in this repository downloads the artifact; it is for
 # people diagnosing the run.
@@ -207,15 +211,16 @@ jobs:
       # reports counts only, and any error (a directory it cannot list, a copy
       # that fails, a missing zstd reader) prints a fixed message, fails the
       # step, and so stops the upload. The upload takes CHECKED_LOG_DIR, never
-      # INSPECT_LOG_DIR: upload-artifact follows links, and only regular-file
-      # copies that passed their check are in it. Each log is opened once,
-      # without following a link, and copied from that descriptor; the checks
-      # then read the copy, never the log again, so a log rewritten or
-      # replaced after it was copied changes nothing that is uploaded.
-      # Nothing is deleted from the logs.
-      # This is the job's own Python, the one that ran the tests: on 3.11 it
-      # reads the logs' zstd members through zipfile_zstd, which inspect_ai
-      # installs for Pythons before 3.14 (3.14's zipfile has zstd built in).
+      # INSPECT_LOG_DIR: upload-artifact follows links, and only checked
+      # regular-file content is in it. Each log is opened once, without
+      # following a link, and read only through that descriptor: an .eval is
+      # rebuilt from the member bytes as they are checked, any other log is
+      # copied and the copy checked, so a log rewritten or replaced meanwhile
+      # changes nothing that is uploaded. Nothing is deleted from the logs.
+      # This is the job's own Python, the one that ran the tests, so
+      # inspect_ai is installed: inspect_ai._util.zipfile gives zipfile zstd
+      # (zipfile_zstd before 3.14) and the multi-frame zstd members Inspect
+      # writes for large logs (inspect_ai 0.3.211; inspect_swe needs 0.3.261).
       - name: Copy the logs that hold no provider key for upload
         id: log_scan
         if: failure() || cancelled()
@@ -234,10 +239,16 @@ jobs:
           def main():
               import errno
               import stat
+              import warnings
               import zipfile
 
-              if sys.version_info < (3, 14):
-                  import zipfile_zstd  # noqa: F401
+              # Inspect's zip reader: zstd on every Python, and its
+              # multi-frame zstd members. Importing it patches zipfile.
+              import inspect_ai._util.zipfile  # noqa: F401
+
+              # A warning names what it is about (a duplicate member name, say),
+              # and a name can hold a key.
+              warnings.simplefilter("ignore")
 
               log_dir = os.environ["INSPECT_LOG_DIR"]
               checked_dir = os.environ["CHECKED_LOG_DIR"]
@@ -255,31 +266,70 @@ jobs:
               keys = [os.environ[name].encode() for name in names if os.environ.get(name)]
               overlap = max((len(key) for key in keys), default=1) - 1
 
-              def holds_key(stream):
-                  # Read in chunks, carrying the end of each into the next,
-                  # so a key split across two chunks is still found.
+              class HoldsKey(Exception):
+                  pass
+
+              def chunks(read):
+                  # Yield chunks until read() returns nothing, raising
+                  # HoldsKey once a key appears. The end of each chunk is
+                  # carried into the next, so a key split across two chunks
+                  # is still found.
                   tail = b""
-                  while chunk := stream.read(1 << 20):
+                  while chunk := read(1 << 20):
                       window = tail + chunk
                       if any(key in window for key in keys):
-                          return True
+                          raise HoldsKey
                       tail = window[len(window) - overlap :]
-                  return False
+                      yield chunk
 
               def check(copy):
-                  # The copy's raw bytes (for an .eval, that covers the zip's
-                  # member names, comments and other metadata, which are
-                  # stored uncompressed), then an .eval's members decompressed.
+                  # A copied log (not an .eval): its bytes.
                   with open(copy, "rb") as stream:
-                      if holds_key(stream):
-                          return True
-                  if copy.endswith(".eval"):
-                      with zipfile.ZipFile(copy) as archive:
-                          for member in archive.infolist():
-                              with archive.open(member) as stream:
-                                  if holds_key(stream):
-                                      return True
-                  return False
+                      for _ in chunks(stream.read):
+                          pass
+
+              def create(copy):
+                  return os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+
+              def rebuild(source, copy):
+                  """Rebuild the .eval open at source as copy from its checked members.
+
+                  Only the members the archive lists are read, through
+                  Inspect's reader, and each is written to the new archive as
+                  its bytes are checked; nothing else of the original is
+                  copied. Returns None, "keyed" or "unreadable".
+                  """
+                  stream = os.fdopen(source, "rb", closefd=False)
+                  try:
+                      archive = zipfile.ZipFile(stream)
+                  except Exception:
+                      stream.close()
+                      return "unreadable"
+                  with stream, archive, os.fdopen(create(copy), "wb") as out:
+                      with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as rebuilt:
+                          for info in archive.infolist():
+                              if any(key in info.filename.encode() for key in keys):
+                                  return "keyed"
+                              if info.is_dir():
+                                  continue
+                              try:
+                                  member = archive.open(info)
+                                  entry = zipfile.ZipInfo(info.filename, info.date_time)
+                              except Exception:
+                                  return "unreadable"
+                              entry.compress_type = zipfile.ZIP_DEFLATED
+                              with member, rebuilt.open(entry, "w", force_zip64=True) as target:
+                                  try:
+                                      for chunk in chunks(member.read):
+                                          target.write(chunk)
+                                  except HoldsKey:
+                                      return "keyed"
+                                  except OSError:
+                                      raise
+                                  except Exception:
+                                      # zipfile's CRC and format errors.
+                                      return "unreadable"
+                  return None
 
               # O_NOFOLLOW: a link is refused, not followed. O_NONBLOCK: a
               # fifo opens without waiting for a writer, and fstat then
@@ -287,11 +337,12 @@ jobs:
               flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
 
               def snapshot(path, copy):
-                  """Copy the log at path to copy through one descriptor.
+                  """Put the log at path into copy, reading it through one descriptor.
 
-                  Returns None once copied, "other" for a link or special file,
-                  "unreadable" when the log cannot be opened or read (it may
-                  have gone). A failure to write the copy raises.
+                  Returns None once copied (an .eval also checked), "keyed",
+                  "other" for a link or special file, or "unreadable" when the
+                  log cannot be opened or read (it may have gone). A failure
+                  to write the copy raises.
                   """
                   try:
                       source = os.open(path, flags)
@@ -301,7 +352,9 @@ jobs:
                       if not stat.S_ISREG(os.fstat(source).st_mode):
                           return "other"
                       os.makedirs(os.path.dirname(copy), mode=0o700, exist_ok=True)
-                      target = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                      if path.endswith(".eval"):
+                          return rebuild(source, copy)
+                      target = create(copy)
                       try:
                           while True:
                               try:
@@ -340,13 +393,11 @@ jobs:
                           continue
                       copy = os.path.join(checked_dir, relative)
                       outcome = snapshot(path, copy)
-                      if outcome is None:
+                      if outcome is None and not path.endswith(".eval"):
                           try:
-                              outcome = "keyed" if check(copy) else None
-                          except Exception:
-                              # A log cut off mid-write (a cancelled run) is
-                              # not a zip it can read, so it is not uploaded.
-                              outcome = "unreadable"
+                              check(copy)
+                          except HoldsKey:
+                              outcome = "keyed"
                       if outcome is None:
                           continue
                       if os.path.lexists(copy):

@@ -149,7 +149,7 @@ jobs:
       # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
       provision: |
         uv venv --python 3.12
-        uv pip install pytest pyyaml zipfile-zstd
+        uv pip install pytest pyyaml inspect_ai
       # trigger_phrase is single-valued, so resolve it from the SAME source the
       # action will check for this event (comment > review > issue), not from a
       # union of all sources — otherwise a stale @claude in an enclosing issue
@@ -293,7 +293,7 @@ jobs:
       # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
       provision: |
         uv venv --python 3.12
-        uv pip install pytest pyyaml zipfile-zstd
+        uv pip install pytest pyyaml inspect_ai
       trigger_phrase: "@auto"
       label_trigger: "auto"
       # allow_build_config (optional, default false; agents repo:

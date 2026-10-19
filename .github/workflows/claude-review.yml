@@ -124,7 +124,7 @@ jobs:
       # runs in it. The same in every job; tests/test_agent_stubs.py checks it.
       provision: |
         uv venv --python 3.12
-        uv pip install pytest pyyaml zipfile-zstd
+        uv pip install pytest pyyaml inspect_ai
     uses: meridianlabs-ai/agents/.github/workflows/claude-review.yml@main
     # The machine account's secrets, for the gate's deterministic ack/stage
     # steps (eyes reaction + board stage) and the land job's posts (the

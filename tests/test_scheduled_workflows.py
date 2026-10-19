@@ -19,8 +19,8 @@ after a check that withholds any log holding a provider key. The scripts are
 lifted from the YAML and executed under bash with stand-ins for gh and pytest
 on PATH.
 
-Run with `python3 -m pytest` from the repo root (needs pytest, PyYAML, jq and,
-before Python 3.14, zipfile-zstd;
+Run with `python3 -m pytest` from the repo root (needs pytest, PyYAML, jq and
+inspect_ai;
 `.github/workflows/tests.yml` does the same in CI).
 """
 
@@ -736,12 +736,19 @@ FAILED = "::error::The log check did not complete, so no logs will be uploaded.\
 
 
 def zstd_zipfile():
-    """zipfile with zstd, the compression inspect_ai writes .eval members with."""
+    """zipfile as Inspect patches it: zstd, the compression inspect_ai writes
+    .eval members with, and its multi-frame zstd members. The step reads the
+    logs through the same module, so the log checks need inspect_ai."""
     import zipfile
 
-    if sys.version_info < (3, 14):
-        pytest.importorskip("zipfile_zstd", reason="the log checks need zstd: pip install zipfile-zstd")
+    pytest.importorskip("inspect_ai._util.zipfile", reason="the log checks need inspect_ai: pip install inspect_ai")
     return zipfile
+
+
+def members(path: Path) -> dict[str, bytes]:
+    zipfile = zstd_zipfile()
+    with zipfile.ZipFile(path) as z:
+        return {name: z.read(name) for name in z.namelist()}
 
 
 def write_eval(path: Path, members: dict[str, str]) -> Path:
@@ -830,7 +837,9 @@ def test_clean_logs_are_all_copied_and_the_originals_left_alone(tmp_path):
     r = scan_logs(tmp_path, logs, **ALL_KEYS)
     assert r.returncode == 0, r.stdout + r.stderr
     assert uploaded(tmp_path) == ["a.eval", "sub/b.json"]
-    assert (tmp_path / "checked" / "a.eval").read_bytes() == (logs / "a.eval").read_bytes()
+    # An .eval is rebuilt from its members, so the members match, not the bytes.
+    assert members(tmp_path / "checked" / "a.eval") == members(logs / "a.eval")
+    assert (tmp_path / "checked" / "sub" / "b.json").read_bytes() == (logs / "sub" / "b.json").read_bytes()
     assert not (tmp_path / "checked" / "a.eval").is_symlink()
     assert sorted(str(p.relative_to(logs)) for p in logs.rglob("*") if p.is_file()) == ["a.eval", "sub/b.json"]
     assert r.stdout == "Checked 2 log entries; withheld 0.\n"
@@ -859,12 +868,11 @@ def test_a_log_holding_any_key_is_withheld_and_the_key_is_not_printed(tmp_path, 
     assert_no_key_printed(r)
 
 
-@pytest.mark.parametrize("where", ["file name", "directory name", "member name", "archive comment", "member comment"])
-def test_a_key_in_a_name_or_zip_metadata_is_withheld_and_never_printed(tmp_path, where):
-    # Review pass 1, F1: the artifact carries the log's path and the zip's
-    # metadata as well as the decompressed members, so all are checked, and
-    # the step never names a file (a withheld file's name may be the leak).
-    zipfile = zstd_zipfile()
+@pytest.mark.parametrize("where", ["file name", "directory name", "member name"])
+def test_a_key_in_a_name_is_withheld_and_never_printed(tmp_path, where):
+    # Review pass 1, F1: the artifact carries the log's path and its members'
+    # names, so both are checked, and the step never names a file (a withheld
+    # file's name may be the leak).
     logs = tmp_path / "logs"
     logs.mkdir()
     write_eval(logs / "clean.eval", {"header.json": "{}"})
@@ -876,22 +884,185 @@ def test_a_key_in_a_name_or_zip_metadata_is_withheld_and_never_printed(tmp_path,
         directory.mkdir()
     elif where == "member name":
         member = f"samples/{OPENAI}.json"
-    path = write_eval(directory / name, {member: '{"clean": true}'})
-    if where == "archive comment":
-        with zipfile.ZipFile(path, "a") as z:
-            z.comment = f"key {OPENAI}".encode()
-    elif where == "member comment":
-        rewritten = tmp_path / "rewritten.eval"
-        with zipfile.ZipFile(path) as src, zipfile.ZipFile(rewritten, "w") as dst:
-            for info in src.infolist():
-                info.comment = f"key {OPENAI}".encode()
-                dst.writestr(info, src.read(info), compress_type=zipfile.ZIP_ZSTANDARD)
-        rewritten.replace(path)
+    write_eval(directory / name, {member: '{"clean": true}'})
     r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
     assert r.returncode == 0, r.stdout + r.stderr
     assert uploaded(tmp_path) == ["clean.eval"]
     assert "::warning::Withheld 1 of 2 log entries from the upload: 1 held a provider key, 0 could not be read, 0 were links or special files." in r.stdout
     assert_no_key_printed(r)
+
+
+def local_member_start(raw: bytes, info) -> int:
+    """Where a member's compressed bytes start: after its local header."""
+    import struct
+
+    name_length, extra_length = struct.unpack_from("<HH", raw, info.header_offset + 26)
+    return info.header_offset + 30 + name_length + extra_length
+
+
+@pytest.mark.parametrize("where", ["archive comment", "member comment", "member extra field", "pruned member"])
+def test_a_key_outside_the_listed_members_is_never_uploaded(tmp_path, where):
+    # Review pass 4, F1: an .eval can carry bytes no listed member reads:
+    # comments, extra fields, and members Inspect pruned from the central
+    # directory without compacting (still compressed, so a raw-byte check
+    # cannot see the key). The step rebuilds an .eval from its listed members
+    # only, so none of that reaches the upload, and the log is still uploaded.
+    import struct
+
+    zipfile = zstd_zipfile()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / "run.eval"
+    if where == "pruned member":
+        # The review's reproduction: the idiom Inspect's recorder uses.
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_ZSTANDARD) as z:
+            z.writestr("old.json", f'{{"key": "{OPENAI}"}}')
+            dead = z.getinfo("old.json")
+            z.writestr("header.json", '{"status": "error"}')
+            z.filelist = [i for i in z.filelist if i.filename != "old.json"]
+            z.NameToInfo.pop("old.json")
+        raw = path.read_bytes()
+        assert OPENAI.encode() not in raw
+        import zstandard
+
+        start = local_member_start(raw, dead)
+        hidden = zstandard.ZstdDecompressor().decompressobj().decompress(raw[start : start + dead.compress_size])
+        assert OPENAI.encode() in hidden  # the fixture really hides the key
+    else:
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_ZSTANDARD) as z:
+            info = zipfile.ZipInfo("header.json")
+            info.compress_type = zipfile.ZIP_ZSTANDARD
+            if where == "member comment":
+                info.comment = f"key {OPENAI}".encode()
+            elif where == "member extra field":
+                payload = f"key {OPENAI}".encode()
+                info.extra = struct.pack("<HH", 0xCAFE, len(payload)) + payload
+            z.writestr(info, '{"status": "error"}')
+            if where == "archive comment":
+                z.comment = f"key {OPENAI}".encode()
+        assert OPENAI.encode() in path.read_bytes()
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == "Checked 1 log entries; withheld 0.\n"
+    rebuilt = tmp_path / "checked" / "run.eval"
+    assert members(rebuilt) == {"header.json": b'{"status": "error"}'}
+    raw = rebuilt.read_bytes()
+    assert OPENAI.encode() not in raw and b"old.json" not in raw and b"\xfe\xca" not in raw
+    with zipfile.ZipFile(rebuilt) as z:
+        assert z.comment == b""
+        assert [(i.filename, i.comment, i.extra) for i in z.infolist()] == [("header.json", b"", b"")]
+    assert_no_key_printed(r)
+
+
+def write_multiframe_eval(path: Path, text: str, frame_input: int) -> Path:
+    """An .eval whose member Inspect's writer split into zstd frames of
+    frame_input bytes (Inspect uses 200 MiB; a small cap keeps the fixture
+    small)."""
+    zstd_zipfile()
+    import inspect_ai._util.zipfile as inspect_zipfile
+
+    original = inspect_zipfile._MAX_INPUT_PER_FRAME
+    inspect_zipfile._MAX_INPUT_PER_FRAME = frame_input
+    try:
+        write_eval(path, {"samples/1.json": text})
+    finally:
+        inspect_zipfile._MAX_INPUT_PER_FRAME = original
+    import zipfile
+
+    import zstandard
+
+    raw = path.read_bytes()
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo("samples/1.json")
+    start = local_member_start(raw, info)
+    compressed = raw[start : start + info.compress_size]
+    # A reader that stops at the first frame (bare zipfile_zstd) gets only part.
+    first = zstandard.ZstdDecompressor().decompressobj().decompress(compressed)
+    assert len(first) < len(text), "fixture is a single frame"
+    return path
+
+
+def test_a_clean_multi_frame_member_is_read_and_uploaded(tmp_path):
+    # Review pass 4, F2: Inspect writes members over 200 MiB as several zstd
+    # frames, which zipfile_zstd alone cannot read; the step reads them with
+    # Inspect's own reader instead of withholding a valid large log.
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    text = '{"output": "' + "x" * 10_000 + '"}'
+    write_multiframe_eval(logs / "big.eval", text, frame_input=1_000)
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == "Checked 1 log entries; withheld 0.\n"
+    assert members(tmp_path / "checked" / "big.eval") == {"samples/1.json": text.encode()}
+
+
+def test_a_key_in_a_later_frame_is_found(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    text = '{"output": "' + "x" * 10_000 + OPENAI + '"}'
+    write_multiframe_eval(logs / "big.eval", text, frame_input=1_000)
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert uploaded(tmp_path) == []
+    assert "1 held a provider key, 0 could not be read" in r.stdout
+
+
+def test_a_duplicate_member_name_prints_nothing(tmp_path):
+    # Writing a duplicate name makes zipfile warn, naming the member; the
+    # step's output stays counts only.
+    import warnings
+
+    zipfile = zstd_zipfile()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with zipfile.ZipFile(logs / "run.eval", "w", compression=zipfile.ZIP_ZSTANDARD) as z:
+            z.writestr("samples/dup.json", "{}")
+            z.writestr("samples/dup.json", '{"second": true}')
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout == "Checked 1 log entries; withheld 0.\n" and r.stderr == ""
+
+
+def test_a_member_whose_bytes_do_not_match_its_crc_is_withheld(tmp_path):
+    zipfile = zstd_zipfile()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = write_eval(logs / "run.eval", {"header.json": '{"status": "error"}'})
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo("header.json")
+    raw = bytearray(path.read_bytes())
+    central = raw.rindex(b"PK\x01\x02")  # its central directory entry; CRC-32 at +16
+    raw[central + 16 : central + 20] = (info.CRC ^ 0xFFFFFFFF).to_bytes(4, "little")
+    path.write_bytes(bytes(raw))
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert uploaded(tmp_path) == []
+    assert "0 held a provider key, 1 could not be read" in r.stdout
+
+
+def test_a_rebuilt_eval_log_reads_back_with_inspect(tmp_path, monkeypatch):
+    # The rebuilt archive is deflate, not zstd; Inspect's reader (and so the
+    # viewer it feeds) must still open it as the same log.
+    zstd_zipfile()
+    from inspect_ai import Task, eval as inspect_eval
+    from inspect_ai.dataset import Sample
+    from inspect_ai.log import read_eval_log
+    from inspect_ai.solver import generate
+
+    monkeypatch.setenv("INSPECT_DISPLAY", "none")
+    logs = tmp_path / "logs"
+    (log,) = inspect_eval(Task(dataset=[Sample(input="hi"), Sample(input="there")], solver=generate()), model="mockllm/model", log_dir=str(logs))
+    (original,) = list(logs.glob("*.eval"))
+    r = scan_logs(tmp_path, logs, OPENAI_API_KEY=OPENAI)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rebuilt = tmp_path / "checked" / original.name
+    before, after = read_eval_log(str(original)), read_eval_log(str(rebuilt))
+    assert after.status == before.status == "success"
+    assert after.eval.model_dump() == before.eval.model_dump()
+    assert after.results == before.results
+    assert [s.model_dump() for s in after.samples] == [s.model_dump() for s in before.samples]
 
 
 @pytest.mark.parametrize("target", ["directory", "file"])
@@ -955,7 +1126,7 @@ finally:
 """
 
 BEFORE_OPEN = "source = os.open(path, flags)"
-AFTER_COPY = 'outcome = "keyed" if check(copy) else None'
+AFTER_COPY = "check(copy)"
 
 
 def scan_with_interleaving(tmp_path: Path, marker: str, mode: str) -> tuple[subprocess.CompletedProcess, Path, Path]:
