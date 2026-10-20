@@ -22,6 +22,11 @@ name: Inspect SWE Nightly Tests
 # workflow-level `cache-mode: read` makes the job token refuse a save, so the
 # closure cannot write one with the token Runner.Worker holds.
 # tests/test_scheduled_workflows.py checks this contract.
+#
+# The test step does get that read-only token as GITHUB_TOKEN: inspect_swe
+# sends it to api.github.com when resolving agent releases, because the
+# unauthenticated 60/hour per-IP limit fails the suite (2026-10-20). It can
+# read public repos and nothing else, and it expires with the job.
 
 "on":
   schedule:
@@ -126,6 +131,9 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Read-only job token (see the header): lifts api.github.com's
+          # unauthenticated rate limit for agent release lookups.
+          GITHUB_TOKEN: ${{ github.token }}
           # Plain-text eval output: no rich box-drawing panels or animated
           # progress bars in the CI log (they render as thousands of wrapped
           # junk lines when 20 tests dump captured output).
