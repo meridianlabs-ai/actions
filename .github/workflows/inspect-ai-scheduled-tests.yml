@@ -347,6 +347,8 @@ jobs:
         env:
           DOCKER_BUILDKIT: 1
           BUILDKIT_PROGRESS: plain
+          # Compose 2.38 bake shares image IDs across projects (meridianlabs-ai/inspect_ai#591); drop at Compose >= 2.39
+          COMPOSE_BAKE: "false"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
