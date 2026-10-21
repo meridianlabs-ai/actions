@@ -21,6 +21,16 @@ Minimal caller examples are in each workflow's header comment.
 
 ## Workflows
 
+### Docs Link Check
+
+Checks the published docs sites of inspect_ai, inspect_scout, inspect_viz, inspect_swe and inspect_flow for broken links and anchors every Monday at 12:00 UTC, and posts the result to Slack.
+
+- **File**: `.github/workflows/docs-link-check.yml`, with lychee settings in `.github/lychee.toml`
+- Reads each site's `sitemap.xml` and runs [lychee](https://github.com/lycheeverse/lychee) on every link of every page, including links between the sites. Changelogs are skipped.
+- Checks the live sites, so a broken link shows up once it is deployed.
+- The run summary lists each broken link and the page it is on. The Slack message links to it and does not ping the channel.
+- A push that changes the workflow or `lychee.toml` runs the check without posting to Slack.
+
 ### Inspect AI Scheduled Tests
 
 A GitHub Actions workflow that runs [inspect_ai](https://github.com/UKGovernmentBEIS/inspect_ai) slow tests on a regular schedule.

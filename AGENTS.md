@@ -9,8 +9,9 @@ it.
 `meridianlabs-ai/actions` holds the GitHub Actions shared by the Meridian
 repos: reusable release workflows and composite actions (`README.md`,
 `RELEASING.md`), the scheduled test runs of `inspect_ai` and `inspect_swe`
-and the triage of their failures (`INSPECT_AI_TESTS.md`), and the ci-perf
-run. The workflows are the product; there is no application code.
+and the triage of their failures (`INSPECT_AI_TESTS.md`), the ci-perf
+run, and a weekly link check of the published docs sites. The workflows
+are the product; there is no application code.
 
 ## The workflow scripts are tested
 
@@ -18,7 +19,8 @@ The `run:` blocks and permission rules in `.github/workflows/*.yml` are
 tested in `tests/`: each test file lifts the scripts out of the YAML and
 executes them under bash, with stand-ins for `gh` and `pytest` on `PATH`
 where the script calls them (`tests/test_triage_workflow.py`,
-`tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`;
+`tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`,
+`tests/test_docs_link_check_workflow.py`;
 `tests/test_slack_release_announce.py` covers the announce converter,
 `tests/test_release_notes_heading.py` the release workflows' heading rename, and
 `tests/test_repository.py` checks that no workflow names a retired

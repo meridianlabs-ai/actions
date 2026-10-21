@@ -231,6 +231,11 @@ guarantee, and what is by design. To report a vulnerability, see
   workflow-level `cache-mode: read` makes the token refuse a cache save;
   the `report` job refuses to upload an artifact name another job of its
   attempt took.
+- The docs link check declares a read-only job token, persists no
+  credential into its checkout and uses no Actions cache. Its `check` job,
+  which runs lychee over pages fetched from the live docs sites, holds only
+  that token. The Slack token is in the `report` job, which reads nothing
+  from `check` but its result.
 - The Slack destination of a triage reply comes from the context of the
   failed run that its `report` job produced, resolved by the `context` job
   before the agent runs. It never comes from the agent's manifest, the

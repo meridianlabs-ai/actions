@@ -1,0 +1,17 @@
+# lychee settings for .github/workflows/docs-link-check.yml.
+
+include_fragments = "anchor-only"
+no_progress = true
+max_concurrency = 16
+timeout = 30
+max_retries = 3
+
+# 403 and 429 are what bot-blocking and rate-limited sites (OpenAI, Medium,
+# x.ai) return to lychee for pages that load in a browser.
+accept = ["200..=299", "403", "429"]
+
+# The inspect-docs Quarto extension writes reference pages' <link rel="next">
+# and <link rel="prev"> as .qmd URLs. They are in the page head, so readers
+# never follow them, and every site has them. The pattern would also hide a
+# body link to a .qmd URL; drop it once the extension writes .html there.
+exclude = ['\.qmd(#|$)']
