@@ -18,4 +18,11 @@ accept = ["200..=299", "403", "429"]
 # and <link rel="prev"> as .qmd URLs. They are in the page head, so readers
 # never follow them, and every site has them. The pattern would also hide a
 # body link to a .qmd URL; drop it once the extension writes .html there.
-exclude = ['\.qmd(#|$)']
+#
+# Anchors that a page creates with JavaScript after it loads, so lychee,
+# which reads the served HTML, never finds them:
+# - quarto.org/docs/gallery/ builds its sections (#dashboards, ...) client-side.
+exclude = [
+  '\.qmd(#|$)',
+  '^https://quarto\.org/docs/gallery/#',
+]

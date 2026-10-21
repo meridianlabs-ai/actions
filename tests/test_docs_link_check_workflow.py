@@ -203,8 +203,11 @@ def test_a_page_that_cannot_be_fetched_does_not_end_the_run():
         ("https://meridianlabs-ai.github.io/inspect_flow/index.qmd", True),
         ("https://inspect.aisi.org.uk/reference/inspect_ai.agent.html#react", False),
         ("https://inspect.aisi.org.uk/qmd-notes.html", False),
+        ("https://quarto.org/docs/gallery/#dashboards", True),
+        ("https://quarto.org/docs/gallery/", False),
+        ("https://quarto.org/docs/guide/#overview", False),
     ],
 )
-def test_only_qmd_urls_are_excluded(url, excluded):
+def test_only_the_listed_urls_are_excluded(url, excluded):
     patterns = tomllib.loads(LYCHEE_CONFIG.read_text())["exclude"]
     assert any(re.search(p, url) for p in patterns) is excluded
