@@ -47,8 +47,11 @@ def sitemap(*locs: str) -> str:
     return f'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>'
 
 
-def run_sitemap_step(tmp_path: Path, sitemaps: dict[str, str]) -> subprocess.CompletedProcess:
-    """Run the step with a curl stand-in that serves `sitemaps` (site -> body) and 404s anything else."""
+def run_sitemap_step(tmp_path: Path, sitemaps: dict[str, str], truncated: str | None = None) -> subprocess.CompletedProcess:
+    """Run the step with a curl stand-in that serves `sitemaps` (site -> body) and 404s anything else.
+
+    For the site named by `truncated`, curl prints its sitemap and then fails, as a transfer cut off midway does.
+    """
     served = tmp_path / "served"
     served.mkdir()
     for i, (site, body) in enumerate(sitemaps.items()):
@@ -61,7 +64,7 @@ def run_sitemap_step(tmp_path: Path, sitemaps: dict[str, str]) -> subprocess.Com
         "#!/usr/bin/env bash\n"
         'url="${!#}"\n'
         f'for f in "{served}"/*.url; do\n'
-        '  if [ "$(cat "$f")" = "$url" ]; then cat "${f%.url}.xml"; exit 0; fi\n'
+        '  if [ "$(cat "$f")" = "$url" ]; then cat "${f%.url}.xml"; [ "$url" = "$TRUNCATED/sitemap.xml" ] && exit 18; exit 0; fi\n'
         "done\n"
         'echo "curl: (22) The requested URL returned error: 404" >&2\n'
         "exit 22\n"
@@ -71,7 +74,7 @@ def run_sitemap_step(tmp_path: Path, sitemaps: dict[str, str]) -> subprocess.Com
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step("check", SITEMAP_STEP)["run"]],
         cwd=tmp_path,
-        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "TRUNCATED": truncated or ""},
         text=True,
         capture_output=True,
         check=False,
@@ -167,17 +170,30 @@ def test_a_missing_sitemap_fails_the_job(tmp_path):
     maps = all_sitemaps()
     del maps[sites()[1]]
     r = run_sitemap_step(tmp_path, maps)
-    assert r.returncode != 0
-    assert f"::error::No pages found in {sites()[1]}/sitemap.xml" in r.stdout
+    assert r.returncode == 1
+    assert f"::error::Could not fetch {sites()[1]}/sitemap.xml" in r.stdout
+
+
+def test_a_sitemap_cut_off_midway_fails_the_job_instead_of_dropping_pages(tmp_path):
+    site = sites()[3]
+    r = run_sitemap_step(tmp_path, all_sitemaps(), truncated=site)
+    assert r.returncode == 1
+    assert f"::error::Could not fetch {site}/sitemap.xml" in r.stdout
 
 
 # --- The lychee config ------------------------------------------------------------------
 
 
-def test_lychee_reads_the_config_this_repo_checks_in():
+def test_lychee_reads_the_config_this_repo_checks_in_and_the_pages_the_script_lists():
     args = step("check", "Check links")["with"]["args"].split()
     assert args[args.index("--config") + 1] == ".github/lychee.toml"
     assert LYCHEE_CONFIG.is_file()
+    assert args[args.index("--files-from") + 1] == "pages.txt"
+    assert ": > pages.txt" in step("check", SITEMAP_STEP)["run"]
+
+
+def test_a_page_that_cannot_be_fetched_does_not_end_the_run():
+    assert tomllib.loads(LYCHEE_CONFIG.read_text())["skip_missing"] is True
 
 
 @pytest.mark.parametrize(

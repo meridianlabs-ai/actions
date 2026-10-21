@@ -6,7 +6,8 @@ name: Docs Link Check
 # lychee checks every link on them, including links between the sites (a
 # scout page linking an inspect_ai anchor), which no single repo's CI sees.
 # It checks the live sites, so a broken link shows up here once it is
-# deployed, not when it merges. Nothing is checked out or built.
+# deployed, not when it merges. Only this repo is checked out, for the
+# lychee config; nothing is built.
 #
 # The check job runs lychee over pages fetched from the web, so it holds only
 # the read-only job token, which lychee uses for github.com rate limits. The
@@ -62,7 +63,11 @@ jobs:
             # their links are release history (inspect_ai's alone has
             # thousands of PR links) and old entries point at anchors that
             # have since moved.
-            pages=$(curl -fsSL --retry 3 "$site/sitemap.xml" \
+            if ! xml=$(curl -fsSL --retry 3 "$site/sitemap.xml"); then
+              echo "::error::Could not fetch $site/sitemap.xml"
+              exit 1
+            fi
+            pages=$(printf '%s' "$xml" \
               | grep -oE '<loc>[^<]+</loc>' \
               | sed -E 's#</?loc>##g' \
               | awk -v prefix="$site/" 'index($0, prefix) == 1' \
@@ -95,13 +100,13 @@ jobs:
           payload: |
             {
               "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
-              "text": "${{ needs.check.result == 'success' && '✅ Docs Link Check Passed' || '⚠️ Docs Link Check Found Broken Links' }}",
+              "text": "${{ needs.check.result == 'success' && '✅ Docs Link Check Passed' || '⚠️ Docs Link Check Failed' }}",
               "blocks": [
                 {
                   "type": "header",
                   "text": {
                     "type": "plain_text",
-                    "text": "${{ needs.check.result == 'success' && '✅ Docs Link Check Passed' || '⚠️ Docs Link Check Found Broken Links' }}"
+                    "text": "${{ needs.check.result == 'success' && '✅ Docs Link Check Passed' || '⚠️ Docs Link Check Failed' }}"
                   }
                 },
                 {
@@ -125,7 +130,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "${{ needs.check.result == 'success' && 'No broken links or anchors.' || 'The run summary lists each broken link and the page it is on. If the check itself failed, the log says why.' }}"
+                    "text": "${{ needs.check.result == 'success' && 'No broken links or anchors.' || 'The run summary lists each broken link and the page it is on. If there is no summary, the log says why the check could not run.' }}"
                   }
                 }
               ]
