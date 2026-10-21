@@ -191,6 +191,13 @@ def test_pytest_args_outside_the_allowlist_fail_before_pytest_runs(workflow, job
     assert argv is None
 
 
+def test_slow_tests_use_the_classic_compose_builder():
+    # Compose 2.38's bake builder gives projects that build the same
+    # Dockerfile one shared image ID, so one project's cleanup can delete the
+    # image another is building (meridianlabs-ai/inspect_ai#591).
+    assert step(SCHEDULED, "slow-tests", "Run slow tests")["env"]["COMPOSE_BAKE"] == "false"
+
+
 # --- inspect_sentinel install (TEMPORARY) -------------------------------------------
 
 SENTINEL_STEP = "Install inspect_sentinel (TEMPORARY)"
