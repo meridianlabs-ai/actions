@@ -63,4 +63,14 @@ jobs:
       # The VS Code release tests run the publish job's cross-check step against
       # vsce's own reader: install the vsce release-please-vscode.yml pins.
       - run: npm install -g --ignore-scripts @vscode/vsce@3.9.2
+      # The docs link check tests run lychee against a local server: install
+      # the release docs-link-check.yml pins, checked against its digest.
+      - name: Install lychee
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o lychee.tar.gz https://github.com/lycheeverse/lychee/releases/download/lychee-v0.24.2/lychee-x86_64-unknown-linux-gnu.tar.gz
+          echo "1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a  lychee.tar.gz" | sha256sum -c -
+          tar -xzf lychee.tar.gz
+          install -D lychee-x86_64-unknown-linux-gnu/lychee "$RUNNER_TEMP/lychee/bin/lychee"
+          echo "$RUNNER_TEMP/lychee/bin" >> "$GITHUB_PATH"
       - run: python3 -m pytest -q tests

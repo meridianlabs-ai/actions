@@ -5,17 +5,27 @@ holds only the read-only job token: no secret, no persisted checkout
 credential and no Actions cache. The Slack token is in the report job, which
 reads nothing from check but its result and never pings the channel. The
 sitemap script is lifted from the YAML and run under bash with a stand-in
-for curl on PATH.
+for curl on PATH. The lychee config is run with the lychee binary the
+workflow pins, against a local server, so a page that cannot be fetched is
+shown to fail the check.
 
-Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML).
+Run with `python3 -m pytest` from the repo root (needs pytest, PyYAML and,
+for the lychee tests, lychee on PATH; `.github/workflows/tests.yml` installs
+it).
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import threading
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -24,6 +34,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "docs-link-check.yml"
 LYCHEE_CONFIG = ROOT / ".github" / "lychee.toml"
+TESTS_WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
 SITEMAP_STEP = "List pages from the sitemaps"
 
 
@@ -192,8 +203,73 @@ def test_lychee_reads_the_config_this_repo_checks_in_and_the_pages_the_script_li
     assert ": > pages.txt" in step("check", SITEMAP_STEP)["run"]
 
 
-def test_a_page_that_cannot_be_fetched_does_not_end_the_run():
-    assert tomllib.loads(LYCHEE_CONFIG.read_text())["skip_missing"] is True
+# --- lychee with this config, against a local server -------------------------------
+
+
+def lychee() -> str:
+    path = shutil.which("lychee")
+    if path is None:
+        if os.environ.get("CI"):
+            pytest.fail("lychee is not on PATH; tests.yml installs it")
+        pytest.skip("lychee is not on PATH")
+    return path
+
+
+class _Pages(SimpleHTTPRequestHandler):
+    """Serves the fixture directory; /down.html answers 503."""
+
+    def do_GET(self) -> None:
+        if self.path == "/down.html":
+            self.send_error(503)
+        else:
+            super().do_GET()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@contextmanager
+def pages_server(tmp_path: Path) -> Iterator[str]:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "good.html").write_text('<html><body><a href="other.html#part">other</a></body></html>')
+    (site / "other.html").write_text('<html><body><h2 id="part">Part</h2></body></html>')
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(_Pages, directory=str(site)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def run_lychee(tmp_path: Path, pages: list[str]) -> subprocess.CompletedProcess:
+    """Run lychee as the Check links step does: this config and a pages file."""
+    (tmp_path / "pages.txt").write_text("\n".join(pages) + "\n")
+    return subprocess.run([lychee(), "--config", str(LYCHEE_CONFIG), "--files-from", "pages.txt"], cwd=tmp_path, text=True, capture_output=True, timeout=120, check=False)
+
+
+def test_the_check_passes_when_every_page_loads_and_its_links_resolve(tmp_path):
+    with pages_server(tmp_path) as base:
+        r = run_lychee(tmp_path, [f"{base}/good.html"])
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_page_that_cannot_be_fetched_fails_the_check(tmp_path):
+    with pages_server(tmp_path) as base:
+        r = run_lychee(tmp_path, [f"{base}/good.html", f"{base}/down.html"])
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "503" in r.stdout + r.stderr
+
+
+def test_ci_installs_the_lychee_release_the_workflow_runs():
+    pinned = step("check", "Check links")["with"]["lycheeVersion"]
+    install = next(s["run"] for s in yaml.safe_load(TESTS_WORKFLOW.read_text())["jobs"]["pytest"]["steps"] if s.get("name") == "Install lychee")
+    assert f"/lychee-{pinned}/" in install
+    if shutil.which("lychee") and os.environ.get("CI"):
+        version = subprocess.run(["lychee", "--version"], text=True, capture_output=True, check=True).stdout
+        assert version.split()[-1] == pinned.removeprefix("v"), version
 
 
 @pytest.mark.parametrize(

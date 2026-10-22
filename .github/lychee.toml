@@ -6,9 +6,9 @@ max_concurrency = 16
 timeout = 30
 max_retries = 3
 
-# A page from a sitemap that cannot be fetched (a 5xx, a timeout) is skipped
-# rather than ending the whole run.
-skip_missing = true
+# skip_missing stays unset: with it, a sitemap page lychee cannot fetch (a
+# 5xx, a timeout) is dropped without an error, so its links go unchecked and
+# the run can still pass. Without it, lychee exits 1 and names the page.
 
 # 403 and 429 are what bot-blocking and rate-limited sites (OpenAI, Medium,
 # x.ai) return to lychee for pages that load in a browser.
