@@ -1,0 +1,137 @@
+---
+name: Docs Link Check
+
+# Weekly check of the published Inspect docs sites for broken links and
+# anchors, with a Slack report. Each site's sitemap.xml lists its pages and
+# lychee checks every link on them, including links between the sites (a
+# scout page linking an inspect_ai anchor), which no single repo's CI sees.
+# It checks the live sites, so a broken link shows up here once it is
+# deployed, not when it merges. Only this repo is checked out, for the
+# lychee config; nothing is built.
+#
+# The check job runs lychee over pages fetched from the web, so it holds only
+# the read-only job token, which lychee uses for github.com rate limits. The
+# Slack token is in the report job, which reads nothing from check but its
+# result. lychee's full report is the check job's summary.
+# tests/test_docs_link_check_workflow.py checks this contract and runs the
+# sitemap script.
+#
+# Link rot is not an outage, so the report never pings the channel.
+
+"on":
+  schedule:
+    # Mondays 12:00 UTC (8am Boston in summer, 7am in winter)
+    - cron: "0 12 * * 1"
+  # A push that changes this workflow or its lychee config runs the check
+  # (without the Slack report), so a change is tested on its branch.
+  push:
+    branches:
+      - "**"
+    paths:
+      - ".github/workflows/docs-link-check.yml"
+      - ".github/lychee.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No job restores or saves an Actions cache; the job token refuses a save.
+cache-mode: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout lychee config
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: List pages from the sitemaps
+        run: |
+          sites=(
+            https://inspect.aisi.org.uk
+            https://meridianlabs-ai.github.io/inspect_scout
+            https://meridianlabs-ai.github.io/inspect_viz
+            https://meridianlabs-ai.github.io/inspect_swe
+            https://meridianlabs-ai.github.io/inspect_flow
+          )
+          : > pages.txt
+          for site in "${sites[@]}"; do
+            # Only pages under the site itself. The changelogs are skipped:
+            # their links are release history (inspect_ai's alone has
+            # thousands of PR links) and old entries point at anchors that
+            # have since moved.
+            if ! xml=$(curl -fsSL --retry 3 "$site/sitemap.xml"); then
+              echo "::error::Could not fetch $site/sitemap.xml"
+              exit 1
+            fi
+            pages=$(printf '%s' "$xml" \
+              | grep -oE '<loc>[^<]+</loc>' \
+              | sed -E 's#</?loc>##g' \
+              | awk -v prefix="$site/" 'index($0, prefix) == 1' \
+              | grep -v '/CHANGELOG\.html$' || true)
+            if [ -z "$pages" ]; then
+              echo "::error::No pages found in $site/sitemap.xml"
+              exit 1
+            fi
+            printf '%s\n' "$pages" >> pages.txt
+            echo "$site: $(printf '%s\n' "$pages" | wc -l) pages"
+          done
+
+      - name: Check links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: --config .github/lychee.toml --files-from pages.txt
+
+  report:
+    needs: check
+    if: always() && needs.check.result != 'cancelled' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Report results to Slack
+        uses: slackapi/slack-github-action@af78098f536edbc4de71162a307590698245be95 # v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
+              "text": "${{ needs.check.result == 'success' && '✅ Docs Link Check Passed' || '⚠️ Docs Link Check Failed' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ needs.check.result == 'success' && '✅ Docs Link Check Passed' || '⚠️ Docs Link Check Failed' }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Trigger:*\n${{ github.event_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Report:*\n<https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Sites:*\ninspect_ai, inspect_scout, inspect_viz, inspect_swe, inspect_flow"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ needs.check.result == 'success' && 'No broken links or anchors.' || 'The run summary lists each broken link and the page it is on. If there is no summary, the log says why the check could not run.' }}"
+                  }
+                }
+              ]
+            }

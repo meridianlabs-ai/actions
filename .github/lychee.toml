@@ -1,0 +1,28 @@
+# lychee settings for .github/workflows/docs-link-check.yml.
+
+include_fragments = "anchor-only"
+no_progress = true
+max_concurrency = 16
+timeout = 30
+max_retries = 3
+
+# skip_missing stays unset: with it, a sitemap page lychee cannot fetch (a
+# 5xx, a timeout) is dropped without an error, so its links go unchecked and
+# the run can still pass. Without it, lychee exits 1 and names the page.
+
+# 403 and 429 are what bot-blocking and rate-limited sites (OpenAI, Medium,
+# x.ai) return to lychee for pages that load in a browser.
+accept = ["200..=299", "403", "429"]
+
+# The inspect-docs Quarto extension writes reference pages' <link rel="next">
+# and <link rel="prev"> as .qmd URLs. They are in the page head, so readers
+# never follow them, and every site has them. The pattern would also hide a
+# body link to a .qmd URL; drop it once the extension writes .html there.
+#
+# Anchors that a page creates with JavaScript after it loads, so lychee,
+# which reads the served HTML, never finds them:
+# - quarto.org/docs/gallery/ builds its sections (#dashboards, ...) client-side.
+exclude = [
+  '\.qmd(#|$)',
+  '^https://quarto\.org/docs/gallery/#',
+]
