@@ -88,7 +88,11 @@ guarantee, and what is by design. To report a vulnerability, see
   and would outlive the offending release and a key rotation. The token
   enforces the save half: both workflows declare `cache-mode: read` at
   workflow level, so the runtime token that Runner.Worker holds, as the same
-  user as the closure, cannot save a cache entry. The default
+  user as the closure, cannot save a cache entry. The inspect_swe test
+  step also receives that read-only token as `GITHUB_TOKEN`, which
+  inspect_swe sends to api.github.com to stay under the unauthenticated
+  rate limit; the closure could already read it from Runner.Worker, so
+  this gives it nothing new. The default
   token setting itself was not read (the API query needs repository
   administration), and no write exploit was observed: the job logs of runs
   before the declaration already listed Contents, Metadata and Packages as
