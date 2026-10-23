@@ -111,3 +111,7 @@ clean.
   the commit); allowed types are in `conventional-commit-types.json`.
 - Say why in the commit message and the PR body, and list adjacent
   problems you did not fix under "Not this PR" rather than fixing them.
+
+## Reviewing other people's pull requests
+
+Unless a maintainer asked for your review, submit any review on someone else's pull request as a **Comment**, never **Approve** or **Request changes**. In this repository those are maintainer decisions: a non-maintainer's verdict doesn't count toward merging and misleads the author about where their PR stands. Put any confirmation or concern in the comment text, and say that you are an AI agent and not a maintainer. This does not apply to agents acting for project maintainers.
