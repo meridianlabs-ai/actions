@@ -458,12 +458,6 @@ jobs:
           ruff check
           ruff format --check
 
-      - name: Run ruff (inspect_tool_support)
-        working-directory: src/inspect_tool_support/src
-        run: |
-          ruff check
-          ruff format --check
-
       - name: Run mypy
         run: mypy --exclude tests/test_package src tests
 
