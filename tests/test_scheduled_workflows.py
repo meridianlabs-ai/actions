@@ -198,6 +198,25 @@ def test_slow_tests_use_the_classic_compose_builder():
     assert step(SCHEDULED, "slow-tests", "Run slow tests")["env"]["COMPOSE_BAKE"] == "false"
 
 
+def test_static_analysis_runs_without_the_retired_tool_support_directory(tmp_path):
+    checkout = tmp_path / "inspect_ai"
+    checkout.mkdir()
+    calls = tmp_path / "lint-calls.txt"
+    lint = """#!/usr/bin/env bash
+printf '%s:%s %s\\n' "$PWD" "${0##*/}" "$*" >> "$LINT_CALLS"
+"""
+    env = {"PATH": f"{bin_dir(tmp_path, ruff=lint, mypy=lint)}:{os.environ['PATH']}", "LINT_CALLS": str(calls)}
+    for s in steps(SCHEDULED, "static-analysis"):
+        if s.get("name", "").startswith(("Run ruff", "Run mypy")):
+            r = run_bash(s["run"], cwd=checkout / s.get("working-directory", "."), env=env)
+            assert r.returncode == 0, r.stderr
+    assert calls.read_text().splitlines() == [
+        f"{checkout}:ruff check",
+        f"{checkout}:ruff format --check",
+        f"{checkout}:mypy --exclude tests/test_package src tests",
+    ]
+
+
 # --- inspect_sentinel install (TEMPORARY) -------------------------------------------
 
 SENTINEL_STEP = "Install inspect_sentinel (TEMPORARY)"
