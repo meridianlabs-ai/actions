@@ -389,7 +389,7 @@ jobs:
       # agent instead runs as its own unprivileged user, which cannot alter
       # the firewall or read another user's files as root.
       - name: Harden runner
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -408,7 +408,7 @@ jobs:
       # read-only.
       - name: Checkout inspect_ai at tested commit
         if: needs.context.result == 'success'
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: UKGovernmentBEIS/inspect_ai
           ref: ${{ needs.context.outputs.sha }}
@@ -649,7 +649,7 @@ jobs:
       - name: Run Claude triage agent
         id: claude
         if: needs.context.result == 'success'
-        uses: anthropics/claude-code-action@34968b5981d5d170904281aa3df6f3c0d4a28855 # v1.0.249
+        uses: anthropics/claude-code-action@aa8a7738e48bf30a40ee499ce818bef081c5ab5e # v1.0.257
         with:
           anthropic_federation_rule_id: fdrl_01GTpfwJqVdfsAbMYLqt3sLX
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
@@ -1258,7 +1258,7 @@ jobs:
       - name: Mint a fork-scoped marvin token
         id: mint
         if: env.MARVIN_APP_CONFIGURED == 'true'
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
           private-key: ${{ secrets.MARVIN_APP_PRIVATE_KEY }}
