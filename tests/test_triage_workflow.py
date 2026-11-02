@@ -1709,7 +1709,9 @@ def test_the_agent_job_reads_the_context_job_and_has_no_outputs():
 def test_land_takes_the_slack_destination_from_the_context_job():
     job = load_workflow()["jobs"]["land"]
     assert job["needs"] == ["context", "agent"]
-    assert job["if"] == "always() && needs.agent.result != 'skipped' && needs.agent.result != 'cancelled'"
+    # A timed-out agent job ends `cancelled` too; only a cancelled workflow
+    # (`cancelled()`) keeps land from reporting it.
+    assert job["if"] == "always() && needs.agent.result != 'skipped' && (needs.agent.result != 'cancelled' || !cancelled())"
     assert land_inputs()["slack-channel"] == "${{ needs.context.outputs.channel || secrets.SLACK_CHANNEL_ID }}"
     assert land_inputs()["slack-thread-ts"] == "${{ needs.context.outputs.thread_ts }}"
     # Nothing the agent job reports reaches land; only its artifact does.
@@ -1782,3 +1784,120 @@ def test_check_refuses_a_run_id_that_is_not_a_number_before_any_call(tmp_path, r
 def test_check_fails_when_the_run_cannot_be_read(tmp_path):
     r, _ = check_run(tmp_path, None)
     assert r.returncode == 1 and f"::error::Could not read run {RUN_ID}" in r.stdout
+
+
+# --- Report a triage that landed no manifest --------------------------------
+#
+# When no manifest reaches land (the agent job's upload failed or never ran,
+# or the download failed), the "did not complete" text the compose step put
+# in the manifest is lost with it. The land job then posts its own fixed
+# reply to the destination the context job validated, and fails.
+
+FAKE_CURL = r'''#!/usr/bin/env python3
+"""Stand-in for curl's Slack post: records argv, the headers it read from
+`-H @file` and the body from stdin, then prints $FAKE_SLACK_RESPONSE."""
+import json, os, pathlib, sys
+
+args = sys.argv[1:]
+headers = []
+for i, a in enumerate(args):
+    if a == "-H":
+        h = args[i + 1]
+        headers += pathlib.Path(h[1:]).read_text().splitlines() if h.startswith("@") else [h]
+body = sys.stdin.read() if "@-" in args else ""
+with open(os.environ["FAKE_CURL_LOG"], "a") as log:
+    log.write(json.dumps({"args": args, "headers": headers, "body": body}) + "\n")
+sys.stdout.write(os.environ.get("FAKE_SLACK_RESPONSE", '{"ok": true}'))
+'''
+
+NO_MANIFEST_STEP = "Report a triage that landed no manifest"
+NO_MANIFEST_TEXT = ("⚠️ Triage did not complete: no landing manifest reached the land job. "
+                    "See the run log: https://example.test/run")
+
+
+def report_no_manifest(tmp_path: Path, *, manifest: bool = False, channel: str = "C0123ABCDEF",
+                       thread_ts: str = "1726000000.123456", response: str = '{"ok": true}') -> tuple[subprocess.CompletedProcess, list[dict]]:
+    landing = tmp_path / "landing"
+    landing.mkdir()
+    if manifest:
+        (landing / "manifest.json").write_text("{}")
+    curl = tmp_path / "bin" / "curl"
+    curl.parent.mkdir()
+    curl.write_text(FAKE_CURL)
+    curl.chmod(0o755)
+    log = tmp_path / "curl.log"
+    env = {"PATH": f"{curl.parent}:{os.environ['PATH']}", "FAKE_CURL_LOG": str(log), "FAKE_SLACK_RESPONSE": response,
+           "MANIFEST": str(landing / "manifest.json"), "SLACK_TOKEN": "xoxb-secret", "SLACK_CHANNEL": channel,
+           "SLACK_THREAD_TS": thread_ts, "RUN_URL": "https://example.test/run"}
+    r = run_bash(job_step("land", NO_MANIFEST_STEP)["run"], cwd=tmp_path, env=env)
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return r, calls
+
+
+def test_no_manifest_posts_one_fixed_reply_in_the_thread_and_fails(tmp_path):
+    r, calls = report_no_manifest(tmp_path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "::error::land: no landing manifest reached this job" in r.stdout
+    assert len(calls) == 1
+    assert "https://slack.com/api/chat.postMessage" in calls[0]["args"]
+    assert json.loads(calls[0]["body"]) == {"channel": "C0123ABCDEF", "thread_ts": "1726000000.123456", "text": NO_MANIFEST_TEXT}
+    # The token is a header read from a file, never an argument.
+    assert "Authorization: Bearer xoxb-secret" in calls[0]["headers"]
+    assert not any("xoxb-secret" in a for a in calls[0]["args"])
+
+
+def test_no_manifest_without_a_thread_replies_at_the_channel_root(tmp_path):
+    r, calls = report_no_manifest(tmp_path, thread_ts="")
+    assert r.returncode == 1
+    assert json.loads(calls[0]["body"]) == {"channel": "C0123ABCDEF", "text": NO_MANIFEST_TEXT}
+
+
+def test_an_arrived_manifest_gets_no_extra_reply(tmp_path):
+    # Land failed on a manifest it had (refused, a post failed): it reported
+    # that itself, and the thread got the manifest's text or land's note.
+    r, calls = report_no_manifest(tmp_path, manifest=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("channel,thread_ts", [("", ""), ("not-a-channel", ""), ("C0123ABCDEF", "1726000000")],
+                         ids=["no-channel", "bad-channel", "bad-thread"])
+def test_no_manifest_posts_nowhere_but_a_valid_destination(tmp_path, channel, thread_ts):
+    r, calls = report_no_manifest(tmp_path, channel=channel, thread_ts=thread_ts)
+    assert r.returncode == 1 and calls == []
+
+
+def test_no_manifest_reports_a_refused_post(tmp_path):
+    r, calls = report_no_manifest(tmp_path, response='{"ok": false, "error": "channel_not_found"}')
+    assert r.returncode == 1 and len(calls) == 1
+    assert "Slack refused the did-not-complete reply: channel_not_found" in r.stdout
+
+
+def test_the_no_manifest_reply_goes_where_land_posts_and_only_after_land_failed():
+    s = job_step("land", NO_MANIFEST_STEP)
+    inputs = land_inputs()
+    assert s["if"] == "always() && needs.context.result == 'success' && steps.land.outcome == 'failure'"
+    assert job_step("land", "land")["name"] == "Land"
+    assert s["env"]["SLACK_TOKEN"] == inputs["slack-token"]
+    assert s["env"]["SLACK_CHANNEL"] == inputs["slack-channel"]
+    assert s["env"]["SLACK_THREAD_TS"] == inputs["slack-thread-ts"]
+    assert s["env"]["RUN_URL"] == "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    assert s["env"]["MANIFEST"] == "${{ runner.temp }}/landing/manifest.json"
+    # Last in the job, so nothing runs after it with the reply's outcome.
+    assert load_workflow()["jobs"]["land"]["steps"][-1]["name"] == NO_MANIFEST_STEP
+
+
+def test_the_manifest_path_is_where_the_land_composite_downloads():
+    # The step decides "no manifest arrived" from the composite's download
+    # directory; if agents moved it, every failed landing would read as lost.
+    url = "https://raw.githubusercontent.com/meridianlabs-ai/agents/main/.github/actions/land/action.yml"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            action = yaml.safe_load(resp.read())
+    except OSError as exc:
+        pytest.skip(f"could not fetch the land action: {exc}")
+    download = next(s for s in action["runs"]["steps"] if s.get("id") == "download")
+    assert download["uses"].startswith("actions/download-artifact@")
+    assert download["with"] == {"name": "${{ inputs.artifact-name }}", "path": "${{ runner.temp }}/landing"}
+    assert action["inputs"]["artifact-name"]["default"] == "landing"
+    assert "artifact-name" not in land_inputs()

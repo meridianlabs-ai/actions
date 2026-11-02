@@ -64,7 +64,10 @@
 # agent job). Its validator refuses every comment the manifest could carry
 # (`comment-numbers: event` with no event number), so a manifest uploaded
 # past the composer, after a compromise of the agent's runner, can land only
-# the one fork issue action the issue policies allow. The marvin identity
+# the one fork issue action the issue policies allow. When no manifest
+# reaches land at all (the agent job's upload failed, or it ended before
+# uploading), land posts its own fixed "did not complete" reply to that
+# same destination and fails the run. The marvin identity
 # (the app secrets MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY, the token
 # they mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
 # `land` only.
@@ -1231,11 +1234,16 @@ jobs:
   # marvin (created and adopted issues go on Atlas at Todo by node ID; the
   # assignee is added only to an unowned issue), post the Slack message to the
   # destination the context job validated, report the manifest's error and
-  # fail the run when it says so. Skipped when the agent job was skipped
-  # (trigger not met: no artifact) or cancelled.
+  # fail the run when it says so. When no manifest arrives, the last step
+  # posts a fixed "did not complete" reply to that destination instead, so
+  # the thread is not left silent. Skipped when the agent job was skipped
+  # (trigger not met: no artifact) or when someone cancelled the workflow.
+  # An agent job that hits its timeout-minutes also ends `cancelled`, but
+  # `cancelled()` is true only when the workflow itself was cancelled, so
+  # land still runs then and the thread hears the triage did not complete.
   land:
     needs: [context, agent]
-    if: always() && needs.agent.result != 'skipped' && needs.agent.result != 'cancelled'
+    if: always() && needs.agent.result != 'skipped' && (needs.agent.result != 'cancelled' || !cancelled())
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1268,6 +1276,7 @@ jobs:
           permission-organization-projects: write
 
       - name: Land
+        id: land
         uses: meridianlabs-ai/agents/.github/actions/land@main
         with:
           # The machine account: writes on $ISSUES_REPO (create, comment,
@@ -1320,3 +1329,56 @@ jobs:
           slack-token: ${{ secrets.SLACK_BOT_TOKEN }}
           slack-channel: ${{ needs.context.outputs.channel || secrets.SLACK_CHANNEL_ID }}
           slack-thread-ts: ${{ needs.context.outputs.thread_ts }}
+
+      # The thread's reply when no manifest reached this job: the agent job's
+      # upload failed, it ended before uploading, or the download failed.
+      # The manifest is what carries the agent job's own "did not complete"
+      # text, so without this step the thread heard nothing (2026-11-02, run
+      # 41462718732: harden-runner refused all egress, the upload failed with
+      # ECONNREFUSED and land failed on the download). It runs only when Land
+      # failed and the composite's download directory holds no manifest.json;
+      # a manifest that arrived, valid or not, is land's to report, as
+      # before. The text is this step's own, never the agent job's, and the
+      # destination is the one Land is given, from the context job. A
+      # context that failed gets no reply here either, as the compose step
+      # decides for that case. The step always fails the run.
+      - name: Report a triage that landed no manifest
+        if: always() && needs.context.result == 'success' && steps.land.outcome == 'failure'
+        env:
+          # Where the `land` composite's download step puts the artifact
+          # (tests/test_triage_workflow.py checks it against agents@main).
+          MANIFEST: ${{ runner.temp }}/landing/manifest.json
+          SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ needs.context.outputs.channel || secrets.SLACK_CHANNEL_ID }}
+          SLACK_THREAD_TS: ${{ needs.context.outputs.thread_ts }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          if [ -f "$MANIFEST" ]; then
+            echo "land: the landing manifest arrived; the Land step reported its own failure."
+            exit 0
+          fi
+          echo "::error::land: no landing manifest reached this job (the agent job uploaded none, or the download failed)."
+          if [ -z "${SLACK_TOKEN:-}" ] || ! [[ "$SLACK_CHANNEL" =~ ^[CG][A-Z0-9]{8,}$ ]]; then
+            echo "::error::land: no Slack token or channel ID; the thread gets no reply."
+            exit 1
+          fi
+          if [ -n "$SLACK_THREAD_TS" ] && ! [[ "$SLACK_THREAD_TS" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::land: the Slack thread is not a timestamp; the thread gets no reply."
+            exit 1
+          fi
+          body=$(jq -n --arg c "$SLACK_CHANNEL" --arg t "$SLACK_THREAD_TS" \
+                   --arg text "⚠️ Triage did not complete: no landing manifest reached the land job. See the run log: $RUN_URL" \
+                   '{channel: $c, text: $text} + (if $t != "" then {thread_ts: $t} else {} end)')
+          # The token reaches curl through a file (process substitution),
+          # never an argument: arguments show in `ps`.
+          resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+                   -H @<(printf 'Authorization: Bearer %s\n' "$SLACK_TOKEN") \
+                   -H "Content-Type: application/json; charset=utf-8" \
+                   --data @- <<<"$body")
+          if [ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null)" = "true" ]; then
+            echo "land: posted the did-not-complete reply to $SLACK_CHANNEL${SLACK_THREAD_TS:+ (thread $SLACK_THREAD_TS)}."
+          else
+            echo "::error::land: Slack refused the did-not-complete reply: $(jq -r '.error // "unparsable response"' <<<"$resp" 2>/dev/null || echo "unparsable response")"
+          fi
+          exit 1
