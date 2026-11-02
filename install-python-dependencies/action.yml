@@ -18,6 +18,8 @@ inputs:
   environment-dir:
     description: >-
       Directory for the Python environment. Empty uses <project-dir>/.venv.
+      A later call with the same environment-dir adds to that Python
+      environment.
     default: ""
   project-install:
     description: >-
@@ -89,8 +91,9 @@ runs:
         RECORDED_SETUP: ${{ env.MERIDIAN_SETUP_UV }}
       # Stops on a missing or unknown value, a newline in a one-line input, a
       # list item that starts with -, an input that does not apply to the
-      # versions value, or a second call whose python-version or actions-cache
-      # differs from the setup-uv already run in this job.
+      # versions value, an unlocked call that installs nothing, or a second call
+      # whose python-version or actions-cache differs from the setup-uv already
+      # run in this job.
       run: python3 "$GITHUB_ACTION_PATH/check_inputs.py"
 
     # $/ loads setup-uv from this repository at this commit. Run it once per

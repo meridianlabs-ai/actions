@@ -73,11 +73,24 @@ def check_setup(**inputs: str) -> subprocess.CompletedProcess:
 FAKE_UV = """#!/usr/bin/env bash
 # Record the argument vector uv would have received, one call per line.
 printf '%s\\n' "$*" >> "$FAKE_UV_CALLS"
+# A test can make uv fail: print FAKE_UV_FAIL_OUTPUT and exit FAKE_UV_FAIL_STATUS.
+if [ -n "${FAKE_UV_FAIL_STATUS:-}" ]; then
+  printf '%s\\n' "$FAKE_UV_FAIL_OUTPUT" >&2
+  exit "$FAKE_UV_FAIL_STATUS"
+fi
 """
 
 
 def run_install(tmp_path: Path, **inputs: str) -> list[str]:
     """Run install.sh with a stand-in uv on PATH; return the recorded uv calls."""
+    r = run_install_process(tmp_path, **inputs)
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = tmp_path / "uv_calls"
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+def run_install_process(tmp_path: Path, **inputs: str) -> subprocess.CompletedProcess:
+    """Run install.sh with a stand-in uv on PATH; return the finished process."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "uv").write_text(FAKE_UV)
@@ -103,7 +116,7 @@ def run_install(tmp_path: Path, **inputs: str) -> list[str]:
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "FAKE_UV_CALLS": str(calls),
     }
-    r = subprocess.run(
+    return subprocess.run(
         ["bash", str(INSTALL / "install.sh")],
         cwd=tmp_path,
         env=env,
@@ -111,8 +124,6 @@ def run_install(tmp_path: Path, **inputs: str) -> list[str]:
         capture_output=True,
         check=False,
     )
-    assert r.returncode == 0, r.stdout + r.stderr
-    return calls.read_text().splitlines() if calls.exists() else []
 
 
 # --- setup-uv check_inputs ----------------------------------------------------
@@ -312,6 +323,17 @@ def test_unlocked_minimal_call_is_accepted():
     assert r.returncode == 0, r.stdout
 
 
+def test_unlocked_skip_that_installs_nothing_is_rejected():
+    r = check_install(VERSIONS="unlocked", PYTHON_VERSION="3.11", PROJECT_INSTALL="skip", ACTIONS_CACHE="none", PROJECT_UV_SETTINGS="ignore")
+    assert r.returncode == 1
+    assert "::error::project-install/also-install-unlocked/also-install-without-deps:" in r.stdout
+
+
+def test_unlocked_skip_with_only_also_install_without_deps_is_accepted():
+    r = check_install(VERSIONS="unlocked", PYTHON_VERSION="3.11", PROJECT_INSTALL="skip", WITHOUT_DEPS="./pkg", ACTIONS_CACHE="none", PROJECT_UV_SETTINGS="ignore")
+    assert r.returncode == 0, r.stdout
+
+
 def test_script_not_with_environment_dir():
     r = check_install(VERSIONS="locked", PYTHON_VERSION="3.11", SCRIPT="s.py", ENVIRONMENT_DIR="/tmp/env")
     assert r.returncode == 1 and "::error::environment-dir: does not apply with script." in r.stdout
@@ -364,7 +386,7 @@ def test_locked_also_install_without_deps_gets_no_deps(tmp_path):
 
 def test_hashed_runs_venv_then_require_hashes_no_deps(tmp_path):
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
-    assert calls[0] == "venv /tmp/env"
+    assert calls[0] == "venv --allow-existing -- /tmp/env"
     assert calls[1] == "pip install --no-config --python /tmp/env --require-hashes --no-deps -r r.txt"
 
 
@@ -375,7 +397,7 @@ def test_hashed_wheels_only_adds_only_binary(tmp_path):
 
 def test_unlocked_runs_venv_then_pip_install_with_exclude_newer_false(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", EXTRAS="dev", UNLOCKED_EXTRA="pytest-timeout", PROJECT_UV_SETTINGS="ignore")
-    assert calls[0] == "venv /tmp/env"
+    assert calls[0] == "venv --allow-existing -- /tmp/env"
     assert calls[1] == 'pip install --no-config --python /tmp/env --exclude-newer false -e .[dev] pytest-timeout'
 
 
@@ -389,6 +411,45 @@ def test_unlocked_no_deps_items_use_exclude_newer_false_and_never_only_binary(tm
     # wheels-only reaches the main install, never the --no-deps item.
     assert calls[1] == "pip install --no-config --python /tmp/env --exclude-newer false --only-binary :all: -e ."
     assert calls[2] == "pip install --no-config --python /tmp/env --exclude-newer false --no-deps ./pkg"
+
+
+def test_unlocked_skip_with_only_no_deps_items_skips_the_main_install(tmp_path):
+    calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", PROJECT_INSTALL="skip", WITHOUT_DEPS="./pkg", PROJECT_UV_SETTINGS="ignore")
+    assert calls == [
+        "venv --allow-existing -- /tmp/env",
+        "pip install --no-config --python /tmp/env --exclude-newer false --no-deps ./pkg",
+    ]
+
+
+@pytest.mark.parametrize("versions, extra", [("hashed-requirements", {"REQUIREMENTS_FILE": "r.txt"}), ("unlocked", {})])
+def test_an_environment_dir_that_starts_with_dash_follows_double_dash(tmp_path, versions, extra):
+    calls = run_install(tmp_path, VERSIONS=versions, ENVIRONMENT_DIR="--seed", PROJECT_UV_SETTINGS="ignore", **extra)
+    assert calls[0] == "venv --allow-existing -- --seed"
+
+
+STALE_LOCK = "error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided."
+MISSING_LOCK = (
+    "error: Unable to find lockfile at `uv.lock`, but `--locked` was provided. "
+    "To create a lockfile, run `uv lock` or `uv sync` without the flag."
+)
+LOCK_ERROR = "::error file=uv.lock::uv.lock is missing or out of date. Run uv lock and commit it."
+
+
+@pytest.mark.parametrize("uv_output", [STALE_LOCK, MISSING_LOCK])
+def test_locked_names_uv_lock_when_uv_reports_a_lock_problem(tmp_path, uv_output):
+    r = run_install_process(tmp_path, VERSIONS="locked", FAKE_UV_FAIL_STATUS="2", FAKE_UV_FAIL_OUTPUT=uv_output)
+    assert r.returncode == 1
+    assert uv_output in r.stdout
+    assert LOCK_ERROR in r.stdout
+
+
+def test_locked_claims_no_cause_for_another_uv_failure(tmp_path):
+    uv_output = "error: Extra `x` is not defined in the project's `optional-dependencies` table"
+    r = run_install_process(tmp_path, VERSIONS="locked", FAKE_UV_FAIL_STATUS="2", FAKE_UV_FAIL_OUTPUT=uv_output)
+    assert r.returncode == 1
+    assert uv_output in r.stdout
+    assert "::error::uv sync --locked failed. The uv output above gives the cause." in r.stdout
+    assert "file=uv.lock" not in r.stdout
 
 
 def test_only_unlocked_sets_exclude_newer_false(tmp_path):
@@ -672,3 +733,10 @@ def test_self_test_workflow_has_a_per_ref_concurrency_group():
     conc = wf["concurrency"]
     assert conc["group"] == "self-test-python-actions-${{ github.ref }}"
     assert conc["cancel-in-progress"] is False
+
+
+def test_the_self_test_checks_the_stale_lock_text_that_install_sh_matches():
+    # The runner step fails when uv changes this text. install.sh must match the same text.
+    text = "The lockfile at `uv.lock` needs to be updated"
+    assert text in run_step("stale-lock", "uv prints the stale-lock text")["run"]
+    assert text in (INSTALL / "install.sh").read_text()

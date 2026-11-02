@@ -12,6 +12,7 @@ The rules:
   - a list item does not start with '-' (so a caller cannot add a uv option).
   - an input applies only to the versions value its table row allows.
   - unlocked needs actions-cache none and project-uv-settings ignore.
+  - unlocked with project-install skip installs at least one package.
   - wheels-only is not for locked.
   - a non-local also-install-without-deps item is not for locked, and no such
     item is for hashed-requirements.
@@ -143,6 +144,11 @@ def main() -> None:
             fail("actions-cache", "must be none with versions: unlocked.")
         if v["project-uv-settings"] != "ignore":
             fail("project-uv-settings", "must be ignore with versions: unlocked.")
+        if v["project-install"] == "skip" and not items(v["also-install-unlocked"]) and not without_deps:
+            fail(
+                "project-install/also-install-unlocked/also-install-without-deps",
+                "project-install: skip installs nothing. Give also-install-unlocked or also-install-without-deps.",
+            )
 
     # script runs its own Python environment in the uv cache.
     if v["script"]:

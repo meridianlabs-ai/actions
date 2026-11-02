@@ -4,7 +4,9 @@
 # check_inputs.py has already validated every input. Each input arrives as an
 # environment variable, never as a ${{ }} expression. Commands are built as
 # bash arrays, with no eval and no unquoted expansion, so no input becomes a uv
-# option or a second command.
+# option or a second command. The environment-dir path follows --. An
+# also-install item is positional too, but check_inputs.py rejects an item that
+# starts with -.
 set -euo pipefail
 
 # Where the Python environment goes. Empty means uv's default,
@@ -46,14 +48,22 @@ case "$VERSIONS" in
       for e in "${extras[@]}"; do f+=(--extra "$e"); done
       [ "$DEFAULT_GROUPS" = exclude ] && f+=(--no-default-groups)
       [ "$PROJECT_INSTALL" = skip ] && f+=(--no-install-project)
-      uv sync "${cfg[@]}" --locked "${f[@]}" || {
-        echo "::error file=uv.lock::uv.lock is missing or out of date. Run uv lock and commit it."
+      # Keep the uv output in the log. Name uv.lock only when uv names it.
+      out=$(mktemp)
+      if ! uv sync "${cfg[@]}" --locked "${f[@]}" 2>&1 | tee "$out"; then
+        if grep -Fq -e 'The lockfile at `uv.lock` needs to be updated' \
+          -e 'Unable to find lockfile at `uv.lock`' "$out"; then
+          echo "::error file=uv.lock::uv.lock is missing or out of date. Run uv lock and commit it."
+        else
+          echo "::error::uv sync --locked failed. The uv output above gives the cause."
+        fi
         exit 1
-      }
+      fi
     fi
     ;;
   hashed-requirements)
-    uv venv "$env_dir"
+    # A later call with the same environment-dir adds to that Python environment.
+    uv venv --allow-existing -- "$env_dir"
     uv pip install "${cfg[@]}" --python "$env_dir" --require-hashes "${fmt[@]}" --no-deps -r "$REQUIREMENTS_FILE"
     ;;
   unlocked)
@@ -62,8 +72,11 @@ case "$VERSIONS" in
     t=()
     [ "$PROJECT_INSTALL" = editable ] && t+=(-e "$spec")
     t+=("${unlocked_extra[@]}")
-    uv venv "$env_dir"
-    uv pip install "${cfg[@]}" --python "$env_dir" "${newer[@]}" "${fmt[@]}" "${t[@]}"
+    uv venv --allow-existing -- "$env_dir"
+    # t is empty when the call has only also-install-without-deps items.
+    if [ ${#t[@]} -gt 0 ]; then
+      uv pip install "${cfg[@]}" --python "$env_dir" "${newer[@]}" "${fmt[@]}" "${t[@]}"
+    fi
     ;;
 esac
 

@@ -142,7 +142,8 @@ jobs:
   # A stale uv.lock fails a locked install: the fixture's pyproject.toml lists a
   # dependency the lock omits, so uv sync --locked stops. The action must pass
   # that failure through. A continue-on-error step holds the failure; the guard
-  # fails unless its outcome is failure.
+  # fails unless its outcome is failure. A last step fails if uv no longer prints
+  # the stale-lock text that install.sh matches.
   stale-lock:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -164,6 +165,14 @@ jobs:
         env:
           STALE: ${{ steps.stale.outcome }}
         run: '[ "$STALE" = failure ] || { echo "::error::a stale lock did not fail the locked install"; exit 1; }'
+      - name: uv prints the stale-lock text that install.sh matches
+        working-directory: ${{ env.STALE_LOCK }}
+        shell: bash
+        run: |
+          out=$(uv sync --locked 2>&1) && { echo "::error::uv sync --locked passed on a stale lock"; exit 1; }
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -F 'The lockfile at `uv.lock` needs to be updated' >/dev/null \
+            || { echo "::error::uv changed its stale-lock text. Update the match in install.sh."; exit 1; }
 
   # Read the Actions cache list and prove: only the read-write job made a
   # setup-uv Action save in this run attempt, and no setup-uv Actions cache key
@@ -325,7 +334,8 @@ jobs:
         run: uv --version | grep -F '0.13.5'
 
   # A hashed-requirements install, then uv pip check on the Python environment.
-  # The full closure passes; a missing hash and a short closure both fail.
+  # A second call into the same environment-dir succeeds. The full closure
+  # passes; a missing hash and a short closure both fail.
   hashed-and-pip-check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -334,6 +344,16 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          requirements-file: ${{ env.HASHED_DIR }}/requirements.txt
+          environment-dir: ${{ runner.temp }}/hashed-env
+          package-format: wheels-only
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: A second call into the same environment-dir succeeds
+        uses: ./install-python-dependencies
         with:
           versions: hashed-requirements
           python-version: "3.11"
@@ -409,8 +429,9 @@ jobs:
 
   # Two calls in one job run setup-uv one time. The second call reuses it: if
   # the if-guard were wrong, setup-uv would run twice and its own check_inputs
-  # would stop on the second. A third call with a different python-version
-  # stops in check_inputs.
+  # would stop on the second. A hashed-requirements call with no environment-dir
+  # then adds to the <project-dir>/.venv of the locked calls. A last call with a
+  # different python-version stops in check_inputs.
   two-calls-one-setup:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -433,6 +454,18 @@ jobs:
           project-dir: ${{ env.LOCKED_PROJECT }}
           project-install: skip
           actions-cache: none
+      - name: A hashed-requirements call adds to the locked project environment
+        uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          requirements-file: ${{ github.workspace }}/${{ env.HASHED_DIR }}/requirements.txt
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: The locked and the hashed packages both import
+        shell: bash
+        run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import ipd_fixture, dateutil"'
       - name: A call with a different python-version stops
         id: diff_python
         continue-on-error: true
@@ -566,6 +599,20 @@ jobs:
           project-uv-settings: ignore
           actions-cache: none
       - name: six came as a wheel and the local package built from source
+        shell: bash
+        run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
+      - name: A second call with only also-install-without-deps adds to the same environment
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-install: skip
+          environment-dir: ${{ runner.temp }}/unlocked-env
+          also-install-without-deps: ${{ github.workspace }}/${{ env.LOCAL_PKG }}
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: six still imports, so the second call kept the environment
         shell: bash
         run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
       - name: unlocked with actions-cache read-write stops
