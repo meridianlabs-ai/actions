@@ -149,6 +149,21 @@ def test_setup_uv_rejects_a_newline_in_an_input():
     assert "::error::python-version: must be one line." in r.stdout
 
 
+@pytest.mark.parametrize(
+    "name, env",
+    [
+        ("python-version", {"PYTHON_VERSION": "3.11\r::warning::forged"}),
+        ("actions-cache", {"PYTHON_VERSION": "3.11", "ACTIONS_CACHE": "bogus\r::warning::forged"}),
+    ],
+)
+def test_setup_uv_rejects_a_carriage_return_in_an_input(name, env):
+    # The runner also starts a line at a carriage return.
+    r = check_setup(**env)
+    assert r.returncode == 1
+    assert r.stdout.splitlines() == [f"::error::{name}: must be one line."]
+    assert "\r" not in r.stdout
+
+
 def test_setup_uv_rejects_a_second_call_in_a_job():
     r = check_setup(PYTHON_VERSION="3.11", ACTIONS_CACHE="none", RECORDED_SETUP="3.11/none")
     assert r.returncode == 1
@@ -203,6 +218,21 @@ def test_a_newline_in_an_unknown_versions_value_adds_no_line():
     r = check_install(VERSIONS="bogus\n::add-mask::x\n::warning::forged", PYTHON_VERSION="3.11")
     assert r.returncode == 1
     assert r.stdout.splitlines() == ["::error::versions: must be one line."]
+
+
+def test_a_carriage_return_in_an_unknown_versions_value_adds_no_line():
+    # The runner also starts a line at a carriage return.
+    r = check_install(VERSIONS="bogus\r::warning::forged", PYTHON_VERSION="3.11")
+    assert r.returncode == 1
+    assert r.stdout.splitlines() == ["::error::versions: must be one line."]
+    assert "\r" not in r.stdout
+
+
+def test_a_carriage_return_in_a_list_item_adds_no_line():
+    r = check_install(VERSIONS="locked", PYTHON_VERSION="3.11", EXTRAS="-x\r::warning::forged")
+    assert r.returncode == 1
+    assert r.stdout.splitlines() == ["::error::extras: must hold no carriage return."]
+    assert "\r" not in r.stdout
 
 
 def test_install_rejects_a_newline_in_a_one_line_input():
@@ -410,12 +440,12 @@ def test_locked_also_install_without_deps_gets_no_deps(tmp_path):
 def test_hashed_runs_venv_then_require_hashes_no_deps(tmp_path):
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
     assert calls[0] == "venv --no-config /tmp/env"
-    assert calls[1] == "pip install --no-config --python /tmp/env --require-hashes --no-deps -r r.txt"
+    assert calls[1] == "pip install --no-config --python /tmp/env --require-hashes --reinstall --no-deps -r r.txt"
 
 
 def test_hashed_wheels_only_adds_only_binary(tmp_path):
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PACKAGE_FORMAT="wheels-only", PROJECT_UV_SETTINGS="ignore")
-    assert calls[1] == "pip install --no-config --python /tmp/env --require-hashes --only-binary :all: --no-deps -r r.txt"
+    assert calls[1] == "pip install --no-config --python /tmp/env --require-hashes --reinstall --only-binary :all: --no-deps -r r.txt"
 
 
 def test_unlocked_runs_venv_then_pip_install_with_exclude_newer_false(tmp_path):
@@ -433,14 +463,14 @@ def test_unlocked_no_deps_items_use_exclude_newer_false_and_never_only_binary(tm
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", WITHOUT_DEPS="./pkg", PACKAGE_FORMAT="wheels-only", PROJECT_UV_SETTINGS="ignore")
     # wheels-only reaches the main install, never the --no-deps item.
     assert calls[1] == "pip install --no-config --python /tmp/env --exclude-newer false --upgrade --only-binary :all: -e ."
-    assert calls[2] == "pip install --no-config --python /tmp/env --exclude-newer false --no-deps ./pkg"
+    assert calls[2] == "pip install --no-config --python /tmp/env --exclude-newer false --upgrade --no-deps ./pkg"
 
 
 def test_unlocked_skip_with_only_no_deps_items_skips_the_main_install(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", PROJECT_INSTALL="skip", WITHOUT_DEPS="./pkg", PROJECT_UV_SETTINGS="ignore")
     assert calls == [
         "venv --no-config /tmp/env",
-        "pip install --no-config --python /tmp/env --exclude-newer false --no-deps ./pkg",
+        "pip install --no-config --python /tmp/env --exclude-newer false --upgrade --no-deps ./pkg",
     ]
 
 
@@ -453,7 +483,7 @@ def test_a_relative_environment_dir_reaches_uv_as_an_absolute_path(tmp_path, env
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR=env_dir, REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
     assert calls == [
         f"venv --no-config {path}",
-        f"pip install --no-config --python {path} --require-hashes --no-deps -r r.txt",
+        f"pip install --no-config --python {path} --require-hashes --reinstall --no-deps -r r.txt",
     ]
     (tmp_path / "uv_calls").unlink()
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR=env_dir, PROJECT_UV_SETTINGS="ignore")
@@ -490,12 +520,28 @@ def test_venv_reuses_only_an_existing_python_environment(tmp_path, versions):
     assert run_install(tmp_path, **inputs)[0] == f"venv --no-config --allow-existing {env_dir}"
 
 
-def test_only_the_unlocked_main_install_upgrades(tmp_path):
+def test_only_unlocked_installs_upgrade(tmp_path):
+    # A reused Python environment must not keep an older version of an unlocked item.
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", WITHOUT_DEPS="./pkg", PROJECT_UV_SETTINGS="ignore")
-    assert [c for c in calls if "--upgrade" in c] == [calls[1]]
+    assert [c for c in calls if "--upgrade" in c] == calls[1:3]
+    (tmp_path / "uv_calls").unlink()
+    calls = run_install(tmp_path, VERSIONS="locked", WITHOUT_DEPS="./pkg")
+    assert not any("--upgrade" in c for c in calls)
     (tmp_path / "uv_calls").unlink()
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
     assert not any("--upgrade" in c for c in calls)
+
+
+def test_only_the_hashed_install_reinstalls(tmp_path):
+    # uv does not check the hash of a package that a reused Python environment
+    # already has. --reinstall installs it again from a hash-checked file.
+    for versions, extra in [
+        ("locked", {"WITHOUT_DEPS": "./pkg"}),
+        ("unlocked", {"ENVIRONMENT_DIR": "/tmp/e", "PROJECT_UV_SETTINGS": "ignore", "WITHOUT_DEPS": "./pkg"}),
+    ]:
+        calls = run_install(tmp_path, VERSIONS=versions, **extra)
+        assert not any("--reinstall" in c for c in calls), (versions, calls)
+        (tmp_path / "uv_calls").unlink()
 
 
 def test_an_empty_environment_dir_is_project_dir_venv(tmp_path):
@@ -820,6 +866,45 @@ def test_the_remote_reference_jobs_use_the_pinned_sha():
         f"{REPO}/install-python-dependencies@{pinned}",
         f"{REPO}/setup-uv@{pinned}",
     ]
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True, check=True).stdout.strip()
+
+
+@pytest.mark.parametrize("folders_changed", [False, True])
+def test_the_pin_guard_fetches_a_pinned_commit_that_only_a_pull_request_ref_reaches(tmp_path, folders_changed):
+    # A squash merge leaves the pull request commit off main, and the merged
+    # branch is deleted. Only refs/pull/N/head reaches it, which a clone does not fetch.
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    git(origin, "config", "user.email", "t@t")
+    git(origin, "config", "user.name", "t")
+    (origin / "setup-uv").mkdir()
+    (origin / "setup-uv" / "a").write_text("1\n")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-qm", "base")
+    git(origin, "checkout", "-qb", "branch")
+    (origin / "setup-uv" / "a").write_text("2\n")
+    git(origin, "commit", "-qam", "pull request commit")
+    pinned = git(origin, "rev-parse", "HEAD")
+    git(origin, "update-ref", "refs/pull/1/head", pinned)
+    git(origin, "checkout", "-q", "main")
+    (origin / "setup-uv" / "a").write_text("3\n" if folders_changed else "2\n")
+    git(origin, "commit", "-qam", "squash merge")
+    git(origin, "branch", "-qD", "branch")
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", f"file://{origin}", str(clone))
+    assert subprocess.run(["git", "-C", str(clone), "cat-file", "-e", pinned], capture_output=True).returncode != 0
+
+    step = run_step("remote-reference-pin-guard", "The pinned SHA matches")
+    r = run_bash(step["run"], cwd=clone, env={"PINNED": pinned})
+    if folders_changed:
+        assert r.returncode == 1
+        assert f"::error::Re-pin the remote-reference jobs to HEAD: setup-uv or install-python-dependencies changed since {pinned}." in r.stdout
+    else:
+        assert r.returncode == 0, r.stdout + r.stderr
 
 
 def test_self_test_workflow_has_a_per_ref_concurrency_group():

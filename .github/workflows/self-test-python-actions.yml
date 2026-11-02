@@ -276,7 +276,10 @@ jobs:
   # This guard fails if the pinned SHA does not match the action folders at HEAD,
   # so a stale pin fails CI. Re-pin PINNED here and the two @<SHA> literals below
   # after each change to the action folders (commit the work, then pin that
-  # commit's SHA in all three places).
+  # commit's SHA in all three places). The repo merges by squash or rebase and
+  # deletes the branch, so on main the pinned commit is not in the clone. The
+  # guard fetches it by SHA; GitHub serves a commit that a pull request ref
+  # still reaches.
   remote-reference-pin-guard:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -290,6 +293,7 @@ jobs:
         env:
           PINNED: a2e69701bcf3aa7e1b5100b9655aab8021482142
         run: |
+          git fetch --no-tags --depth=1 origin "$PINNED"
           git diff --quiet "$PINNED" HEAD -- setup-uv install-python-dependencies \
             || { echo "::error::Re-pin the remote-reference jobs to HEAD: setup-uv or install-python-dependencies changed since $PINNED."; exit 1; }
 

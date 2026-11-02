@@ -35,9 +35,10 @@ fmt=()
 reuse=()
 [ -f "$env_dir/pyvenv.cfg" ] && reuse=(--allow-existing)
 
-# Only an unlocked install drops the cooldown.
+# Only an unlocked install drops the cooldown, and upgrades so that a reused
+# Python environment does not keep an older version.
 newer=()
-[ "$VERSIONS" = unlocked ] && newer=(--exclude-newer false)
+[ "$VERSIONS" = unlocked ] && newer=(--exclude-newer false --upgrade)
 
 case "$VERSIONS" in
   locked)
@@ -68,8 +69,10 @@ case "$VERSIONS" in
   hashed-requirements)
     # A later hashed-requirements or unlocked call with the same environment-dir
     # installs into that Python environment.
+    # --reinstall: uv skips a package that a reused Python environment already
+    # has, and then does not check its hash.
     uv venv "${cfg[@]}" "${reuse[@]}" "$env_dir"
-    uv pip install "${cfg[@]}" --python "$env_dir" --require-hashes "${fmt[@]}" --no-deps -r "$REQUIREMENTS_FILE"
+    uv pip install "${cfg[@]}" --python "$env_dir" --require-hashes --reinstall "${fmt[@]}" --no-deps -r "$REQUIREMENTS_FILE"
     ;;
   unlocked)
     spec=.
@@ -79,9 +82,8 @@ case "$VERSIONS" in
     t+=("${unlocked_extra[@]}")
     uv venv "${cfg[@]}" "${reuse[@]}" "$env_dir"
     # t is empty when the call has only also-install-without-deps items.
-    # --upgrade replaces an older version in a reused Python environment.
     if [ ${#t[@]} -gt 0 ]; then
-      uv pip install "${cfg[@]}" --python "$env_dir" "${newer[@]}" --upgrade "${fmt[@]}" "${t[@]}"
+      uv pip install "${cfg[@]}" --python "$env_dir" "${newer[@]}" "${fmt[@]}" "${t[@]}"
     fi
     ;;
 esac

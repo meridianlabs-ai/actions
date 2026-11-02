@@ -23,8 +23,8 @@ runs:
         PYTHON_VERSION: ${{ inputs.python-version }}
         ACTIONS_CACHE: ${{ inputs.actions-cache }}
         RECORDED_SETUP: ${{ env.MERIDIAN_SETUP_UV }}
-      # Stops on an unknown actions-cache value, a newline in an input, or a
-      # second setup-uv in a job.
+      # Stops on an unknown actions-cache value, a newline or carriage return
+      # in an input, or a second setup-uv in a job.
       run: python3 "$GITHUB_ACTION_PATH/check_inputs.py"
 
     # The one uv pin for all callers. Change it here, then make a vX.Y.Z tag.

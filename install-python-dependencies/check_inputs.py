@@ -8,7 +8,9 @@ before uv runs. Each error is a GitHub ::error:: line that names the input.
 The rules:
   - versions and python-version are required.
   - each enumerated input holds one of its values.
-  - a one-line input holds no newline.
+  - a one-line input holds no newline and no carriage return, and a list input
+    holds no carriage return (the runner also starts a line at a carriage
+    return).
   - a list item does not start with '-' (so a caller cannot add a uv option).
   - an input applies only to the versions value its table row allows.
   - unlocked needs actions-cache none and project-uv-settings ignore.
@@ -93,8 +95,11 @@ def main() -> None:
 
     # Before any error that shows an input value, so no value adds a line.
     for name in ONE_LINE:
-        if "\n" in v[name]:
+        if "\n" in v[name] or "\r" in v[name]:
             fail(name, "must be one line.")
+    for name in LIST_INPUTS:
+        if "\r" in v[name]:
+            fail(name, "must hold no carriage return.")
 
     if versions not in VERSIONS_VALUES:
         fail("versions", f"unknown value '{versions}'. Use one of: {', '.join(VERSIONS_VALUES)}.")

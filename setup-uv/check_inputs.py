@@ -3,8 +3,8 @@
 
 GitHub does not stop a call with a bad input, so this script does. It reads
 each input from an environment variable and stops on a second setup-uv in the
-job, a newline in an input, or an unknown actions-cache value. Each error is a
-GitHub ::error:: line that names the input.
+job, a newline or carriage return in an input, or an unknown actions-cache
+value. Each error is a GitHub ::error:: line that names the input.
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ def main() -> None:
         fail("setup-uv", "already ran in this job. Call setup-uv once per job.")
 
     for name, value in (("python-version", python_version), ("actions-cache", actions_cache)):
-        if "\n" in value:
+        # The runner also starts a line at a carriage return.
+        if "\n" in value or "\r" in value:
             fail(name, "must be one line.")
 
     if actions_cache not in CACHE_VALUES:
