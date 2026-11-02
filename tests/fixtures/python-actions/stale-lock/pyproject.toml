@@ -1,0 +1,10 @@
+[project]
+name = "ipd-stale"
+version = "0.0.1"
+description = "Fixture with a deliberately out-of-date uv.lock."
+requires-python = ">=3.9"
+dependencies = ["six==1.16.0", "iniconfig==2.0.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

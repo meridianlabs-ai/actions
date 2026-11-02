@@ -1,0 +1,48 @@
+name: Set up uv
+description: >-
+  Install the pinned uv and, if asked, a Python, with a stated Actions cache
+  rule. This action holds the one uv version for all Meridian callers.
+
+inputs:
+  python-version:
+    description: >-
+      Python version to install, for example '3.11'. Empty installs no Python.
+    default: ""
+  actions-cache:
+    description: >-
+      Use of the Actions cache by setup-uv: read-write (restore and Action
+      save), restore-only (restore, no Action save) or none.
+    default: read-write
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        ACTIONS_CACHE: ${{ inputs.actions-cache }}
+        RECORDED_SETUP: ${{ env.MERIDIAN_SETUP_UV }}
+      # Stops on an unknown actions-cache value, a newline in an input, or a
+      # second setup-uv in a job.
+      run: python3 "$GITHUB_ACTION_PATH/check_inputs.py"
+
+    # The one uv pin for all callers. Change it here, then make a vX.Y.Z tag.
+    - id: uv
+      uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      with:
+        version: 0.13.5
+        python-version: ${{ inputs.python-version }}
+        # enable-cache is auto or false, never true. save-cache auto is the
+        # default of setup-uv. prune-cache stays false: true adds -pruned to
+        # the Actions cache key, and each job keeps its uv cache prune --ci step.
+        enable-cache: ${{ inputs.actions-cache == 'none' && 'false' || 'auto' }}
+        save-cache: ${{ inputs.actions-cache == 'read-write' && 'auto' || 'false' }}
+
+    - name: Record the setup for this job
+      shell: bash
+      env:
+        SETUP: ${{ inputs.python-version }}/${{ inputs.actions-cache }}
+      # A later install-python-dependencies step reads this to skip a second
+      # setup-uv and to check that its python-version and actions-cache match.
+      run: echo "MERIDIAN_SETUP_UV=$SETUP" >> "$GITHUB_ENV"

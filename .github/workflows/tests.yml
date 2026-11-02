@@ -24,6 +24,9 @@ name: tests
       - ".github/workflows/keep-alive.yml"
       - ".github/workflows/pr-title-lint.yml"
       - ".github/workflows/release-please-python.yml"
+      - ".github/workflows/self-test-python-actions.yml"
+      - "setup-uv/**"
+      - "install-python-dependencies/**"
       - "slack-release-announce/**"
       - "tests/**"
   pull_request:
@@ -42,6 +45,9 @@ name: tests
       - ".github/workflows/keep-alive.yml"
       - ".github/workflows/pr-title-lint.yml"
       - ".github/workflows/release-please-python.yml"
+      - ".github/workflows/self-test-python-actions.yml"
+      - "setup-uv/**"
+      - "install-python-dependencies/**"
       - "slack-release-announce/**"
       - "tests/**"
 

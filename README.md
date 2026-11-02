@@ -19,6 +19,28 @@ After Release Please runs, both release-please workflows rename its hard-coded `
 
 Minimal caller examples are in each workflow's header comment.
 
+## Python CI actions
+
+Two composite actions do the Python installs in CI. setup-uv holds the one uv
+version for all callers; install-python-dependencies installs the packages, and
+each call says where the versions come from. Pin both by the full commit SHA
+with a `# vX.Y.Z` comment, as above; Dependabot bumps them. The self-test
+workflow (`.github/workflows/self-test-python-actions.yml`) runs them on a
+runner, and `tests/test_python_actions.py` tests their scripts.
+
+- **`setup-uv/`** — composite action: install the pinned uv (and, if asked, a
+  Python) with a stated Actions cache rule. Inputs: `python-version` (empty
+  installs no Python) and `actions-cache` (`read-write`, `restore-only` or
+  `none`). It runs once per job. A job that needs uv but no packages calls it
+  directly.
+- **`install-python-dependencies/`** — composite action: install Python
+  dependencies from `uv.lock` (`versions: locked`), from a hashed requirements
+  file (`versions: hashed-requirements`) or at the newest releases
+  (`versions: unlocked`). It calls `setup-uv` once per job. A job with an
+  unlocked step must set `cache-mode: none` or `read`, because an unlocked
+  install can run code nobody has reviewed. See the action's `action.yml` for
+  the full input list.
+
 ## Workflows
 
 ### Docs Link Check
