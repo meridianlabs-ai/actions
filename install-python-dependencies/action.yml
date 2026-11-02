@@ -60,8 +60,9 @@ inputs:
     default: apply
   package-format:
     description: >-
-      Whether the main install can build from source: any or wheels-only. Not
-      with locked. Does not apply to also-install-without-deps items.
+      any or wheels-only. wheels-only stops a build of a package from an index;
+      the project and local paths still build. Not with locked. Does not apply
+      to also-install-without-deps items.
     default: any
   actions-cache:
     description: >-
@@ -92,11 +93,12 @@ runs:
         RECORDED_SETUP: ${{ env.MERIDIAN_SETUP_UV }}
       # Stops on a missing or unknown value, a newline or carriage return in a
       # one-line input, a carriage return in a list input, a list item that
-      # starts with - or holds ::, requirements-file -, an input that does not
-      # apply to the versions value, an unlocked call that installs nothing,
-      # unlocked extras with project-install skip, a project call with no
-      # <project-dir>/pyproject.toml, or a second call whose python-version or
-      # actions-cache differs from the setup-uv already run in this job.
+      # starts with - or holds ::, %0a or %0d, requirements-file -, an input
+      # that does not apply to the versions value, an unlocked call that
+      # installs nothing, unlocked extras with project-install skip, a project
+      # call with no <project-dir>/pyproject.toml, or a second call whose
+      # python-version or actions-cache differs from the setup-uv already run
+      # in this job.
       run: python3 "$GITHUB_ACTION_PATH/check_inputs.py"
 
     # $/ loads setup-uv from this repository at this commit. Run it once per

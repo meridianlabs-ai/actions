@@ -275,6 +275,21 @@ def test_install_rejects_a_list_item_that_holds_a_workflow_command(env_var, name
     assert r.stdout.splitlines() == [f"::error::{name}: an item holds '::'. List items are packages or paths."]
 
 
+@pytest.mark.parametrize(
+    "env_var, name", [("UNLOCKED_EXTRA", "also-install-unlocked"), ("WITHOUT_DEPS", "also-install-without-deps")]
+)
+@pytest.mark.parametrize("code", ["%0A", "%0a", "%0D", "%0d"])
+def test_install_rejects_a_list_item_that_holds_an_encoded_line_break(env_var, name, code):
+    # uv decodes a URL item and can show '%0A::warning::' as a line that
+    # starts with '::'. The error does not show the item.
+    item = f"file:///tmp/x/{code}%3A%3Awarning%3A%3Aforged.whl"
+    r = check_install(
+        VERSIONS="unlocked", PYTHON_VERSION="3.11", PROJECT_UV_SETTINGS="ignore", ACTIONS_CACHE="none", **{env_var: item}
+    )
+    assert r.returncode == 1
+    assert r.stdout.splitlines() == [f"::error::{name}: an item holds '%0a' or '%0d'. List items are packages or paths."]
+
+
 def test_install_rejects_requirements_file_dash():
     r = check_install(VERSIONS="hashed-requirements", PYTHON_VERSION="3.11", REQUIREMENTS_FILE="-", PROJECT_UV_SETTINGS="ignore")
     assert r.returncode == 1 and "::error::requirements-file:" in r.stdout

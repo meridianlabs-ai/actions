@@ -38,8 +38,10 @@ runner, and `tests/test_python_actions.py` tests their scripts.
   file (`versions: hashed-requirements`) or at the newest releases
   (`versions: unlocked`). It calls `setup-uv` once per job. A job with an
   unlocked step must set `cache-mode: none` or `read`, because an unlocked
-  install can run code nobody has reviewed. See the action's `action.yml` for
-  the full input list.
+  install can run code nobody has reviewed. In a job with an unlocked step, a
+  later locked or hashed-requirements step does not keep its guarantees,
+  because the unlocked code can change the job. See the action's `action.yml`
+  for the full input list.
 
 ## Workflows
 

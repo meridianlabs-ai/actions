@@ -12,8 +12,9 @@ The rules:
     holds no carriage return (the runner also starts a line at a carriage
     return).
   - a list item does not start with '-' (so a caller cannot add a uv option)
-    and holds no '::' (uv can show an item on its own line, and the runner
-    reads a line that starts with '::' as a workflow command).
+    and holds no '::', '%0a' or '%0d' (uv can show an item on its own line,
+    uv decodes '%0a' and '%0d' in a URL to a line break, and the runner reads
+    a line that starts with '::' as a workflow command).
   - requirements-file is not '-' (uv reads standard input).
   - an input applies only to the versions value its table row allows.
   - unlocked needs actions-cache none and project-uv-settings ignore.
@@ -118,6 +119,8 @@ def main() -> None:
         for item in items(v[name]):
             if "::" in item:
                 fail(name, "an item holds '::'. List items are packages or paths.")
+            if "%0a" in item.lower() or "%0d" in item.lower():
+                fail(name, "an item holds '%0a' or '%0d'. List items are packages or paths.")
             if item.lstrip().startswith("-"):
                 fail(name, f"item '{item}' starts with '-'. List items are packages or paths, not options.")
 
