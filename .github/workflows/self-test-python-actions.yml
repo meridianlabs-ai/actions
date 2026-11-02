@@ -288,7 +288,7 @@ jobs:
       - name: The pinned SHA matches the action folders at HEAD
         shell: bash
         env:
-          PINNED: 409e7ef0d6e41e7c16481a5f275deb8c688aa3ff
+          PINNED: 23df86edc6b62c4d6b960f174c6e5e2de7d6bc26
         run: |
           git diff --quiet "$PINNED" HEAD -- setup-uv install-python-dependencies \
             || { echo "::error::Re-pin the remote-reference jobs to HEAD: setup-uv or install-python-dependencies changed since $PINNED."; exit 1; }
@@ -304,7 +304,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/install-python-dependencies@409e7ef0d6e41e7c16481a5f275deb8c688aa3ff # self, re-pin after each change
+      - uses: meridianlabs-ai/actions/install-python-dependencies@23df86edc6b62c4d6b960f174c6e5e2de7d6bc26 # self, re-pin after each change
         with:
           versions: locked
           python-version: "3.11"
@@ -325,7 +325,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/setup-uv@409e7ef0d6e41e7c16481a5f275deb8c688aa3ff # self, re-pin after each change
+      - uses: meridianlabs-ai/actions/setup-uv@23df86edc6b62c4d6b960f174c6e5e2de7d6bc26 # self, re-pin after each change
         with:
           python-version: "3.11"
           actions-cache: none
