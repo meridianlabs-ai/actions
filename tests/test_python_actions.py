@@ -556,6 +556,7 @@ def cache(key: str, created: str) -> dict:
 STARTED = "2026-01-01T00:00:00Z"  # each job's recorded before-install time
 FRESH = "2026-01-01T00:00:01Z"  # at or after the recorded time
 OLD = "2025-12-31T23:59:59Z"  # before the recorded time
+SAME_SECOND = "2026-01-01T00:00:00.500Z"  # fractional, same whole second as STARTED
 
 
 def run_check_action_save(tmp_path: Path, caches: list[dict]) -> subprocess.CompletedProcess:
@@ -612,6 +613,35 @@ def test_check_action_save_ignores_non_setup_uv_keys(tmp_path):
         [cache("setup-uv-Linux-X64-python-3.11-abc", FRESH), cache("some-other-cache-python-3.12", FRESH)],
     )
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_check_action_save_passes_with_a_same_second_fractional_3_11_key(tmp_path):
+    # created_at carries a fraction of the same second as the recorded time; it is
+    # a save made in that second, so it must count, not sort as older.
+    r = run_check_action_save(tmp_path, [cache("setup-uv-Linux-X64-python-3.11-abc", SAME_SECOND)])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "read-write saved this attempt" in r.stdout
+
+
+def test_check_action_save_fails_on_a_same_second_fractional_3_12_key(tmp_path):
+    # A 3.12 save in the same second as the restore-only time is a restore-only save.
+    r = run_check_action_save(
+        tmp_path,
+        [cache("setup-uv-Linux-X64-python-3.11-abc", FRESH), cache("setup-uv-Linux-X64-python-3.12-abc", SAME_SECOND)],
+    )
+    assert r.returncode == 1
+    assert "a restore-only or none job saved a setup-uv cache this attempt" in r.stdout
+
+
+@pytest.mark.parametrize("py", ["3.12", "3.13"])
+def test_check_action_save_ignores_an_old_restore_only_or_none_key(tmp_path, py):
+    # A 3.12/3.13 key from before its job time is a leftover, not this attempt's save.
+    r = run_check_action_save(
+        tmp_path,
+        [cache("setup-uv-Linux-X64-python-3.11-abc", FRESH), cache(f"setup-uv-Linux-X64-python-{py}-abc", OLD)],
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "read-write saved this attempt" in r.stdout
 
 
 def run_cache_mode_check(tmp_path: Path, caches: list[dict]) -> subprocess.CompletedProcess:
