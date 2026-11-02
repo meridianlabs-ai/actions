@@ -31,6 +31,7 @@ env:
   HASHED_DIR: tests/fixtures/python-actions/hashed
   LOCAL_PKG: tests/fixtures/python-actions/local-pkg
   SCRIPT_DIR: tests/fixtures/python-actions/script
+  STALE_LOCK: tests/fixtures/python-actions/stale-lock
 
 jobs:
   # A locked install with the default Actions cache rule (read-write). setup-uv
@@ -43,6 +44,14 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+      - name: A per-attempt file so this run attempt gets a new setup-uv cache key
+        shell: bash
+        env:
+          MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
+        # setup-uv's default cache-dependency-glob matches **/*.py.lock, so this
+        # file is part of the Actions cache key. A new value each run attempt
+        # means check-action-save never passes on a key an earlier run saved.
+        run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
       - uses: ./install-python-dependencies
         with:
           versions: locked
@@ -63,6 +72,11 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+      - name: A per-attempt file so this run attempt gets a new setup-uv cache key
+        shell: bash
+        env:
+          MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
       - uses: ./install-python-dependencies
         with:
           versions: locked
@@ -82,6 +96,11 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+      - name: A per-attempt file so this run attempt gets a new setup-uv cache key
+        shell: bash
+        env:
+          MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
       - uses: ./install-python-dependencies
         with:
           versions: locked
@@ -92,9 +111,38 @@ jobs:
         shell: bash
         run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"'
 
+  # A stale uv.lock fails a locked install: the fixture's pyproject.toml lists a
+  # dependency the lock omits, so uv sync --locked stops. The action must pass
+  # that failure through. A continue-on-error step holds the failure; the guard
+  # fails unless its outcome is failure.
+  stale-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: A locked install on a stale lock stops
+        id: stale
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.STALE_LOCK }}
+          actions-cache: none
+      - name: The stale lock failed the install
+        shell: bash
+        env:
+          STALE: ${{ steps.stale.outcome }}
+        run: '[ "$STALE" = failure ] || { echo "::error::a stale lock did not fail the locked install"; exit 1; }'
+
   # Read the Actions cache list and prove: only the read-write job made a
-  # setup-uv Action save, and no setup-uv Actions cache key is pruned. The
-  # per-job Python version tells the keys apart (setup-uv puts it in the key).
+  # setup-uv Action save in this run attempt, and no setup-uv Actions cache key
+  # is pruned. The per-job Python version tells the keys apart (setup-uv puts it
+  # in the key), and each job's per-attempt marker file makes a key that an
+  # earlier run cannot have saved. The check compares each entry's created_at
+  # with this attempt's run_started_at, so a leftover entry does not pass it.
   check-action-save:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -103,25 +151,36 @@ jobs:
       contents: read
       actions: read
     steps:
-      - name: Only the read-write job saved a setup-uv cache, and none is pruned
+      - name: Only the read-write job saved a setup-uv cache this attempt, none pruned
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
-          keys=$(gh api "repos/$REPO/actions/caches?ref=$REF&per_page=100" --jq '.actions_caches[].key')
-          printf 'Actions cache keys for %s:\n%s\n' "$REF" "$keys"
-          setup=$(printf '%s\n' "$keys" | grep -F 'setup-uv' || true)
-          printf '%s\n' "$setup" | grep -F '3.11' >/dev/null \
-            || { echo "::error::no setup-uv Action save for the read-write job (python 3.11)"; exit 1; }
-          if printf '%s\n' "$setup" | grep -E '3\.12|3\.13' >/dev/null; then
-            echo "::error::a restore-only or none job made a setup-uv Action save"; exit 1
-          fi
-          if printf '%s\n' "$keys" | grep -F -- '-pruned' >/dev/null; then
-            echo "::error::a setup-uv Actions cache key is pruned"; exit 1
-          fi
-          echo "read-write saved, restore-only and none did not, no key is pruned"
+          started=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT" --jq '.run_started_at')
+          printf 'This attempt started at %s\n' "$started"
+          # key<TAB>created_at per line, UTC ISO-8601 so string order is time order.
+          entries=$(gh api "repos/$REPO/actions/caches?ref=$REF&per_page=100" \
+            --jq '.actions_caches[] | [.key, .created_at] | @tsv')
+          printf 'Actions cache entries for %s:\n%s\n' "$REF" "$entries"
+          fresh_read_write=0
+          while IFS=$'\t' read -r key created; do
+            [ -n "$key" ] || continue
+            case "$key" in *setup-uv*) ;; *) continue ;; esac
+            case "$key" in *-pruned*) echo "::error::a setup-uv Actions cache key is pruned: $key"; exit 1 ;; esac
+            # Only entries made at or after this attempt's start count.
+            [ "$created" \< "$started" ] && continue
+            case "$key" in
+              *3.11*) fresh_read_write=1 ;;
+              *3.12*|*3.13*) echo "::error::a restore-only or none job saved a setup-uv cache this attempt: $key"; exit 1 ;;
+            esac
+          done <<< "$entries"
+          [ "$fresh_read_write" = 1 ] \
+            || { echo "::error::no setup-uv Action save for the read-write job (python 3.11) this attempt"; exit 1; }
+          echo "read-write saved this attempt, restore-only and none did not, no key is pruned"
 
   # cache-mode: read makes the Actions cache token refuse a write. Prove that an
   # actions/cache/save under this mode creates no Actions cache entry.
@@ -160,12 +219,14 @@ jobs:
           fi
           echo "no Actions cache entry made (cache-mode: read enforced)"
 
-  # Call both actions from a remote reference (meridianlabs-ai/actions@<SHA>),
-  # not with ./, so the $/setup-uv call also runs from a remote reference. The
-  # pinned SHA must match the action folders at HEAD, so a stale pin fails CI.
-  # Re-pin PINNED and the two @<SHA> literals after each change to the action
-  # folders (commit the work, then pin that commit's SHA here).
-  remote-reference:
+  # The remote-reference jobs below call the actions as
+  # meridianlabs-ai/actions/...@<SHA>, not with ./, so the remote $/setup-uv call
+  # is exercised too. uses: cannot take an expression, so each SHA is a literal.
+  # This guard fails if the pinned SHA does not match the action folders at HEAD,
+  # so a stale pin fails CI. Re-pin PINNED here and the two @<SHA> literals below
+  # after each change to the action folders (commit the work, then pin that
+  # commit's SHA in all three places).
+  remote-reference-pin-guard:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -179,7 +240,40 @@ jobs:
           PINNED: c2e51351a36f81b4af1cbced007c5de4620830d3
         run: |
           git diff --quiet "$PINNED" HEAD -- setup-uv install-python-dependencies \
-            || { echo "::error::Re-pin remote-reference to HEAD: setup-uv or install-python-dependencies changed since $PINNED."; exit 1; }
+            || { echo "::error::Re-pin the remote-reference jobs to HEAD: setup-uv or install-python-dependencies changed since $PINNED."; exit 1; }
+
+  # Call only install-python-dependencies from the remote reference, so its
+  # nested $/setup-uv runs from the remote reference too (the ./ jobs cannot
+  # prove the remote $/ call). Then check uv and that the project installed.
+  remote-reference-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [remote-reference-pin-guard]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: meridianlabs-ai/actions/install-python-dependencies@c2e51351a36f81b4af1cbced007c5de4620830d3 # self, re-pin after each change
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          actions-cache: none
+      - name: uv is the pinned version and the project installed
+        shell: bash
+        run: |
+          uv --version | grep -F '0.13.5'
+          "$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"
+
+  # Call setup-uv alone from the remote reference and check the uv version.
+  remote-reference-setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [remote-reference-pin-guard]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: meridianlabs-ai/actions/setup-uv@c2e51351a36f81b4af1cbced007c5de4620830d3 # self, re-pin after each change
         with:
           python-version: "3.11"
@@ -187,15 +281,6 @@ jobs:
       - name: uv is the pinned version
         shell: bash
         run: uv --version | grep -F '0.13.5'
-      - uses: meridianlabs-ai/actions/install-python-dependencies@c2e51351a36f81b4af1cbced007c5de4620830d3 # self, re-pin after each change
-        with:
-          versions: locked
-          python-version: "3.11"
-          project-dir: ${{ env.LOCKED_PROJECT }}
-          actions-cache: none
-      - name: The project installed
-        shell: bash
-        run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"'
 
   # A hashed-requirements install, then uv pip check on the Python environment.
   # The full closure passes; a missing hash and a short closure both fail.

@@ -188,16 +188,19 @@ def test_install_rejects_a_newline_in_a_one_line_input():
     assert r.returncode == 1 and "::error::python-version: must be one line." in r.stdout
 
 
-@pytest.mark.parametrize("env", [{"EXTRAS": "-x"}, {"ALSO": None}])
-def test_install_rejects_a_list_item_that_starts_with_dash(env):
+@pytest.mark.parametrize(
+    "env_var, value, error",
+    [
+        ("EXTRAS", "-x", "::error::extras:"),
+        ("WITHOUT_DEPS", "--no-index", "::error::also-install-without-deps:"),
+    ],
+)
+def test_install_rejects_a_list_item_that_starts_with_dash(env_var, value, error):
     # extras (locked) and also-install-without-deps (locked) both reject an option-like item.
-    if "EXTRAS" in env:
-        r = check_install(VERSIONS="locked", PYTHON_VERSION="3.11", EXTRAS="-x")
-        assert "::error::extras:" in r.stdout
-    else:
-        r = check_install(VERSIONS="locked", PYTHON_VERSION="3.11", WITHOUT_DEPS="--no-index")
-        assert "::error::also-install-without-deps:" in r.stdout
-    assert r.returncode == 1 and "starts with '-'" in r.stdout
+    r = check_install(VERSIONS="locked", PYTHON_VERSION="3.11", **{env_var: value})
+    assert r.returncode == 1
+    assert error in r.stdout
+    assert "starts with '-'" in r.stdout
 
 
 # --- install check_inputs: inputs that apply to one versions value only --------
