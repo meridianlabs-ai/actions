@@ -1805,6 +1805,9 @@ for i, a in enumerate(args):
 body = sys.stdin.read() if "@-" in args else ""
 with open(os.environ["FAKE_CURL_LOG"], "a") as log:
     log.write(json.dumps({"args": args, "headers": headers, "body": body}) + "\n")
+if os.environ.get("FAKE_CURL_EXIT"):
+    sys.stderr.write("curl: (28) Operation timed out\n")
+    sys.exit(int(os.environ["FAKE_CURL_EXIT"]))
 sys.stdout.write(os.environ.get("FAKE_SLACK_RESPONSE", '{"ok": true}'))
 '''
 
@@ -1814,7 +1817,8 @@ NO_MANIFEST_TEXT = ("⚠️ Triage did not complete: no landing manifest reached
 
 
 def report_no_manifest(tmp_path: Path, *, manifest: bool = False, channel: str = "C0123ABCDEF",
-                       thread_ts: str = "1726000000.123456", response: str = '{"ok": true}') -> tuple[subprocess.CompletedProcess, list[dict]]:
+                       thread_ts: str = "1726000000.123456", response: str = '{"ok": true}',
+                       curl_exit: str = "") -> tuple[subprocess.CompletedProcess, list[dict]]:
     landing = tmp_path / "landing"
     landing.mkdir()
     if manifest:
@@ -1826,8 +1830,10 @@ def report_no_manifest(tmp_path: Path, *, manifest: bool = False, channel: str =
     log = tmp_path / "curl.log"
     env = {"PATH": f"{curl.parent}:{os.environ['PATH']}", "FAKE_CURL_LOG": str(log), "FAKE_SLACK_RESPONSE": response,
            "MANIFEST": str(landing / "manifest.json"), "SLACK_TOKEN": "xoxb-secret", "SLACK_CHANNEL": channel,
-           "SLACK_THREAD_TS": thread_ts, "RUN_URL": "https://example.test/run"}
-    r = run_bash(job_step("land", NO_MANIFEST_STEP)["run"], cwd=tmp_path, env=env)
+           "SLACK_THREAD_TS": thread_ts, "RUN_URL": "https://example.test/run", "FAKE_CURL_EXIT": curl_exit}
+    # The shell Actions uses for a `run:` step with no `shell:` on Linux.
+    r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", job_step("land", NO_MANIFEST_STEP)["run"]],
+                       cwd=tmp_path, env={**os.environ, **env}, text=True, capture_output=True, check=False)
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return r, calls
 
@@ -1858,6 +1864,23 @@ def test_an_arrived_manifest_gets_no_extra_reply(tmp_path):
     assert calls == []
 
 
+@pytest.mark.parametrize("channel", ["G0123ABCDEF", "D0123ABCDEF"])
+def test_no_manifest_accepts_every_channel_shape_land_accepts(tmp_path, channel):
+    # SLACK_CHANNEL_ID may name a private channel or a D conversation; Land
+    # posts to both, so the fallback does too.
+    r, calls = report_no_manifest(tmp_path, channel=channel)
+    assert r.returncode == 1 and len(calls) == 1
+    assert json.loads(calls[0]["body"]) == {"channel": channel, "thread_ts": "1726000000.123456", "text": NO_MANIFEST_TEXT}
+
+
+def test_no_manifest_bounds_the_post_and_reports_a_transport_failure(tmp_path):
+    r, calls = report_no_manifest(tmp_path, curl_exit="28")
+    assert r.returncode == 1 and len(calls) == 1
+    args = calls[0]["args"]
+    assert args[args.index("--max-time") + 1] == "30"
+    assert "::error::land: the did-not-complete reply was not posted: no response from Slack" in r.stdout
+
+
 @pytest.mark.parametrize("channel,thread_ts", [("", ""), ("not-a-channel", ""), ("C0123ABCDEF", "1726000000")],
                          ids=["no-channel", "bad-channel", "bad-thread"])
 def test_no_manifest_posts_nowhere_but_a_valid_destination(tmp_path, channel, thread_ts):
@@ -1868,7 +1891,7 @@ def test_no_manifest_posts_nowhere_but_a_valid_destination(tmp_path, channel, th
 def test_no_manifest_reports_a_refused_post(tmp_path):
     r, calls = report_no_manifest(tmp_path, response='{"ok": false, "error": "channel_not_found"}')
     assert r.returncode == 1 and len(calls) == 1
-    assert "Slack refused the did-not-complete reply: channel_not_found" in r.stdout
+    assert "::error::land: the did-not-complete reply was not posted: channel_not_found" in r.stdout
 
 
 def test_the_no_manifest_reply_goes_where_land_posts_and_only_after_land_failed():

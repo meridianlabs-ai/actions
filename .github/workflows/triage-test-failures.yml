@@ -1361,7 +1361,9 @@ jobs:
             exit 0
           fi
           echo "::error::land: no landing manifest reached this job (the agent job uploaded none, or the download failed)."
-          if [ -z "${SLACK_TOKEN:-}" ] || ! [[ "$SLACK_CHANNEL" =~ ^[CG][A-Z0-9]{8,}$ ]]; then
+          # The same channel shapes Land accepts: SLACK_CHANNEL_ID may name a
+          # D conversation.
+          if [ -z "${SLACK_TOKEN:-}" ] || ! [[ "$SLACK_CHANNEL" =~ ^[CGD][A-Z0-9]{8,}$ ]]; then
             echo "::error::land: no Slack token or channel ID; the thread gets no reply."
             exit 1
           fi
@@ -1373,14 +1375,16 @@ jobs:
                    --arg text "⚠️ Triage did not complete: no landing manifest reached the land job. See the run log: $RUN_URL" \
                    '{channel: $c, text: $text} + (if $t != "" then {thread_ts: $t} else {} end)')
           # The token reaches curl through a file (process substitution),
-          # never an argument: arguments show in `ps`.
-          resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+          # never an argument: arguments show in `ps`. One attempt, bounded,
+          # so a stalled Slack cannot hold the runner; a transport failure is
+          # reported like a refused post (curl's own error is in the log).
+          resp=$(curl -sS --max-time 30 -X POST https://slack.com/api/chat.postMessage \
                    -H @<(printf 'Authorization: Bearer %s\n' "$SLACK_TOKEN") \
                    -H "Content-Type: application/json; charset=utf-8" \
-                   --data @- <<<"$body")
+                   --data @- <<<"$body") || resp='{"ok": false, "error": "no response from Slack"}'
           if [ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null)" = "true" ]; then
             echo "land: posted the did-not-complete reply to $SLACK_CHANNEL${SLACK_THREAD_TS:+ (thread $SLACK_THREAD_TS)}."
           else
-            echo "::error::land: Slack refused the did-not-complete reply: $(jq -r '.error // "unparsable response"' <<<"$resp" 2>/dev/null || echo "unparsable response")"
+            echo "::error::land: the did-not-complete reply was not posted: $(jq -r '.error // "unparsable response"' <<<"$resp" 2>/dev/null || echo "unparsable response")"
           fi
           exit 1
