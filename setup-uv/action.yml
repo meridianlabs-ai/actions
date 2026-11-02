@@ -1,7 +1,7 @@
 name: Set up uv
 description: >-
   Install the pinned uv and, if asked, a Python, with a stated Actions cache
-  rule. This action holds the one uv version for all Meridian callers.
+  rule. This action holds the one uv version for all callers.
 
 inputs:
   python-version:
