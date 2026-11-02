@@ -1,5 +1,5 @@
 # actions
-Shared GitHub Actions and workflows for the Meridian repos and UKGovernmentBEIS/inspect_ai: release automation, Slack actions and Python CI actions. This repository also runs the scheduled tests of inspect_ai and inspect_swe, and a weekly docs link check. To report a vulnerability, read [SECURITY.md](SECURITY.md). For what these workflows trust and guarantee, read [THREAT_MODEL.md](THREAT_MODEL.md).
+This repository holds shared GitHub Actions and workflows: release automation, Slack actions and Python CI actions. The Meridian repos use them. UKGovernmentBEIS/inspect_ai uses the Python CI actions and `pr-title-lint.yml`. This repository also runs the scheduled tests of inspect_ai and inspect_swe, and a weekly docs link check. To report a vulnerability, read [SECURITY.md](SECURITY.md). For what these workflows trust and guarantee, read [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Reusable release workflows
 
