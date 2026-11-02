@@ -499,17 +499,15 @@ def test_setup_uv_pins_astral_setup_uv_by_sha_with_a_version_comment():
 # is covered off a runner.
 
 FAKE_GH = r'''#!/usr/bin/env python3
-"""Stand-in for `gh api`: serve a run attempt object and the Actions cache list
-from $FAKE_GH_DIR, then apply --jq with the real jq."""
+"""Stand-in for `gh api`: serve the Actions cache list from $FAKE_GH_DIR, then
+apply --jq with the real jq."""
 import os, pathlib, re, subprocess, sys
 
 args = sys.argv[1:]
 store = pathlib.Path(os.environ["FAKE_GH_DIR"])
 assert args[0] == "api", args
 path = args[1].split("?")[0]
-if re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+/attempts/\d+", path):
-    data = (store / "attempt.json").read_text()
-elif re.fullmatch(r"repos/[^/]+/[^/]+/actions/caches", path):
+if re.fullmatch(r"repos/[^/]+/[^/]+/actions/caches", path):
     data = (store / "caches.json").read_text()
 else:
     sys.exit(f"fake gh: unexpected call {args}")
@@ -531,12 +529,10 @@ def run_bash(script: str, *, cwd: Path, env: dict) -> subprocess.CompletedProces
     )
 
 
-def fake_gh_on_path(tmp_path: Path, *, attempt: dict | None = None, caches: list[dict]) -> dict:
+def fake_gh_on_path(tmp_path: Path, *, caches: list[dict]) -> dict:
     """Write the canned API JSON and return the PATH-with-fake-gh env fragment."""
     store = tmp_path / "gh"
     store.mkdir(exist_ok=True)
-    if attempt is not None:
-        (store / "attempt.json").write_text(json.dumps(attempt))
     (store / "caches.json").write_text(json.dumps({"actions_caches": caches}))
     gh = tmp_path / "bin" / "gh"
     gh.parent.mkdir(exist_ok=True)
@@ -557,21 +553,22 @@ def cache(key: str, created: str) -> dict:
     return {"key": key, "created_at": created}
 
 
-STARTED = "2026-01-01T00:00:00Z"
-FRESH = "2026-01-01T00:00:01Z"  # at or after the attempt start
-OLD = "2025-12-31T23:59:59Z"  # before the attempt start
+STARTED = "2026-01-01T00:00:00Z"  # each job's recorded before-install time
+FRESH = "2026-01-01T00:00:01Z"  # at or after the recorded time
+OLD = "2025-12-31T23:59:59Z"  # before the recorded time
 
 
 def run_check_action_save(tmp_path: Path, caches: list[dict]) -> subprocess.CompletedProcess:
-    path_env = fake_gh_on_path(tmp_path, attempt={"run_started_at": STARTED}, caches=caches)
+    path_env = fake_gh_on_path(tmp_path, caches=caches)
     s = run_step("check-action-save", "Only the read-write job saved")
     env = {
         **path_env,
         "GH_TOKEN": "fake",
         "REPO": REPO,
         "REF": "refs/heads/main",
-        "RUN_ID": "123",
-        "ATTEMPT": "1",
+        "RW_STARTED": STARTED,
+        "RO_STARTED": STARTED,
+        "NONE_STARTED": STARTED,
     }
     return run_bash(s["run"], cwd=tmp_path, env=env)
 

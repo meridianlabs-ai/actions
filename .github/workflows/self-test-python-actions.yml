@@ -27,8 +27,9 @@ permissions:
   contents: read
 
 # One run per ref at a time. check-action-save reads the Actions cache list for
-# the ref and counts only entries saved at or after this attempt starts; a second
-# run on the same ref must not overlap and save a key this attempt would count.
+# the ref and counts only entries saved at or after each install job records a
+# timestamp before its install; a second run on the same ref must not overlap and
+# save a key this run would count.
 concurrency:
   group: self-test-python-actions-${{ github.ref }}
   cancel-in-progress: false
@@ -47,6 +48,8 @@ jobs:
   locked-read-write:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      started: ${{ steps.before-install.outputs.started }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -59,6 +62,12 @@ jobs:
         # file is part of the Actions cache key. A new value each run attempt
         # means check-action-save never passes on a key an earlier run saved.
         run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
+      - name: Record a UTC timestamp before the install
+        id: before-install
+        shell: bash
+        # check-action-save counts only a setup-uv save made at or after this
+        # time, so a leftover key from an earlier run does not pass the check.
+        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: ./install-python-dependencies
         with:
           versions: locked
@@ -75,6 +84,8 @@ jobs:
   locked-restore-only:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      started: ${{ steps.before-install.outputs.started }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -84,6 +95,10 @@ jobs:
         env:
           MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
         run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
+      - name: Record a UTC timestamp before the install
+        id: before-install
+        shell: bash
+        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: ./install-python-dependencies
         with:
           versions: locked
@@ -99,6 +114,8 @@ jobs:
   locked-none:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      started: ${{ steps.before-install.outputs.started }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -108,6 +125,10 @@ jobs:
         env:
           MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
         run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
+      - name: Record a UTC timestamp before the install
+        id: before-install
+        shell: bash
+        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: ./install-python-dependencies
         with:
           versions: locked
@@ -148,11 +169,14 @@ jobs:
   # setup-uv Action save in this run attempt, and no setup-uv Actions cache key
   # is pruned. The per-job Python version tells the keys apart (setup-uv puts it
   # in the key), and each job's per-attempt marker file makes a key that an
-  # earlier run cannot have saved. The check counts only entries whose created_at
-  # is at or after this attempt's run_started_at, so a leftover entry does not
-  # pass it; the workflow concurrency group (per github.ref) stops a second run on
-  # the same ref from overlapping this one and saving a 3.11 key after this
-  # attempt starts, which would pass the check falsely.
+  # earlier run cannot have saved. Each install job records a UTC timestamp in a
+  # job output in a step before its install; the check counts only a key whose
+  # created_at is at or after the timestamp of the job that owns it, so a leftover
+  # entry does not pass it. (GitHub does not document whether run_started_at is
+  # set while a run waits on the concurrency group, so a per-job timestamp is used
+  # instead.) The workflow concurrency group (per github.ref) stops a second run
+  # on the same ref from overlapping this one and saving a 3.11 key after this run
+  # records its timestamp, which would pass the check falsely.
   check-action-save:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -167,11 +191,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
-          RUN_ID: ${{ github.run_id }}
-          ATTEMPT: ${{ github.run_attempt }}
+          RW_STARTED: ${{ needs.locked-read-write.outputs.started }}
+          RO_STARTED: ${{ needs.locked-restore-only.outputs.started }}
+          NONE_STARTED: ${{ needs.locked-none.outputs.started }}
         run: |
-          started=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT" --jq '.run_started_at')
-          printf 'This attempt started at %s\n' "$started"
+          printf 'Jobs recorded before install: read-write %s, restore-only %s, none %s\n' \
+            "$RW_STARTED" "$RO_STARTED" "$NONE_STARTED"
           # key<TAB>created_at per line, UTC ISO-8601 so string order is time order.
           entries=$(gh api "repos/$REPO/actions/caches?ref=$REF&per_page=100" \
             --jq '.actions_caches[] | [.key, .created_at] | @tsv')
@@ -181,11 +206,11 @@ jobs:
             [ -n "$key" ] || continue
             case "$key" in *setup-uv*) ;; *) continue ;; esac
             case "$key" in *-pruned*) echo "::error::a setup-uv Actions cache key is pruned: $key"; exit 1 ;; esac
-            # Only entries made at or after this attempt's start count.
-            [ "$created" \< "$started" ] && continue
+            # Count a key only when it is at or after its own job's recorded time.
             case "$key" in
-              *3.11*) fresh_read_write=1 ;;
-              *3.12*|*3.13*) echo "::error::a restore-only or none job saved a setup-uv cache this attempt: $key"; exit 1 ;;
+              *3.11*) [ "$created" \< "$RW_STARTED" ] || fresh_read_write=1 ;;
+              *3.12*) [ "$created" \< "$RO_STARTED" ] || { echo "::error::a restore-only or none job saved a setup-uv cache this attempt: $key"; exit 1; } ;;
+              *3.13*) [ "$created" \< "$NONE_STARTED" ] || { echo "::error::a restore-only or none job saved a setup-uv cache this attempt: $key"; exit 1; } ;;
             esac
           done <<< "$entries"
           [ "$fresh_read_write" = 1 ] \
