@@ -11,15 +11,21 @@ The rules:
   - a one-line input holds no newline and no carriage return, and a list input
     holds no carriage return (the runner also starts a line at a carriage
     return).
-  - a list item does not start with '-' (so a caller cannot add a uv option).
+  - a list item does not start with '-' (so a caller cannot add a uv option)
+    and holds no '::' (uv can show an item on its own line, and the runner
+    reads a line that starts with '::' as a workflow command).
+  - requirements-file is not '-' (uv reads standard input).
   - an input applies only to the versions value its table row allows.
   - unlocked needs actions-cache none and project-uv-settings ignore.
-  - unlocked with project-install skip installs at least one package.
+  - unlocked with project-install skip installs at least one package and has
+    no extras.
   - wheels-only is not for locked.
   - a non-local also-install-without-deps item is not for locked, and no such
     item is for hashed-requirements.
   - script is not with environment-dir, also-install-without-deps, extras,
     default-dependency-groups exclude or project-install skip.
+  - a call that uses the project has <project-dir>/pyproject.toml (if not, uv
+    uses a project in a parent directory).
   - a second call matches the setup-uv already run in this job.
 """
 
@@ -110,6 +116,8 @@ def main() -> None:
 
     for name in LIST_INPUTS:
         for item in items(v[name]):
+            if "::" in item:
+                fail(name, "an item holds '::'. List items are packages or paths.")
             if item.lstrip().startswith("-"):
                 fail(name, f"item '{item}' starts with '-'. List items are packages or paths, not options.")
 
@@ -119,6 +127,8 @@ def main() -> None:
             fail("requirements-file", "is required with versions: hashed-requirements.")
     elif v["requirements-file"]:
         fail("requirements-file", "applies only to versions: hashed-requirements.")
+    if v["requirements-file"] == "-":
+        fail("requirements-file", "must be a file, not '-' (standard input).")
 
     # Inputs that apply to one versions value only.
     if v["script"] and versions != "locked":
@@ -157,6 +167,8 @@ def main() -> None:
                 "project-install/also-install-unlocked/also-install-without-deps",
                 "project-install: skip installs nothing. Give also-install-unlocked or also-install-without-deps.",
             )
+        if v["project-install"] == "skip" and v["extras"].strip():
+            fail("extras", "does not apply with versions: unlocked and project-install: skip.")
 
     # script runs its own Python environment in the uv cache.
     if v["script"]:
@@ -170,6 +182,15 @@ def main() -> None:
             fail("default-dependency-groups", "does not apply with script.")
         if v["project-install"] != "editable":
             fail("project-install", "does not apply with script.")
+
+    # uv finds the project in project-dir or a parent directory. Without
+    # <project-dir>/pyproject.toml, the environment is not <project-dir>/.venv.
+    # This step runs in the workspace root, the same root as project-dir.
+    uses_project = (versions == "locked" and not v["script"]) or (
+        versions == "unlocked" and v["project-install"] == "editable"
+    )
+    if uses_project and not os.path.isfile(os.path.join(v["project-dir"], "pyproject.toml")):
+        fail("project-dir", f"'{v['project-dir']}' has no pyproject.toml.")
 
     # A later call in the job reuses the setup-uv already run. It must match.
     recorded = os.environ.get("RECORDED_SETUP", "")

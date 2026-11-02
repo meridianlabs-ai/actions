@@ -32,8 +32,9 @@ REPO = "meridianlabs-ai/actions"
 
 # Defaults from install-python-dependencies/action.yml, keyed by the env var the
 # Check inputs step sets. versions and python-version have no default (required).
+# PROJECT_DIR is a project with a pyproject.toml (the action default is ".").
 INSTALL_ENV_DEFAULTS = {
-    "PROJECT_DIR": ".",
+    "PROJECT_DIR": str(FIXTURES / "locked-project"),
     "ENVIRONMENT_DIR": "",
     "PROJECT_INSTALL": "editable",
     "EXTRAS": "",
@@ -253,6 +254,61 @@ def test_install_rejects_a_list_item_that_starts_with_dash(env_var, value, error
     assert r.returncode == 1
     assert error in r.stdout
     assert "starts with '-'" in r.stdout
+
+
+
+@pytest.mark.parametrize(
+    "env_var, name, extra",
+    [
+        ("UNLOCKED_EXTRA", "also-install-unlocked", {}),
+        ("WITHOUT_DEPS", "also-install-without-deps", {}),
+        ("WITHOUT_DEPS", "also-install-without-deps", {"VERSIONS": "locked", "PROJECT_UV_SETTINGS": "apply", "ACTIONS_CACHE": "read-write"}),
+        ("EXTRAS", "extras", {}),
+    ],
+)
+def test_install_rejects_a_list_item_that_holds_a_workflow_command(env_var, name, extra):
+    # uv can show an item on its own indented line; the runner trims the spaces
+    # and reads '::' as a workflow command. The error does not show the item.
+    env = {"VERSIONS": "unlocked", "PROJECT_UV_SETTINGS": "ignore", "ACTIONS_CACHE": "none", **extra}
+    r = check_install(PYTHON_VERSION="3.11", **env, **{env_var: "six\n::warning title=forged::pwned"})
+    assert r.returncode == 1
+    assert r.stdout.splitlines() == [f"::error::{name}: an item holds '::'. List items are packages or paths."]
+
+
+def test_install_rejects_requirements_file_dash():
+    r = check_install(VERSIONS="hashed-requirements", PYTHON_VERSION="3.11", REQUIREMENTS_FILE="-", PROJECT_UV_SETTINGS="ignore")
+    assert r.returncode == 1 and "::error::requirements-file:" in r.stdout
+
+
+def test_unlocked_skip_with_extras_is_rejected():
+    r = check_install(
+        VERSIONS="unlocked", PYTHON_VERSION="3.11", PROJECT_INSTALL="skip", UNLOCKED_EXTRA="six",
+        EXTRAS="doc", ACTIONS_CACHE="none", PROJECT_UV_SETTINGS="ignore",
+    )
+    assert r.returncode == 1 and "::error::extras:" in r.stdout
+
+
+UNLOCKED = {"VERSIONS": "unlocked", "PROJECT_UV_SETTINGS": "ignore", "ACTIONS_CACHE": "none"}
+
+
+@pytest.mark.parametrize("env", [{"VERSIONS": "locked"}, {"VERSIONS": "locked", "PROJECT_INSTALL": "skip"}, UNLOCKED])
+def test_a_project_call_needs_pyproject_toml_in_project_dir(tmp_path, env):
+    r = check_install(PYTHON_VERSION="3.11", PROJECT_DIR=str(tmp_path), **env)
+    assert r.returncode == 1 and "::error::project-dir:" in r.stdout and "pyproject.toml" in r.stdout
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    assert check_install(PYTHON_VERSION="3.11", PROJECT_DIR=str(tmp_path), **env).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"VERSIONS": "locked", "SCRIPT": "s.py"},
+        {"VERSIONS": "hashed-requirements", "REQUIREMENTS_FILE": "r.txt", "PROJECT_UV_SETTINGS": "ignore"},
+        {**UNLOCKED, "PROJECT_INSTALL": "skip", "UNLOCKED_EXTRA": "six"},
+    ],
+)
+def test_a_call_without_the_project_needs_no_pyproject_toml(tmp_path, env):
+    assert check_install(PYTHON_VERSION="3.11", PROJECT_DIR=str(tmp_path), **env).returncode == 0
 
 
 # --- install check_inputs: inputs that apply to one versions value only --------

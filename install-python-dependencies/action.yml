@@ -92,10 +92,11 @@ runs:
         RECORDED_SETUP: ${{ env.MERIDIAN_SETUP_UV }}
       # Stops on a missing or unknown value, a newline or carriage return in a
       # one-line input, a carriage return in a list input, a list item that
-      # starts with -, an input that does not apply to the
-      # versions value, an unlocked call that installs nothing, or a second call
-      # whose python-version or actions-cache differs from the setup-uv already
-      # run in this job.
+      # starts with - or holds ::, requirements-file -, an input that does not
+      # apply to the versions value, an unlocked call that installs nothing,
+      # unlocked extras with project-install skip, a project call with no
+      # <project-dir>/pyproject.toml, or a second call whose python-version or
+      # actions-cache differs from the setup-uv already run in this job.
       run: python3 "$GITHUB_ACTION_PATH/check_inputs.py"
 
     # $/ loads setup-uv from this repository at this commit. Run it once per
