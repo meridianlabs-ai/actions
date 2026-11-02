@@ -15,6 +15,7 @@ Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -27,6 +28,7 @@ SETUP_UV = ROOT / "setup-uv"
 INSTALL = ROOT / "install-python-dependencies"
 FIXTURES = ROOT / "tests" / "fixtures" / "python-actions"
 SELF_TEST = ROOT / ".github" / "workflows" / "self-test-python-actions.yml"
+REPO = "meridianlabs-ai/actions"
 
 # Defaults from install-python-dependencies/action.yml, keyed by the env var the
 # Check inputs step sets. versions and python-version have no default (required).
@@ -486,3 +488,160 @@ def test_setup_uv_pins_astral_setup_uv_by_sha_with_a_version_comment():
     import re
 
     assert re.search(r"astral-sh/setup-uv@[0-9a-f]{40} # v\d+\.\d+\.\d+", lines[0]), lines[0]
+
+
+# --- The Actions-cache check scripts of the self-test workflow ------------------
+#
+# check-action-save and cache-mode-read-blocks-write each read the Actions cache
+# list with `gh api` and decide pass or fail from it. The runner proves the real
+# cache behavior; these tests lift the run: script from the YAML and run it under
+# bash with a stand-in gh on PATH that returns canned API JSON, so the check logic
+# is covered off a runner.
+
+FAKE_GH = r'''#!/usr/bin/env python3
+"""Stand-in for `gh api`: serve a run attempt object and the Actions cache list
+from $FAKE_GH_DIR, then apply --jq with the real jq."""
+import os, pathlib, re, subprocess, sys
+
+args = sys.argv[1:]
+store = pathlib.Path(os.environ["FAKE_GH_DIR"])
+assert args[0] == "api", args
+path = args[1].split("?")[0]
+if re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+/attempts/\d+", path):
+    data = (store / "attempt.json").read_text()
+elif re.fullmatch(r"repos/[^/]+/[^/]+/actions/caches", path):
+    data = (store / "caches.json").read_text()
+else:
+    sys.exit(f"fake gh: unexpected call {args}")
+if "--jq" in args:
+    data = subprocess.run(["jq", "-r", args[args.index("--jq") + 1]], input=data, text=True, capture_output=True, check=True).stdout
+sys.stdout.write(data)
+'''
+
+
+def run_bash(script: str, *, cwd: Path, env: dict) -> subprocess.CompletedProcess:
+    # GitHub runs `run:` scripts with `bash --noprofile --norc -eo pipefail`.
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+        cwd=cwd,
+        env={**os.environ, **env},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def fake_gh_on_path(tmp_path: Path, *, attempt: dict | None = None, caches: list[dict]) -> dict:
+    """Write the canned API JSON and return the PATH-with-fake-gh env fragment."""
+    store = tmp_path / "gh"
+    store.mkdir(exist_ok=True)
+    if attempt is not None:
+        (store / "attempt.json").write_text(json.dumps(attempt))
+    (store / "caches.json").write_text(json.dumps({"actions_caches": caches}))
+    gh = tmp_path / "bin" / "gh"
+    gh.parent.mkdir(exist_ok=True)
+    gh.write_text(FAKE_GH)
+    gh.chmod(0o755)
+    return {"PATH": f"{gh.parent}:{os.environ['PATH']}", "FAKE_GH_DIR": str(store)}
+
+
+def run_step(job: str, name_prefix: str) -> dict:
+    """The step of a self-test job whose name starts with name_prefix."""
+    for s in yaml.safe_load(SELF_TEST.read_text())["jobs"][job]["steps"]:
+        if str(s.get("name", "")).startswith(name_prefix):
+            return s
+    raise KeyError(f"{job}/{name_prefix}")
+
+
+def cache(key: str, created: str) -> dict:
+    return {"key": key, "created_at": created}
+
+
+STARTED = "2026-01-01T00:00:00Z"
+FRESH = "2026-01-01T00:00:01Z"  # at or after the attempt start
+OLD = "2025-12-31T23:59:59Z"  # before the attempt start
+
+
+def run_check_action_save(tmp_path: Path, caches: list[dict]) -> subprocess.CompletedProcess:
+    path_env = fake_gh_on_path(tmp_path, attempt={"run_started_at": STARTED}, caches=caches)
+    s = run_step("check-action-save", "Only the read-write job saved")
+    env = {
+        **path_env,
+        "GH_TOKEN": "fake",
+        "REPO": REPO,
+        "REF": "refs/heads/main",
+        "RUN_ID": "123",
+        "ATTEMPT": "1",
+    }
+    return run_bash(s["run"], cwd=tmp_path, env=env)
+
+
+def test_check_action_save_passes_with_a_fresh_3_11_key(tmp_path):
+    r = run_check_action_save(tmp_path, [cache("setup-uv-Linux-X64-python-3.11-abc", FRESH)])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "read-write saved this attempt" in r.stdout
+
+
+def test_check_action_save_fails_when_only_an_old_3_11_key_exists(tmp_path):
+    # An entry from before this attempt started is a leftover, not this attempt's save.
+    r = run_check_action_save(tmp_path, [cache("setup-uv-Linux-X64-python-3.11-abc", OLD)])
+    assert r.returncode == 1
+    assert "no setup-uv Action save for the read-write job" in r.stdout
+
+
+@pytest.mark.parametrize("py", ["3.12", "3.13"])
+def test_check_action_save_fails_when_a_restore_only_or_none_job_saved(tmp_path, py):
+    r = run_check_action_save(
+        tmp_path,
+        [cache("setup-uv-Linux-X64-python-3.11-abc", FRESH), cache(f"setup-uv-Linux-X64-python-{py}-abc", FRESH)],
+    )
+    assert r.returncode == 1
+    assert "a restore-only or none job saved a setup-uv cache this attempt" in r.stdout
+
+
+def test_check_action_save_fails_on_a_pruned_key(tmp_path):
+    r = run_check_action_save(
+        tmp_path,
+        [cache("setup-uv-Linux-X64-python-3.11-abc", FRESH), cache("setup-uv-Linux-X64-python-3.11-abc-pruned", FRESH)],
+    )
+    assert r.returncode == 1
+    assert "a setup-uv Actions cache key is pruned" in r.stdout
+
+
+def test_check_action_save_ignores_non_setup_uv_keys(tmp_path):
+    # A fresh 3.12 key that is not a setup-uv key must not look like a restore-only save.
+    r = run_check_action_save(
+        tmp_path,
+        [cache("setup-uv-Linux-X64-python-3.11-abc", FRESH), cache("some-other-cache-python-3.12", FRESH)],
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def run_cache_mode_check(tmp_path: Path, caches: list[dict]) -> subprocess.CompletedProcess:
+    path_env = fake_gh_on_path(tmp_path, caches=caches)
+    s = run_step("cache-mode-read-blocks-write", "No Actions cache entry was made")
+    key = "self-test-cache-mode-123-1"
+    env = {**path_env, "GH_TOKEN": "fake", "REPO": REPO, "REF": "refs/heads/main", "KEY": key}
+    return run_bash(s["run"], cwd=tmp_path, env=env)
+
+
+def test_cache_mode_check_passes_when_the_key_is_absent(tmp_path):
+    r = run_cache_mode_check(tmp_path, [cache("another-cache-key", FRESH)])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no Actions cache entry made" in r.stdout
+
+
+def test_cache_mode_check_fails_when_the_key_was_written(tmp_path):
+    r = run_cache_mode_check(tmp_path, [cache("self-test-cache-mode-123-1", FRESH)])
+    assert r.returncode == 1
+    assert "an Actions cache entry was made despite cache-mode: read" in r.stdout
+
+
+# --- The self-test workflow has the per-ref concurrency group ------------------
+
+
+def test_self_test_workflow_has_a_per_ref_concurrency_group():
+    wf = yaml.safe_load(SELF_TEST.read_text())
+    conc = wf["concurrency"]
+    assert conc["group"] == "self-test-python-actions-${{ github.ref }}"
+    assert conc["cancel-in-progress"] is False

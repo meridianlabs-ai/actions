@@ -26,6 +26,13 @@ name: Self-test Python actions
 permissions:
   contents: read
 
+# One run per ref at a time. check-action-save reads the Actions cache list for
+# the ref and counts only entries saved at or after this attempt starts; a second
+# run on the same ref must not overlap and save a key this attempt would count.
+concurrency:
+  group: self-test-python-actions-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   LOCKED_PROJECT: tests/fixtures/python-actions/locked-project
   HASHED_DIR: tests/fixtures/python-actions/hashed
@@ -141,8 +148,11 @@ jobs:
   # setup-uv Action save in this run attempt, and no setup-uv Actions cache key
   # is pruned. The per-job Python version tells the keys apart (setup-uv puts it
   # in the key), and each job's per-attempt marker file makes a key that an
-  # earlier run cannot have saved. The check compares each entry's created_at
-  # with this attempt's run_started_at, so a leftover entry does not pass it.
+  # earlier run cannot have saved. The check counts only entries whose created_at
+  # is at or after this attempt's run_started_at, so a leftover entry does not
+  # pass it; the workflow concurrency group (per github.ref) stops a second run on
+  # the same ref from overlapping this one and saving a 3.11 key after this
+  # attempt starts, which would pass the check falsely.
   check-action-save:
     runs-on: ubuntu-latest
     timeout-minutes: 10
