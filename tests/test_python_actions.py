@@ -73,6 +73,8 @@ def check_setup(**inputs: str) -> subprocess.CompletedProcess:
 FAKE_UV = """#!/usr/bin/env bash
 # Record the argument vector uv would have received, one call per line.
 printf '%s\\n' "$*" >> "$FAKE_UV_CALLS"
+# And the UV_PROJECT_ENVIRONMENT it would have seen, one call per line.
+printf '%s\\n' "${UV_PROJECT_ENVIRONMENT:-}" >> "$FAKE_UV_CALLS.env"
 # A test can make uv fail: print FAKE_UV_FAIL_OUTPUT and exit FAKE_UV_FAIL_STATUS.
 if [ -n "${FAKE_UV_FAIL_STATUS:-}" ]; then
   printf '%s\\n' "$FAKE_UV_FAIL_OUTPUT" >&2
@@ -344,6 +346,20 @@ def test_script_not_with_also_install_without_deps():
     assert r.returncode == 1 and "::error::also-install-without-deps: does not apply with script." in r.stdout
 
 
+@pytest.mark.parametrize(
+    "name, env",
+    [
+        ("extras", {"EXTRAS": "doc"}),
+        ("default-dependency-groups", {"DEFAULT_GROUPS": "exclude"}),
+        ("project-install", {"PROJECT_INSTALL": "skip"}),
+    ],
+)
+def test_script_rejects_a_project_only_input(name, env):
+    # uv sync --script takes no extras, groups or project; install.sh drops them.
+    r = check_install(VERSIONS="locked", PYTHON_VERSION="3.11", SCRIPT="s.py", **env)
+    assert r.returncode == 1 and f"::error::{name}: does not apply with script." in r.stdout
+
+
 def test_a_second_call_must_match_the_recorded_setup():
     r = check_install(VERSIONS="locked", PYTHON_VERSION="3.12", ACTIONS_CACHE="read-write", RECORDED_SETUP="3.11/read-write")
     assert r.returncode == 1 and "::error::python-version/actions-cache:" in r.stdout
@@ -386,7 +402,7 @@ def test_locked_also_install_without_deps_gets_no_deps(tmp_path):
 
 def test_hashed_runs_venv_then_require_hashes_no_deps(tmp_path):
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
-    assert calls[0] == "venv --allow-existing -- /tmp/env"
+    assert calls[0] == "venv --allow-existing /tmp/env"
     assert calls[1] == "pip install --no-config --python /tmp/env --require-hashes --no-deps -r r.txt"
 
 
@@ -397,7 +413,7 @@ def test_hashed_wheels_only_adds_only_binary(tmp_path):
 
 def test_unlocked_runs_venv_then_pip_install_with_exclude_newer_false(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", EXTRAS="dev", UNLOCKED_EXTRA="pytest-timeout", PROJECT_UV_SETTINGS="ignore")
-    assert calls[0] == "venv --allow-existing -- /tmp/env"
+    assert calls[0] == "venv --allow-existing /tmp/env"
     assert calls[1] == 'pip install --no-config --python /tmp/env --exclude-newer false -e .[dev] pytest-timeout'
 
 
@@ -416,15 +432,45 @@ def test_unlocked_no_deps_items_use_exclude_newer_false_and_never_only_binary(tm
 def test_unlocked_skip_with_only_no_deps_items_skips_the_main_install(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", PROJECT_INSTALL="skip", WITHOUT_DEPS="./pkg", PROJECT_UV_SETTINGS="ignore")
     assert calls == [
-        "venv --allow-existing -- /tmp/env",
+        "venv --allow-existing /tmp/env",
         "pip install --no-config --python /tmp/env --exclude-newer false --no-deps ./pkg",
     ]
 
 
-@pytest.mark.parametrize("versions, extra", [("hashed-requirements", {"REQUIREMENTS_FILE": "r.txt"}), ("unlocked", {})])
-def test_an_environment_dir_that_starts_with_dash_follows_double_dash(tmp_path, versions, extra):
-    calls = run_install(tmp_path, VERSIONS=versions, ENVIRONMENT_DIR="--seed", PROJECT_UV_SETTINGS="ignore", **extra)
-    assert calls[0] == "venv --allow-existing -- --seed"
+@pytest.mark.parametrize("env_dir", ["--seed", "python3", "3.12"])
+def test_a_relative_environment_dir_reaches_uv_as_an_absolute_path(tmp_path, env_dir):
+    # uv reads a bare --seed as an option and a bare python3 or 3.12 as a Python
+    # request. install.sh gives uv $PWD/<environment-dir> (this step runs in
+    # <project-dir>, here tmp_path).
+    path = f"{tmp_path}/{env_dir}"
+    calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR=env_dir, REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
+    assert calls == [
+        f"venv --allow-existing {path}",
+        f"pip install --no-config --python {path} --require-hashes --no-deps -r r.txt",
+    ]
+    (tmp_path / "uv_calls").unlink()
+    calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR=env_dir, PROJECT_UV_SETTINGS="ignore")
+    assert calls == [
+        f"venv --allow-existing {path}",
+        f"pip install --no-config --python {path} --exclude-newer false -e .",
+    ]
+    (tmp_path / "uv_calls").unlink()
+    (tmp_path / "uv_calls.env").unlink()
+    calls = run_install(tmp_path, VERSIONS="locked", ENVIRONMENT_DIR=env_dir, WITHOUT_DEPS="./pkg")
+    assert calls == ["sync --locked", f"pip install --python {path} --no-deps ./pkg"]
+    assert (tmp_path / "uv_calls.env").read_text().splitlines() == [path, path]
+
+
+def test_an_absolute_environment_dir_is_kept(tmp_path):
+    calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
+    assert calls[0] == "venv --allow-existing /tmp/env"
+
+
+def test_an_empty_environment_dir_is_project_dir_venv(tmp_path):
+    calls = run_install(tmp_path, VERSIONS="locked", WITHOUT_DEPS="./pkg")
+    assert calls[1] == f"pip install --python {tmp_path}/.venv --no-deps ./pkg"
+    # uv sync keeps its own default; install.sh does not set UV_PROJECT_ENVIRONMENT.
+    assert (tmp_path / "uv_calls.env").read_text().splitlines()[0] == ""
 
 
 STALE_LOCK = "error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided."
@@ -432,7 +478,7 @@ MISSING_LOCK = (
     "error: Unable to find lockfile at `uv.lock`, but `--locked` was provided. "
     "To create a lockfile, run `uv lock` or `uv sync` without the flag."
 )
-LOCK_ERROR = "::error file=uv.lock::uv.lock is missing or out of date. Run uv lock and commit it."
+LOCK_ERROR = "::error::uv.lock is missing or out of date. Run uv lock and commit it."
 
 
 @pytest.mark.parametrize("uv_output", [STALE_LOCK, MISSING_LOCK])
@@ -449,7 +495,7 @@ def test_locked_claims_no_cause_for_another_uv_failure(tmp_path):
     assert r.returncode == 1
     assert uv_output in r.stdout
     assert "::error::uv sync --locked failed. The uv output above gives the cause." in r.stdout
-    assert "file=uv.lock" not in r.stdout
+    assert LOCK_ERROR not in r.stdout
 
 
 def test_only_unlocked_sets_exclude_newer_false(tmp_path):
@@ -726,6 +772,22 @@ def test_cache_mode_check_fails_when_the_key_was_written(tmp_path):
 
 
 # --- The self-test workflow has the per-ref concurrency group ------------------
+
+
+def test_the_remote_reference_jobs_use_the_pinned_sha():
+    # The pin guard checks PINNED only. Each remote uses: must carry the same SHA.
+    wf = yaml.safe_load(SELF_TEST.read_text())
+    pinned = run_step("remote-reference-pin-guard", "The pinned SHA matches")["env"]["PINNED"]
+    uses = [
+        s["uses"]
+        for job in wf["jobs"].values()
+        for s in job.get("steps", [])
+        if str(s.get("uses", "")).startswith(f"{REPO}/")
+    ]
+    assert sorted(uses) == [
+        f"{REPO}/install-python-dependencies@{pinned}",
+        f"{REPO}/setup-uv@{pinned}",
+    ]
 
 
 def test_self_test_workflow_has_a_per_ref_concurrency_group():

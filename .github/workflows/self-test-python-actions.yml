@@ -429,9 +429,11 @@ jobs:
 
   # Two calls in one job run setup-uv one time. The second call reuses it: if
   # the if-guard were wrong, setup-uv would run twice and its own check_inputs
-  # would stop on the second. A hashed-requirements call with no environment-dir
-  # then adds to the <project-dir>/.venv of the locked calls. A last call with a
-  # different python-version stops in check_inputs.
+  # would stop on the second. The second call skips the project, so uv sync
+  # removes ipd_fixture. A hashed-requirements call with no environment-dir then
+  # adds dateutil to the <project-dir>/.venv of the locked calls, and the locked
+  # dev dependency iniconfig stays. A last call with a different python-version
+  # stops in check_inputs.
   two-calls-one-setup:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -465,7 +467,7 @@ jobs:
           actions-cache: none
       - name: The locked and the hashed packages both import
         shell: bash
-        run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import ipd_fixture, dateutil"'
+        run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import iniconfig, dateutil"'
       - name: A call with a different python-version stops
         id: diff_python
         continue-on-error: true
@@ -585,36 +587,8 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - name: An unlocked install with wheels-only still builds a local no-deps path from source
-        uses: ./install-python-dependencies
-        with:
-          versions: unlocked
-          python-version: "3.11"
-          project-dir: ${{ env.LOCKED_PROJECT }}
-          project-install: skip
-          environment-dir: ${{ runner.temp }}/unlocked-env
-          also-install-unlocked: six
-          also-install-without-deps: ${{ github.workspace }}/${{ env.LOCAL_PKG }}
-          package-format: wheels-only
-          project-uv-settings: ignore
-          actions-cache: none
-      - name: six came as a wheel and the local package built from source
-        shell: bash
-        run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
-      - name: A second call with only also-install-without-deps adds to the same environment
-        uses: ./install-python-dependencies
-        with:
-          versions: unlocked
-          python-version: "3.11"
-          project-dir: ${{ env.LOCKED_PROJECT }}
-          project-install: skip
-          environment-dir: ${{ runner.temp }}/unlocked-env
-          also-install-without-deps: ${{ github.workspace }}/${{ env.LOCAL_PKG }}
-          project-uv-settings: ignore
-          actions-cache: none
-      - name: six still imports, so the second call kept the environment
-        shell: bash
-        run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
+      # The invalid calls come first. check_inputs stops each before setup-uv
+      # runs, so no setup is recorded and the second-call rule does not apply.
       - name: unlocked with actions-cache read-write stops
         id: unlocked_rw
         continue-on-error: true
@@ -645,6 +619,36 @@ jobs:
           project-dir: ${{ env.LOCKED_PROJECT }}
           project-uv-settings: apply
           actions-cache: none
+      - name: An unlocked install with wheels-only still builds a local no-deps path from source
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-install: skip
+          environment-dir: ${{ runner.temp }}/unlocked-env
+          also-install-unlocked: six
+          also-install-without-deps: ${{ github.workspace }}/${{ env.LOCAL_PKG }}
+          package-format: wheels-only
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: six came as a wheel and the local package built from source
+        shell: bash
+        run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
+      - name: A second call with only also-install-without-deps adds to the same environment
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-install: skip
+          environment-dir: ${{ runner.temp }}/unlocked-env
+          also-install-without-deps: ${{ github.workspace }}/${{ env.LOCAL_PKG }}
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: six still imports, so the second call kept the environment
+        shell: bash
+        run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
       - name: Every invalid unlocked call failed in check_inputs
         shell: bash
         env:

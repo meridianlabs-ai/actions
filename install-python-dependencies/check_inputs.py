@@ -16,7 +16,8 @@ The rules:
   - wheels-only is not for locked.
   - a non-local also-install-without-deps item is not for locked, and no such
     item is for hashed-requirements.
-  - script is not with environment-dir or also-install-without-deps.
+  - script is not with environment-dir, also-install-without-deps, extras,
+    default-dependency-groups exclude or project-install skip.
   - a second call matches the setup-uv already run in this job.
 """
 
@@ -156,6 +157,12 @@ def main() -> None:
             fail("environment-dir", "does not apply with script.")
         if without_deps:
             fail("also-install-without-deps", "does not apply with script.")
+        if v["extras"].strip():
+            fail("extras", "does not apply with script.")
+        if v["default-dependency-groups"] != "include":
+            fail("default-dependency-groups", "does not apply with script.")
+        if v["project-install"] != "editable":
+            fail("project-install", "does not apply with script.")
 
     # A later call in the job reuses the setup-uv already run. It must match.
     recorded = os.environ.get("RECORDED_SETUP", "")

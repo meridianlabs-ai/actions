@@ -4,18 +4,16 @@
 # check_inputs.py has already validated every input. Each input arrives as an
 # environment variable, never as a ${{ }} expression. Commands are built as
 # bash arrays, with no eval and no unquoted expansion, so no input becomes a uv
-# option or a second command. The environment-dir path follows --. An
-# also-install item is positional too, but check_inputs.py rejects an item that
-# starts with -.
+# option or a second command. environment-dir becomes an absolute path, so uv
+# never reads it as an option or as a Python version request. An also-install
+# item is positional too, but check_inputs.py rejects an item that starts with -.
 set -euo pipefail
 
-# Where the Python environment goes. Empty means uv's default,
-# <project-dir>/.venv (this step runs in <project-dir>).
-if [ -n "$ENVIRONMENT_DIR" ]; then
-  env_dir=$ENVIRONMENT_DIR
-else
-  env_dir=$PWD/.venv
-fi
+# Where the Python environment goes, as an absolute path. Empty means uv's
+# default, <project-dir>/.venv. A relative path is relative to <project-dir>
+# (this step runs in <project-dir>).
+env_dir=${ENVIRONMENT_DIR:-.venv}
+[[ $env_dir == /* ]] || env_dir=$PWD/$env_dir
 
 # Split a multi-line input into an array, dropping blank lines.
 lines() { printf '%s\n' "$1" | sed '/^[[:space:]]*$/d'; }
@@ -53,7 +51,7 @@ case "$VERSIONS" in
       if ! uv sync "${cfg[@]}" --locked "${f[@]}" 2>&1 | tee "$out"; then
         if grep -Fq -e 'The lockfile at `uv.lock` needs to be updated' \
           -e 'Unable to find lockfile at `uv.lock`' "$out"; then
-          echo "::error file=uv.lock::uv.lock is missing or out of date. Run uv lock and commit it."
+          echo "::error::uv.lock is missing or out of date. Run uv lock and commit it."
         else
           echo "::error::uv sync --locked failed. The uv output above gives the cause."
         fi
@@ -62,8 +60,9 @@ case "$VERSIONS" in
     fi
     ;;
   hashed-requirements)
-    # A later call with the same environment-dir adds to that Python environment.
-    uv venv --allow-existing -- "$env_dir"
+    # A later hashed-requirements or unlocked call with the same environment-dir
+    # adds to that Python environment.
+    uv venv --allow-existing "$env_dir"
     uv pip install "${cfg[@]}" --python "$env_dir" --require-hashes "${fmt[@]}" --no-deps -r "$REQUIREMENTS_FILE"
     ;;
   unlocked)
@@ -72,7 +71,7 @@ case "$VERSIONS" in
     t=()
     [ "$PROJECT_INSTALL" = editable ] && t+=(-e "$spec")
     t+=("${unlocked_extra[@]}")
-    uv venv --allow-existing -- "$env_dir"
+    uv venv --allow-existing "$env_dir"
     # t is empty when the call has only also-install-without-deps items.
     if [ ${#t[@]} -gt 0 ]; then
       uv pip install "${cfg[@]}" --python "$env_dir" "${newer[@]}" "${fmt[@]}" "${t[@]}"

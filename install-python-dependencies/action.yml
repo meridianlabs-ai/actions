@@ -18,8 +18,9 @@ inputs:
   environment-dir:
     description: >-
       Directory for the Python environment. Empty uses <project-dir>/.venv.
-      A later call with the same environment-dir adds to that Python
-      environment.
+      A relative path is relative to project-dir. A later hashed-requirements
+      or unlocked call with the same environment-dir adds to that Python
+      environment; a locked call makes it match uv.lock.
     default: ""
   project-install:
     description: >-
