@@ -1709,9 +1709,7 @@ def test_the_agent_job_reads_the_context_job_and_has_no_outputs():
 def test_land_takes_the_slack_destination_from_the_context_job():
     job = load_workflow()["jobs"]["land"]
     assert job["needs"] == ["context", "agent"]
-    # A timed-out agent job ends `cancelled` too; only a cancelled workflow
-    # (`cancelled()`) keeps land from reporting it.
-    assert job["if"] == "always() && needs.agent.result != 'skipped' && (needs.agent.result != 'cancelled' || !cancelled())"
+    assert job["if"] == "always() && !cancelled() && needs.agent.result != 'skipped'"
     assert land_inputs()["slack-channel"] == "${{ needs.context.outputs.channel || secrets.SLACK_CHANNEL_ID }}"
     assert land_inputs()["slack-thread-ts"] == "${{ needs.context.outputs.thread_ts }}"
     # Nothing the agent job reports reaches land; only its artifact does.
@@ -1876,7 +1874,7 @@ def test_no_manifest_reports_a_refused_post(tmp_path):
 def test_the_no_manifest_reply_goes_where_land_posts_and_only_after_land_failed():
     s = job_step("land", NO_MANIFEST_STEP)
     inputs = land_inputs()
-    assert s["if"] == "always() && needs.context.result == 'success' && steps.land.outcome == 'failure'"
+    assert s["if"] == "always() && !cancelled() && needs.context.result == 'success' && steps.land.outcome == 'failure'"
     assert job_step("land", "land")["name"] == "Land"
     assert s["env"]["SLACK_TOKEN"] == inputs["slack-token"]
     assert s["env"]["SLACK_CHANNEL"] == inputs["slack-channel"]
@@ -1901,3 +1899,39 @@ def test_the_manifest_path_is_where_the_land_composite_downloads():
     assert download["with"] == {"name": "${{ inputs.artifact-name }}", "path": "${{ runner.temp }}/landing"}
     assert action["inputs"]["artifact-name"]["default"] == "landing"
     assert "artifact-name" not in land_inputs()
+
+
+def evaluate(expr: str, *, agent: str, workflow_cancelled: bool, context: str = "success", land: str = "failure") -> bool:
+    """A Boolean model of the land job's and the fallback step's `if:`, over
+    the few names they use. Not GitHub's evaluator: it shows which results
+    the checked-in conditions admit, given `cancelled()` means a cancelled
+    workflow (GitHub's docs)."""
+    names = {"always()": "True", "!cancelled()": f"(not {workflow_cancelled})",
+             "needs.agent.result": repr(agent), "needs.context.result": repr(context),
+             "steps.land.outcome": repr(land), "&&": " and ", "||": " or "}
+    for name, value in names.items():
+        expr = expr.replace(name, value)
+    assert re.fullmatch(r"[\w\s'()=!]+", expr), expr
+    return eval(expr, {"__builtins__": {}})
+
+
+@pytest.mark.parametrize("agent,workflow_cancelled,context,posts", [
+    ("failure", False, "success", True),    # the 2026-11-02 incident: upload failed, agent job failed
+    ("cancelled", False, "success", True),  # the agent job hit timeout-minutes; nobody cancelled the run
+    ("success", False, "success", True),    # agent job green but its upload never arrived
+    ("failure", True, "success", False),    # someone cancelled after the agent job had failed
+    ("success", True, "success", False),    # someone cancelled after the agent job had succeeded
+    ("cancelled", True, "success", False),  # someone cancelled during the agent job
+    ("skipped", False, "skipped", False),   # the context gate skipped the run
+    ("failure", False, "failure", False),   # context failed: no reply, as the compose step decides
+], ids=["agent-failed", "agent-timed-out", "agent-succeeded", "cancelled-after-failure",
+        "cancelled-after-success", "cancelled-during-agent", "context-skipped", "context-failed"])
+def test_the_no_manifest_reply_goes_out_unless_the_workflow_was_cancelled(agent, workflow_cancelled, context, posts):
+    job = load_workflow()["jobs"]["land"]["if"]
+    step = job_step("land", NO_MANIFEST_STEP)["if"]
+    land_runs = evaluate(job, agent=agent, workflow_cancelled=workflow_cancelled, context=context)
+    assert (land_runs and evaluate(step, agent=agent, workflow_cancelled=workflow_cancelled, context=context)) is posts
+    # Land itself runs for every result but a skipped agent job or a cancelled workflow.
+    assert land_runs is (agent != "skipped" and not workflow_cancelled)
+    # An arrived manifest (Land succeeded) never gets the extra reply.
+    assert evaluate(step, agent=agent, workflow_cancelled=workflow_cancelled, context=context, land="success") is False

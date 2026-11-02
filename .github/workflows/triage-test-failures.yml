@@ -1237,13 +1237,14 @@ jobs:
   # fail the run when it says so. When no manifest arrives, the last step
   # posts a fixed "did not complete" reply to that destination instead, so
   # the thread is not left silent. Skipped when the agent job was skipped
-  # (trigger not met: no artifact) or when someone cancelled the workflow.
-  # An agent job that hits its timeout-minutes also ends `cancelled`, but
+  # (trigger not met: no artifact) or when someone cancelled the workflow,
+  # whatever the agent job's result: a cancelled run posts nothing. An agent
+  # job that hits its timeout-minutes also ends `cancelled`, but
   # `cancelled()` is true only when the workflow itself was cancelled, so
   # land still runs then and the thread hears the triage did not complete.
   land:
     needs: [context, agent]
-    if: always() && needs.agent.result != 'skipped' && (needs.agent.result != 'cancelled' || !cancelled())
+    if: always() && !cancelled() && needs.agent.result != 'skipped'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1341,9 +1342,10 @@ jobs:
       # before. The text is this step's own, never the agent job's, and the
       # destination is the one Land is given, from the context job. A
       # context that failed gets no reply here either, as the compose step
-      # decides for that case. The step always fails the run.
+      # decides for that case, and a workflow cancelled while Land ran gets
+      # none (`!cancelled()`). The step always fails the run.
       - name: Report a triage that landed no manifest
-        if: always() && needs.context.result == 'success' && steps.land.outcome == 'failure'
+        if: always() && !cancelled() && needs.context.result == 'success' && steps.land.outcome == 'failure'
         env:
           # Where the `land` composite's download step puts the artifact
           # (tests/test_triage_workflow.py checks it against agents@main).
