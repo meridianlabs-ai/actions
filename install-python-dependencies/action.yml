@@ -19,8 +19,8 @@ inputs:
     description: >-
       Directory for the Python environment. Empty uses <project-dir>/.venv.
       A relative path is relative to project-dir. A later hashed-requirements
-      or unlocked call with the same environment-dir adds to that Python
-      environment; a locked call makes it match uv.lock.
+      or unlocked call with the same environment-dir installs into that
+      Python environment; a locked call makes it match uv.lock.
     default: ""
   project-install:
     description: >-
@@ -55,8 +55,8 @@ inputs:
     default: ""
   project-uv-settings:
     description: >-
-      Whether [tool.uv] and uv.toml apply: apply or ignore. unlocked needs
-      ignore.
+      Whether uv.toml and the [tool.uv] settings apply: apply or ignore.
+      [tool.uv.sources] applies with both values. unlocked needs ignore.
     default: apply
   package-format:
     description: >-

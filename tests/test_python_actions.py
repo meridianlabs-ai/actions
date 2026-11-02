@@ -198,6 +198,13 @@ def test_install_accepts_each_enum_value():
     assert check_install(VERSIONS="locked", PYTHON_VERSION="3.11", ACTIONS_CACHE="restore-only").returncode == 0
 
 
+def test_a_newline_in_an_unknown_versions_value_adds_no_line():
+    # GitHub reads each stdout line as a possible workflow command.
+    r = check_install(VERSIONS="bogus\n::add-mask::x\n::warning::forged", PYTHON_VERSION="3.11")
+    assert r.returncode == 1
+    assert r.stdout.splitlines() == ["::error::versions: must be one line."]
+
+
 def test_install_rejects_a_newline_in_a_one_line_input():
     r = check_install(VERSIONS="locked", PYTHON_VERSION="3.11\nsha=forged")
     assert r.returncode == 1 and "::error::python-version: must be one line." in r.stdout
@@ -402,7 +409,7 @@ def test_locked_also_install_without_deps_gets_no_deps(tmp_path):
 
 def test_hashed_runs_venv_then_require_hashes_no_deps(tmp_path):
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
-    assert calls[0] == "venv --allow-existing /tmp/env"
+    assert calls[0] == "venv --no-config /tmp/env"
     assert calls[1] == "pip install --no-config --python /tmp/env --require-hashes --no-deps -r r.txt"
 
 
@@ -413,26 +420,26 @@ def test_hashed_wheels_only_adds_only_binary(tmp_path):
 
 def test_unlocked_runs_venv_then_pip_install_with_exclude_newer_false(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", EXTRAS="dev", UNLOCKED_EXTRA="pytest-timeout", PROJECT_UV_SETTINGS="ignore")
-    assert calls[0] == "venv --allow-existing /tmp/env"
-    assert calls[1] == 'pip install --no-config --python /tmp/env --exclude-newer false -e .[dev] pytest-timeout'
+    assert calls[0] == "venv --no-config /tmp/env"
+    assert calls[1] == 'pip install --no-config --python /tmp/env --exclude-newer false --upgrade -e .[dev] pytest-timeout'
 
 
 def test_unlocked_skip_project_install_drops_the_dash_e(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", PROJECT_INSTALL="skip", UNLOCKED_EXTRA=".[doc]", PROJECT_UV_SETTINGS="ignore")
-    assert calls[1] == "pip install --no-config --python /tmp/env --exclude-newer false .[doc]"
+    assert calls[1] == "pip install --no-config --python /tmp/env --exclude-newer false --upgrade .[doc]"
 
 
 def test_unlocked_no_deps_items_use_exclude_newer_false_and_never_only_binary(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", WITHOUT_DEPS="./pkg", PACKAGE_FORMAT="wheels-only", PROJECT_UV_SETTINGS="ignore")
     # wheels-only reaches the main install, never the --no-deps item.
-    assert calls[1] == "pip install --no-config --python /tmp/env --exclude-newer false --only-binary :all: -e ."
+    assert calls[1] == "pip install --no-config --python /tmp/env --exclude-newer false --upgrade --only-binary :all: -e ."
     assert calls[2] == "pip install --no-config --python /tmp/env --exclude-newer false --no-deps ./pkg"
 
 
 def test_unlocked_skip_with_only_no_deps_items_skips_the_main_install(tmp_path):
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", PROJECT_INSTALL="skip", WITHOUT_DEPS="./pkg", PROJECT_UV_SETTINGS="ignore")
     assert calls == [
-        "venv --allow-existing /tmp/env",
+        "venv --no-config /tmp/env",
         "pip install --no-config --python /tmp/env --exclude-newer false --no-deps ./pkg",
     ]
 
@@ -445,14 +452,14 @@ def test_a_relative_environment_dir_reaches_uv_as_an_absolute_path(tmp_path, env
     path = f"{tmp_path}/{env_dir}"
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR=env_dir, REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
     assert calls == [
-        f"venv --allow-existing {path}",
+        f"venv --no-config {path}",
         f"pip install --no-config --python {path} --require-hashes --no-deps -r r.txt",
     ]
     (tmp_path / "uv_calls").unlink()
     calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR=env_dir, PROJECT_UV_SETTINGS="ignore")
     assert calls == [
-        f"venv --allow-existing {path}",
-        f"pip install --no-config --python {path} --exclude-newer false -e .",
+        f"venv --no-config {path}",
+        f"pip install --no-config --python {path} --exclude-newer false --upgrade -e .",
     ]
     (tmp_path / "uv_calls").unlink()
     (tmp_path / "uv_calls.env").unlink()
@@ -463,7 +470,32 @@ def test_a_relative_environment_dir_reaches_uv_as_an_absolute_path(tmp_path, env
 
 def test_an_absolute_environment_dir_is_kept(tmp_path):
     calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
-    assert calls[0] == "venv --allow-existing /tmp/env"
+    assert calls[0] == "venv --no-config /tmp/env"
+
+
+@pytest.mark.parametrize("versions", ["hashed-requirements", "unlocked"])
+def test_venv_reuses_only_an_existing_python_environment(tmp_path, versions):
+    # Without --allow-existing, uv venv refuses a non-empty directory, so a
+    # directory that is not a Python environment (here the project directory)
+    # stays as it is.
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "keep.txt").write_text("x")
+    inputs = {"VERSIONS": versions, "ENVIRONMENT_DIR": str(env_dir), "PROJECT_UV_SETTINGS": "ignore"}
+    if versions == "hashed-requirements":
+        inputs["REQUIREMENTS_FILE"] = "r.txt"
+    assert run_install(tmp_path, **inputs)[0] == f"venv --no-config {env_dir}"
+    (tmp_path / "uv_calls").unlink()
+    (env_dir / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    assert run_install(tmp_path, **inputs)[0] == f"venv --no-config --allow-existing {env_dir}"
+
+
+def test_only_the_unlocked_main_install_upgrades(tmp_path):
+    calls = run_install(tmp_path, VERSIONS="unlocked", ENVIRONMENT_DIR="/tmp/env", WITHOUT_DEPS="./pkg", PROJECT_UV_SETTINGS="ignore")
+    assert [c for c in calls if "--upgrade" in c] == [calls[1]]
+    (tmp_path / "uv_calls").unlink()
+    calls = run_install(tmp_path, VERSIONS="hashed-requirements", ENVIRONMENT_DIR="/tmp/env", REQUIREMENTS_FILE="r.txt", PROJECT_UV_SETTINGS="ignore")
+    assert not any("--upgrade" in c for c in calls)
 
 
 def test_an_empty_environment_dir_is_project_dir_venv(tmp_path):
@@ -802,3 +834,22 @@ def test_the_self_test_checks_the_stale_lock_text_that_install_sh_matches():
     text = "The lockfile at `uv.lock` needs to be updated"
     assert text in run_step("stale-lock", "uv prints the stale-lock text")["run"]
     assert text in (INSTALL / "install.sh").read_text()
+
+
+# --- The locked-hashed-validation guard counts its outcomes --------------------
+
+
+@pytest.mark.parametrize(
+    "outcomes, ok",
+    [
+        (" ".join(["failure"] * 8), True),
+        ("", False),
+        (" ".join(["failure"] * 7), False),
+        (" ".join(["failure"] * 7 + ["success"]), False),
+    ],
+)
+def test_the_locked_hashed_validation_guard_needs_8_failures(tmp_path, outcomes, ok):
+    s = run_step("locked-hashed-validation", "Every invalid call failed")
+    assert s["env"]["OUTCOMES"].count("steps.") == 8
+    r = run_bash(s["run"], cwd=tmp_path, env={"OUTCOMES": outcomes})
+    assert (r.returncode == 0) == ok, r.stdout

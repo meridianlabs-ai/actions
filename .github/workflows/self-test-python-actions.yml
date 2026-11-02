@@ -569,7 +569,10 @@ jobs:
             ${{ steps.nonlocal_nodeps.outcome }}
             ${{ steps.nodeps_hashed.outcome }}
         run: |
-          for o in $OUTCOMES; do
+          # A missing or misnamed step id gives an empty outcome, so count them.
+          read -ra outcomes <<< "$OUTCOMES"
+          [ ${#outcomes[@]} -eq 8 ] || { echo "::error::expected 8 outcomes, got ${#outcomes[@]} (outcomes: $OUTCOMES)"; exit 1; }
+          for o in "${outcomes[@]}"; do
             [ "$o" = failure ] || { echo "::error::an invalid call did not fail (outcomes: $OUTCOMES)"; exit 1; }
           done
           echo "all invalid locked and hashed-requirements calls failed"

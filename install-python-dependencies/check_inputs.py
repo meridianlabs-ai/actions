@@ -88,14 +88,16 @@ def main() -> None:
     versions = v["versions"]
     if not versions:
         fail("versions", "is required. Use one of: " + ", ".join(VERSIONS_VALUES) + ".")
-    if versions not in VERSIONS_VALUES:
-        fail("versions", f"unknown value '{versions}'. Use one of: {', '.join(VERSIONS_VALUES)}.")
     if not v["python-version"]:
         fail("python-version", "is required.")
 
+    # Before any error that shows an input value, so no value adds a line.
     for name in ONE_LINE:
         if "\n" in v[name]:
             fail(name, "must be one line.")
+
+    if versions not in VERSIONS_VALUES:
+        fail("versions", f"unknown value '{versions}'. Use one of: {', '.join(VERSIONS_VALUES)}.")
 
     for name, allowed in ENUMS.items():
         if v[name] not in allowed:

@@ -21,13 +21,19 @@ mapfile -t extras < <(lines "$EXTRAS")
 mapfile -t unlocked_extra < <(lines "$UNLOCKED_EXTRA")
 mapfile -t no_deps < <(lines "$WITHOUT_DEPS")
 
-# project-uv-settings: ignore drops [tool.uv] and uv.toml (--no-config).
+# project-uv-settings: ignore drops uv.toml and the [tool.uv] settings
+# (--no-config). [tool.uv.sources] still applies.
 cfg=()
 [ "$PROJECT_UV_SETTINGS" = ignore ] && cfg=(--no-config)
 
 # wheels-only applies to the main install only, never to also-install-without-deps.
 fmt=()
 [ "$PACKAGE_FORMAT" = wheels-only ] && fmt=(--only-binary :all:)
+
+# Reuse only an existing Python environment. Without --allow-existing, uv venv
+# refuses a directory that is not empty.
+reuse=()
+[ -f "$env_dir/pyvenv.cfg" ] && reuse=(--allow-existing)
 
 # Only an unlocked install drops the cooldown.
 newer=()
@@ -61,8 +67,8 @@ case "$VERSIONS" in
     ;;
   hashed-requirements)
     # A later hashed-requirements or unlocked call with the same environment-dir
-    # adds to that Python environment.
-    uv venv --allow-existing "$env_dir"
+    # installs into that Python environment.
+    uv venv "${cfg[@]}" "${reuse[@]}" "$env_dir"
     uv pip install "${cfg[@]}" --python "$env_dir" --require-hashes "${fmt[@]}" --no-deps -r "$REQUIREMENTS_FILE"
     ;;
   unlocked)
@@ -71,10 +77,11 @@ case "$VERSIONS" in
     t=()
     [ "$PROJECT_INSTALL" = editable ] && t+=(-e "$spec")
     t+=("${unlocked_extra[@]}")
-    uv venv --allow-existing "$env_dir"
+    uv venv "${cfg[@]}" "${reuse[@]}" "$env_dir"
     # t is empty when the call has only also-install-without-deps items.
+    # --upgrade replaces an older version in a reused Python environment.
     if [ ${#t[@]} -gt 0 ]; then
-      uv pip install "${cfg[@]}" --python "$env_dir" "${newer[@]}" "${fmt[@]}" "${t[@]}"
+      uv pip install "${cfg[@]}" --python "$env_dir" "${newer[@]}" --upgrade "${fmt[@]}" "${t[@]}"
     fi
     ;;
 esac
