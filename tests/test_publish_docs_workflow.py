@@ -1,7 +1,7 @@
 """Tests for publish-docs.yml.
 
 The docs site is published only from the tag of a published release, so the
-check-ref script is lifted from the YAML and run under bash with a stand-in
+build job's ref check is lifted from the YAML and run under bash with a stand-in
 for gh on PATH. The build job runs the calling repo's code, so it holds only
 the read-only job token, persists no checkout credential and uses no Actions
 cache; the deploy job, which holds `pages: write` and `id-token: write`, runs
@@ -34,8 +34,15 @@ def job(name: str) -> dict:
     return workflow()["jobs"][name]
 
 
-def run_check_ref(tmp_path: Path, ref: str, releases: dict[str, dict]) -> subprocess.CompletedProcess:
-    """Run check-ref for `ref` with a gh stand-in that serves `releases` (tag -> release JSON) and 404s anything else."""
+def ref_check() -> dict:
+    return job("build")["steps"][0]
+
+
+def run_check_ref(tmp_path: Path, ref: str, releases: dict[str, dict], gh_exit: int = 0) -> subprocess.CompletedProcess:
+    """Run the ref check for `ref` with a gh stand-in that serves `releases` (tag -> release JSON) and 404s anything else.
+
+    With `gh_exit`, gh prints the release and then fails, as a lookup cut off midway does.
+    """
     served = tmp_path / "releases.json"
     served.write_text(json.dumps({f"repos/{REPO}/releases/tags/{tag}": body for tag, body in releases.items()}))
     bin_dir = tmp_path / "bin"
@@ -45,10 +52,12 @@ def run_check_ref(tmp_path: Path, ref: str, releases: dict[str, dict]) -> subpro
         "#!/usr/bin/env bash\n"
         '[ "$1" = api ] || exit 2\n'
         f'jq -e --arg p "$2" \'.[$p]\' "{served}" || {{ echo "gh: Not Found (HTTP 404)" >&2; exit 1; }}\n'
+        f"exit {gh_exit}\n"
     )
     gh.chmod(0o755)
-    script = job("check-ref")["steps"][0]["run"]
-    # A step with `shell: bash` runs as `bash --noprofile --norc -eo pipefail`.
+    script = ref_check()["run"]
+    # A step with `shell: bash` runs as `bash --noprofile --norc -eo pipefail`;
+    # test_the_ref_check_runs_under_pipefail checks the step asks for it.
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
         env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "REPO": REPO, "REF": ref},
@@ -94,8 +103,20 @@ def test_the_tag_is_url_encoded_before_it_reaches_the_api(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_build_waits_for_the_ref_check_and_deploy_for_the_build():
-    assert job("build")["needs"] == "check-ref"
+def test_a_failed_lookup_is_refused_even_if_it_printed_a_release(tmp_path):
+    result = run_check_ref(tmp_path, "refs/tags/0.2.72", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, gh_exit=1)
+    assert result.returncode == 1
+
+
+def test_the_ref_check_runs_under_pipefail():
+    # Without an explicit `shell: bash`, GitHub runs `bash -e {0}`, with no pipefail.
+    assert ref_check()["shell"] == "bash"
+
+
+def test_the_ref_check_runs_before_the_checkout_and_deploy_waits_for_the_build():
+    steps = job("build")["steps"]
+    assert ref_check()["name"] == "Allow only the tag of a published release"
+    assert str(steps[1].get("uses", "")).startswith("actions/checkout@")
     assert job("deploy")["needs"] == "build"
 
 
@@ -105,7 +126,6 @@ def test_build_waits_for_the_ref_check_and_deploy_for_the_build():
 def test_only_the_deploy_job_widens_the_read_only_token():
     wf = workflow()
     assert wf["permissions"] == {"contents": "read"}
-    assert "permissions" not in job("check-ref")
     assert "permissions" not in job("build")
     assert job("deploy")["permissions"] == {"pages": "write", "id-token": "write"}
 

@@ -249,8 +249,8 @@ guarantee, and what is by design. To report a vulnerability, see
   Slack token is in the `report` job, which reads nothing from `check` but
   its result.
 - The docs publish workflow deploys only from the tag of a published,
-  non-draft release: its `check-ref` job refuses any other ref before the
-  build starts. Its `build` job, which runs the calling repo's code, holds
+  non-draft release: the first step of its `build` job refuses any other
+  ref before the checkout. That job, which runs the calling repo's code, holds
   only the read-only job token, persists no credential into its checkout and
   restores and saves no Actions cache. Only the `deploy` job holds
   `pages: write` and `id-token: write`, and it runs no step but

@@ -7,21 +7,22 @@ name: Publish docs (reusable)
 # their PyPI publish job, on `release: published`.
 #
 # Jobs:
-# - check-ref: refuses any ref that is not the tag of a published release, so
-#   docs for unreleased code never reach the site.
-# - build: installs the project from uv.lock and runs `quarto render`. It runs
-#   the repo's code, so it holds only the read-only job token, persists no
-#   checkout credential and uses no Actions cache.
+# - build: first refuses any ref that is not the tag of a published release,
+#   so docs for unreleased code never reach the site. Then it installs the
+#   project from uv.lock and runs `quarto render`. It runs the repo's code, so
+#   it holds only the read-only job token, persists no checkout credential and
+#   uses no Actions cache.
 # - deploy: deploys the build's Pages artifact with actions/deploy-pages. It
 #   checks out nothing and runs no repo code; it alone holds `pages: write` and
 #   `id-token: write`.
 #
-# One-time setup in the calling repo (an admin):
+# One-time setup in the calling repo (an admin), before the caller merges:
 # - Settings → Pages → Source: "GitHub Actions". The `gh-pages` branch is then
 #   no longer served, so `quarto publish gh-pages` stops updating the site.
 # - Settings → Environments → github-pages: add a deployment tag rule matching
-#   the release tags (for example `*.*.*`). GitHub creates the environment
-#   allowing only the default branch, which refuses a deploy from a tag.
+#   the release tags (for example `*.*.*`). The environment's rules otherwise
+#   name only branches (`gh-pages`, or the default branch), and a deploy from
+#   a tag is refused after PyPI has already published.
 #
 # Caller:
 #   jobs:
@@ -52,9 +53,10 @@ permissions:
   contents: read
 
 jobs:
-  check-ref:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
+    cache-mode: none
     steps:
       - name: Allow only the tag of a published release
         # An explicit bash shell adds pipefail, so a failed release lookup
@@ -80,12 +82,6 @@ jobs:
           echo "::error::Refusing to publish docs from $REF: run this from a release tag."
           exit 1
 
-  build:
-    needs: check-ref
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    cache-mode: none
-    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -109,7 +105,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Above deploy-pages' own 10-minute timeout, so the action reports and
+    # cancels a stuck deployment itself.
+    timeout-minutes: 15
     permissions:
       pages: write
       id-token: write
