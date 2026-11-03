@@ -1,0 +1,669 @@
+---
+# Self-test for the setup-uv and install-python-dependencies composite actions.
+# Each job runs on a real GitHub runner against the small fixture projects in
+# tests/fixtures/python-actions/. tests/test_python_actions.py tests the scripts
+# of both actions off the runner; this workflow proves the Actions cache and
+# Action save behavior that only a runner shows. A change to either action is
+# not done until this workflow and that test pass.
+name: Self-test Python actions
+
+"on":
+  pull_request:
+    paths:
+      - "setup-uv/**"
+      - "install-python-dependencies/**"
+      - ".github/workflows/self-test-python-actions.yml"
+      - "tests/fixtures/python-actions/**"
+  push:
+    branches: [main]
+    paths:
+      - "setup-uv/**"
+      - "install-python-dependencies/**"
+      - ".github/workflows/self-test-python-actions.yml"
+      - "tests/fixtures/python-actions/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref at a time. check-action-save reads the Actions cache list for
+# the ref and counts only entries saved at or after each install job records a
+# timestamp before its install; a second run on the same ref must not overlap and
+# save a key this run would count.
+concurrency:
+  group: self-test-python-actions-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LOCKED_PROJECT: tests/fixtures/python-actions/locked-project
+  HASHED_DIR: tests/fixtures/python-actions/hashed
+  LOCAL_PKG: tests/fixtures/python-actions/local-pkg
+  SCRIPT_DIR: tests/fixtures/python-actions/script
+  STALE_LOCK: tests/fixtures/python-actions/stale-lock
+
+jobs:
+  # A locked install with the default Actions cache rule (read-write). setup-uv
+  # makes an Action save in its post step. Python 3.11 so its Actions cache key
+  # differs from the restore-only and none jobs below.
+  locked-read-write:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      started: ${{ steps.before-install.outputs.started }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: A per-attempt file so this run attempt gets a new setup-uv cache key
+        shell: bash
+        env:
+          MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
+        # setup-uv's default cache-dependency-glob matches **/*.py.lock, so this
+        # file is part of the Actions cache key. A new value each run attempt
+        # means check-action-save never passes on a key an earlier run saved.
+        run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
+      - name: Record a UTC timestamp before the install
+        id: before-install
+        shell: bash
+        # check-action-save counts only a setup-uv save made at or after this
+        # time, so a leftover key from an earlier run does not pass the check.
+        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+      - name: uv is the pinned version and the project installed
+        shell: bash
+        run: |
+          uv --version | grep -F '0.13.5'
+          "$LOCKED_PROJECT/.venv/bin/python" -c "import six, iniconfig, ipd_fixture"
+
+  # The same locked install with restore-only: setup-uv restores but makes no
+  # Action save. Python 3.12 so its Actions cache key differs.
+  locked-restore-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      started: ${{ steps.before-install.outputs.started }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: A per-attempt file so this run attempt gets a new setup-uv cache key
+        shell: bash
+        env:
+          MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
+      - name: Record a UTC timestamp before the install
+        id: before-install
+        shell: bash
+        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.12"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          actions-cache: restore-only
+      - name: The project installed
+        shell: bash
+        run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"'
+
+  # The same locked install with none: setup-uv makes no restore and no Action
+  # save. Python 3.13 so its Actions cache key differs.
+  locked-none:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      started: ${{ steps.before-install.outputs.started }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: A per-attempt file so this run attempt gets a new setup-uv cache key
+        shell: bash
+        env:
+          MARKER: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: printf '%s\n' "$MARKER" > cache-key-marker.py.lock
+      - name: Record a UTC timestamp before the install
+        id: before-install
+        shell: bash
+        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.13"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          actions-cache: none
+      - name: The project installed
+        shell: bash
+        run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"'
+
+  # A stale uv.lock fails a locked install: the fixture's pyproject.toml lists a
+  # dependency the lock omits, so uv sync --locked stops. The action must pass
+  # that failure through. A continue-on-error step holds the failure; the guard
+  # fails unless its outcome is failure. A last step fails if uv no longer prints
+  # the stale-lock text that install.sh matches.
+  stale-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: A locked install on a stale lock stops
+        id: stale
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.STALE_LOCK }}
+          actions-cache: none
+      - name: The stale lock failed the install
+        shell: bash
+        env:
+          STALE: ${{ steps.stale.outcome }}
+        run: '[ "$STALE" = failure ] || { echo "::error::a stale lock did not fail the locked install"; exit 1; }'
+      - name: uv prints the stale-lock text that install.sh matches
+        working-directory: ${{ env.STALE_LOCK }}
+        shell: bash
+        run: |
+          out=$(uv sync --locked 2>&1) && { echo "::error::uv sync --locked passed on a stale lock"; exit 1; }
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -F 'The lockfile at `uv.lock` needs to be updated' >/dev/null \
+            || { echo "::error::uv changed its stale-lock text. Update the match in install.sh."; exit 1; }
+
+  # Read the Actions cache list and prove: only the read-write job made a
+  # setup-uv Action save in this run attempt, and no setup-uv Actions cache key
+  # is pruned. The per-job Python version tells the keys apart (setup-uv puts it
+  # in the key), and each job's per-attempt marker file makes a key that an
+  # earlier run cannot have saved. Each install job records a UTC timestamp in a
+  # job output in a step before its install; the check counts only a key whose
+  # created_at is at or after the timestamp of the job that owns it, so a leftover
+  # entry does not pass it. (GitHub does not document whether run_started_at is
+  # set while a run waits on the concurrency group, so a per-job timestamp is used
+  # instead.) The workflow concurrency group (per github.ref) stops a second run
+  # on the same ref from overlapping this one and saving a 3.11 key after this run
+  # records its timestamp, which would pass the check falsely.
+  check-action-save:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [locked-read-write, locked-restore-only, locked-none]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Only the read-write job saved a setup-uv cache this attempt, none pruned
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          RW_STARTED: ${{ needs.locked-read-write.outputs.started }}
+          RO_STARTED: ${{ needs.locked-restore-only.outputs.started }}
+          NONE_STARTED: ${{ needs.locked-none.outputs.started }}
+        run: |
+          printf 'Jobs recorded before install: read-write %s, restore-only %s, none %s\n' \
+            "$RW_STARTED" "$RO_STARTED" "$NONE_STARTED"
+          # key<TAB>created_at per line. created_at carries fractional seconds
+          # (...:00.500Z) and the recorded job time does not (...:00Z), so compare
+          # whole epoch seconds, not strings: date -u +%s drops the fraction, so a
+          # save in the same second as the job time counts as made at or after it.
+          entries=$(gh api "repos/$REPO/actions/caches?ref=$REF&per_page=100" \
+            --jq '.actions_caches[] | [.key, .created_at] | @tsv')
+          printf 'Actions cache entries for %s:\n%s\n' "$REF" "$entries"
+          rw_started=$(date -u -d "$RW_STARTED" +%s)
+          ro_started=$(date -u -d "$RO_STARTED" +%s)
+          none_started=$(date -u -d "$NONE_STARTED" +%s)
+          fresh_read_write=0
+          while IFS=$'\t' read -r key created; do
+            [ -n "$key" ] || continue
+            case "$key" in *setup-uv*) ;; *) continue ;; esac
+            case "$key" in *-pruned*) echo "::error::a setup-uv Actions cache key is pruned: $key"; exit 1 ;; esac
+            # Count a key only when it is at or after its own job's recorded time.
+            created_s=$(date -u -d "$created" +%s)
+            case "$key" in
+              *3.11*) [ "$created_s" -lt "$rw_started" ] || fresh_read_write=1 ;;
+              *3.12*) [ "$created_s" -lt "$ro_started" ] || { echo "::error::a restore-only or none job saved a setup-uv cache this attempt: $key"; exit 1; } ;;
+              *3.13*) [ "$created_s" -lt "$none_started" ] || { echo "::error::a restore-only or none job saved a setup-uv cache this attempt: $key"; exit 1; } ;;
+            esac
+          done <<< "$entries"
+          [ "$fresh_read_write" = 1 ] \
+            || { echo "::error::no setup-uv Action save for the read-write job (python 3.11) this attempt"; exit 1; }
+          echo "read-write saved this attempt, restore-only and none did not, no key is pruned"
+
+  # cache-mode: read makes the Actions cache token refuse a write. Prove that an
+  # actions/cache/save under this mode creates no Actions cache entry.
+  cache-mode-read-blocks-write:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    cache-mode: read
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: A file to try to cache
+        shell: bash
+        run: echo self-test > cache-me.txt
+      - name: Try an Actions cache write
+        id: save
+        continue-on-error: true
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: cache-me.txt
+          key: self-test-cache-mode-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: No Actions cache entry was made
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          KEY: self-test-cache-mode-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          keys=$(gh api "repos/$REPO/actions/caches?ref=$REF&per_page=100" --jq '.actions_caches[].key')
+          if printf '%s\n' "$keys" | grep -F "$KEY" >/dev/null; then
+            echo "::error::an Actions cache entry was made despite cache-mode: read"; exit 1
+          fi
+          echo "no Actions cache entry made (cache-mode: read enforced)"
+
+  # The remote-reference jobs below call the actions as
+  # meridianlabs-ai/actions/...@<SHA>, not with ./, so the remote $/setup-uv call
+  # is exercised too. uses: cannot take an expression, so each SHA is a literal.
+  # This guard fails if the pinned SHA does not match the action folders at HEAD,
+  # so a stale pin fails CI. Re-pin PINNED here and the two @<SHA> literals below
+  # after each change to the action folders (commit the work, then pin that
+  # commit's SHA in all three places). The repo merges by squash or rebase and
+  # deletes the branch, so on main the pinned commit is not in the clone. The
+  # guard fetches it by SHA; GitHub serves a commit that a pull request ref
+  # still reaches.
+  remote-reference-pin-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: The pinned SHA matches the action folders at HEAD
+        shell: bash
+        env:
+          PINNED: 0e663813beb1bcfc92b222edcd997287110e0e91
+        run: |
+          git fetch --no-tags --depth=1 origin "$PINNED"
+          git diff --quiet "$PINNED" HEAD -- setup-uv install-python-dependencies \
+            || { echo "::error::Re-pin the remote-reference jobs to HEAD: setup-uv or install-python-dependencies changed since $PINNED."; exit 1; }
+
+  # Call only install-python-dependencies from the remote reference, so its
+  # nested $/setup-uv runs from the remote reference too (the ./ jobs cannot
+  # prove the remote $/ call). Then check uv and that the project installed.
+  remote-reference-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [remote-reference-pin-guard]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: meridianlabs-ai/actions/install-python-dependencies@0e663813beb1bcfc92b222edcd997287110e0e91 # self, re-pin after each change
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          actions-cache: none
+      - name: uv is the pinned version and the project installed
+        shell: bash
+        run: |
+          uv --version | grep -F '0.13.5'
+          "$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"
+
+  # Call setup-uv alone from the remote reference and check the uv version.
+  remote-reference-setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [remote-reference-pin-guard]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: meridianlabs-ai/actions/setup-uv@0e663813beb1bcfc92b222edcd997287110e0e91 # self, re-pin after each change
+        with:
+          python-version: "3.11"
+          actions-cache: none
+      - name: uv is the pinned version
+        shell: bash
+        run: uv --version | grep -F '0.13.5'
+
+  # A hashed-requirements install, then uv pip check on the Python environment.
+  # A second call into the same environment-dir succeeds. The full closure
+  # passes; a missing hash and a short closure both fail.
+  hashed-and-pip-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          requirements-file: ${{ env.HASHED_DIR }}/requirements.txt
+          environment-dir: ${{ runner.temp }}/hashed-env
+          package-format: wheels-only
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: A second call into the same environment-dir succeeds
+        uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          requirements-file: ${{ env.HASHED_DIR }}/requirements.txt
+          environment-dir: ${{ runner.temp }}/hashed-env
+          package-format: wheels-only
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: uv pip check passes on the full closure
+        shell: bash
+        run: uv pip check --python "${{ runner.temp }}/hashed-env"
+      - name: A missing hash fails before install
+        id: missing_hash
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          requirements-file: ${{ env.HASHED_DIR }}/requirements-missing-hash.txt
+          environment-dir: ${{ runner.temp }}/missing-hash-env
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: Install a short closure, then uv pip check fails
+        uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          requirements-file: ${{ env.HASHED_DIR }}/requirements-missing-dep.txt
+          environment-dir: ${{ runner.temp }}/short-env
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: uv pip check fails on the short closure
+        id: short_check
+        continue-on-error: true
+        shell: bash
+        run: uv pip check --python "${{ runner.temp }}/short-env"
+      - name: The negative cases failed
+        shell: bash
+        env:
+          MISSING_HASH: ${{ steps.missing_hash.outcome }}
+          SHORT_CHECK: ${{ steps.short_check.outcome }}
+        run: |
+          [ "$MISSING_HASH" = failure ] || { echo "::error::a missing hash did not fail"; exit 1; }
+          [ "$SHORT_CHECK" = failure ] || { echo "::error::uv pip check passed a short closure"; exit 1; }
+          echo "missing hash and short closure both failed"
+
+  # A script call, then a later uv run --locked --script installs nothing: the
+  # script Python environment is already synced in the uv cache.
+  script-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.SCRIPT_DIR }}
+          script: do_thing.py
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: A later uv run --locked --script installs nothing
+        working-directory: ${{ env.SCRIPT_DIR }}
+        shell: bash
+        run: |
+          out=$(uv run --no-config --locked --script do_thing.py 2>&1)
+          printf '%s\n' "$out"
+          if printf '%s\n' "$out" | grep -E 'Installed|Prepared|Building' >/dev/null; then
+            echo "::error::the script run installed something"; exit 1
+          fi
+
+  # Two calls in one job run setup-uv one time. The second call reuses it: if
+  # the if-guard were wrong, setup-uv would run twice and its own check_inputs
+  # would stop on the second. The second call skips the project, so uv sync
+  # removes ipd_fixture. A hashed-requirements call with no environment-dir then
+  # adds dateutil to the <project-dir>/.venv of the locked calls, and the locked
+  # dev dependency iniconfig stays. A last call with a different python-version
+  # stops in check_inputs.
+  two-calls-one-setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: First call
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          actions-cache: none
+      - name: Second call with the same setup reuses setup-uv
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-install: skip
+          actions-cache: none
+      - name: A hashed-requirements call adds to the locked project environment
+        uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          requirements-file: ${{ github.workspace }}/${{ env.HASHED_DIR }}/requirements.txt
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: The locked and the hashed packages both import
+        shell: bash
+        run: '"$LOCKED_PROJECT/.venv/bin/python" -c "import iniconfig, dateutil"'
+      - name: A call with a different python-version stops
+        id: diff_python
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.12"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          actions-cache: none
+      - name: The mismatched call failed
+        shell: bash
+        env:
+          DIFF_PYTHON: ${{ steps.diff_python.outcome }}
+        run: '[ "$DIFF_PYTHON" = failure ] || { echo "::error::a second call with a different python-version did not fail"; exit 1; }'
+
+  # check_inputs stops a bad locked or hashed-requirements call before uv runs.
+  # Each case is a continue-on-error step; the guard fails unless all failed.
+  locked-hashed-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: An unknown versions value stops
+        id: unknown_value
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: bogus
+          python-version: "3.11"
+      - name: A list item that starts with - stops
+        id: dash_item
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          extras: "-X evil"
+      - name: A missing versions stops
+        id: missing_versions
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: ""
+          python-version: "3.11"
+      - name: A missing python-version stops
+        id: missing_python
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: ""
+      - name: A newline in a one-line input stops
+        id: newline
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11\nsha=forged"
+      - name: wheels-only with locked stops
+        id: wheels_locked
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          package-format: wheels-only
+      - name: A non-local also-install-without-deps item with locked stops
+        id: nonlocal_nodeps
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: locked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          also-install-without-deps: requests
+      - name: also-install-without-deps with hashed-requirements stops
+        id: nodeps_hashed
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: hashed-requirements
+          python-version: "3.11"
+          requirements-file: ${{ env.HASHED_DIR }}/requirements.txt
+          also-install-without-deps: ./some/path
+      - name: Every invalid call failed in check_inputs
+        shell: bash
+        env:
+          OUTCOMES: >-
+            ${{ steps.unknown_value.outcome }}
+            ${{ steps.dash_item.outcome }}
+            ${{ steps.missing_versions.outcome }}
+            ${{ steps.missing_python.outcome }}
+            ${{ steps.newline.outcome }}
+            ${{ steps.wheels_locked.outcome }}
+            ${{ steps.nonlocal_nodeps.outcome }}
+            ${{ steps.nodeps_hashed.outcome }}
+        run: |
+          # A missing or misnamed step id gives an empty outcome, so count them.
+          read -ra outcomes <<< "$OUTCOMES"
+          [ ${#outcomes[@]} -eq 8 ] || { echo "::error::expected 8 outcomes, got ${#outcomes[@]} (outcomes: $OUTCOMES)"; exit 1; }
+          for o in "${outcomes[@]}"; do
+            [ "$o" = failure ] || { echo "::error::an invalid call did not fail (outcomes: $OUTCOMES)"; exit 1; }
+          done
+          echo "all invalid locked and hashed-requirements calls failed"
+
+  # WARNING: this job runs an unlocked install. It takes the newest release of
+  # each dependency, and such code can be malicious. Do not give this job a
+  # secret, a deployment environment or a job token with write permissions.
+  # It sets cache-mode: none so the unlocked code cannot write the Actions cache.
+  # tests/test_python_actions.py fails if an unlocked job lacks this.
+  unlocked:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    cache-mode: none
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # The invalid calls come first. check_inputs stops each before setup-uv
+      # runs, so no setup is recorded and the second-call rule does not apply.
+      - name: unlocked with actions-cache read-write stops
+        id: unlocked_rw
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-uv-settings: ignore
+          actions-cache: read-write
+      - name: unlocked with actions-cache restore-only stops
+        id: unlocked_ro
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-uv-settings: ignore
+          actions-cache: restore-only
+      - name: unlocked with project-uv-settings apply stops
+        id: unlocked_apply
+        continue-on-error: true
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-uv-settings: apply
+          actions-cache: none
+      - name: An unlocked install with wheels-only still builds a local no-deps path from source
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-install: skip
+          environment-dir: ${{ runner.temp }}/unlocked-env
+          also-install-unlocked: six
+          also-install-without-deps: ${{ github.workspace }}/${{ env.LOCAL_PKG }}
+          package-format: wheels-only
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: six came as a wheel and the local package built from source
+        shell: bash
+        run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
+      - name: A second call with only also-install-without-deps adds to the same environment
+        uses: ./install-python-dependencies
+        with:
+          versions: unlocked
+          python-version: "3.11"
+          project-dir: ${{ env.LOCKED_PROJECT }}
+          project-install: skip
+          environment-dir: ${{ runner.temp }}/unlocked-env
+          also-install-without-deps: ${{ github.workspace }}/${{ env.LOCAL_PKG }}
+          project-uv-settings: ignore
+          actions-cache: none
+      - name: six still imports, so the second call kept the environment
+        shell: bash
+        run: '"${{ runner.temp }}/unlocked-env/bin/python" -c "import six, ipd_localpkg"'
+      - name: Every invalid unlocked call failed in check_inputs
+        shell: bash
+        env:
+          UNLOCKED_RW: ${{ steps.unlocked_rw.outcome }}
+          UNLOCKED_RO: ${{ steps.unlocked_ro.outcome }}
+          UNLOCKED_APPLY: ${{ steps.unlocked_apply.outcome }}
+        run: |
+          [ "$UNLOCKED_RW" = failure ] || { echo "::error::unlocked with read-write did not fail"; exit 1; }
+          [ "$UNLOCKED_RO" = failure ] || { echo "::error::unlocked with restore-only did not fail"; exit 1; }
+          [ "$UNLOCKED_APPLY" = failure ] || { echo "::error::unlocked with project-uv-settings apply did not fail"; exit 1; }
+          echo "all invalid unlocked calls failed"

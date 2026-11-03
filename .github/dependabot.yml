@@ -8,6 +8,8 @@ updates:
       - "/"
       - "/slack-approval-ping"
       - "/slack-release-announce"
+      - "/setup-uv"
+      - "/install-python-dependencies"
     schedule:
       interval: "weekly"
     cooldown:

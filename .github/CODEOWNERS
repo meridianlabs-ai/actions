@@ -1,0 +1,4 @@
+# Code owners of the shared Python install actions: Eric Patey, Charles Teague, Matt Brandly.
+/install-python-dependencies/                    @epatey @dragonstyle @brandly
+/setup-uv/                                       @epatey @dragonstyle @brandly
+/.github/workflows/self-test-python-actions.yml  @epatey @dragonstyle @brandly

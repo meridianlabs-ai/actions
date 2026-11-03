@@ -1,0 +1,127 @@
+name: Install Python dependencies
+description: >-
+  Install Python dependencies from uv.lock (a locked install), from a hashed
+  requirements file, or at the newest releases (an unlocked install). It calls
+  setup-uv once per job for the pinned uv.
+
+inputs:
+  versions:
+    description: >-
+      Where the versions come from: locked, hashed-requirements or unlocked.
+    required: true
+  python-version:
+    description: "Which Python, for example '3.11'."
+    required: true
+  project-dir:
+    description: "Directory that holds pyproject.toml."
+    default: "."
+  environment-dir:
+    description: >-
+      Directory for the Python environment. Empty uses <project-dir>/.venv.
+      A relative path is relative to project-dir. A later hashed-requirements
+      or unlocked call with the same environment-dir installs into that
+      Python environment; a locked call makes it match uv.lock.
+    default: ""
+  project-install:
+    description: >-
+      Whether the project installs: editable or skip. To install a package
+      without edits, use skip and put it in also-install-unlocked.
+    default: editable
+  extras:
+    description: "Optional dependencies to install, one name per line."
+    default: ""
+  default-dependency-groups:
+    description: >-
+      Whether the default dependency groups install: include or exclude.
+      locked only.
+    default: include
+  requirements-file:
+    description: "Requirements file to install. Required with hashed-requirements."
+    default: ""
+  script:
+    description: >-
+      Script with its own lock to sync. locked only. A later step runs the
+      script.
+    default: ""
+  also-install-unlocked:
+    description: >-
+      More requirements in the same unlocked resolution, one per line.
+      unlocked only.
+    default: ""
+  also-install-without-deps:
+    description: >-
+      Packages to install with --no-deps, one per line. Local paths; unlocked
+      also permits requirements.
+    default: ""
+  project-uv-settings:
+    description: >-
+      Whether uv.toml and the [tool.uv] settings apply: apply or ignore.
+      [tool.uv.sources] applies with both values. unlocked needs ignore.
+    default: apply
+  package-format:
+    description: >-
+      any or wheels-only. wheels-only stops a build of a package from an index;
+      the project and local paths still build. Not with locked. Does not apply
+      to also-install-without-deps items.
+    default: any
+  actions-cache:
+    description: >-
+      Use of the Actions cache by setup-uv: read-write, restore-only or none.
+      unlocked needs none.
+    default: read-write
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs
+      shell: bash
+      env:
+        VERSIONS: ${{ inputs.versions }}
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        PROJECT_DIR: ${{ inputs.project-dir }}
+        ENVIRONMENT_DIR: ${{ inputs.environment-dir }}
+        PROJECT_INSTALL: ${{ inputs.project-install }}
+        EXTRAS: ${{ inputs.extras }}
+        DEFAULT_GROUPS: ${{ inputs.default-dependency-groups }}
+        REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+        SCRIPT: ${{ inputs.script }}
+        UNLOCKED_EXTRA: ${{ inputs.also-install-unlocked }}
+        WITHOUT_DEPS: ${{ inputs.also-install-without-deps }}
+        PROJECT_UV_SETTINGS: ${{ inputs.project-uv-settings }}
+        PACKAGE_FORMAT: ${{ inputs.package-format }}
+        ACTIONS_CACHE: ${{ inputs.actions-cache }}
+        RECORDED_SETUP: ${{ env.MERIDIAN_SETUP_UV }}
+      # Stops on a missing or unknown value, a newline or carriage return in a
+      # one-line input, a carriage return in a list input, a list item that
+      # starts with - or holds ::, %0a or %0d, requirements-file -, an input
+      # that does not apply to the versions value, an unlocked call that
+      # installs nothing, unlocked extras with project-install skip, a project
+      # call with no <project-dir>/pyproject.toml, or a second call whose
+      # python-version or actions-cache differs from the setup-uv already run
+      # in this job.
+      run: python3 "$GITHUB_ACTION_PATH/check_inputs.py"
+
+    # $/ loads setup-uv from this repository at this commit. Run it once per
+    # job; a later call reuses it (check_inputs.py checks that it matches).
+    - uses: $/setup-uv
+      if: env.MERIDIAN_SETUP_UV == ''
+      with:
+        python-version: ${{ inputs.python-version }}
+        actions-cache: ${{ inputs.actions-cache }}
+
+    - name: Install
+      shell: bash
+      working-directory: ${{ inputs.project-dir }}
+      env:
+        VERSIONS: ${{ inputs.versions }}
+        ENVIRONMENT_DIR: ${{ inputs.environment-dir }}
+        PROJECT_INSTALL: ${{ inputs.project-install }}
+        EXTRAS: ${{ inputs.extras }}
+        DEFAULT_GROUPS: ${{ inputs.default-dependency-groups }}
+        REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+        SCRIPT: ${{ inputs.script }}
+        UNLOCKED_EXTRA: ${{ inputs.also-install-unlocked }}
+        WITHOUT_DEPS: ${{ inputs.also-install-without-deps }}
+        PROJECT_UV_SETTINGS: ${{ inputs.project-uv-settings }}
+        PACKAGE_FORMAT: ${{ inputs.package-format }}
+      run: bash "$GITHUB_ACTION_PATH/install.sh"
