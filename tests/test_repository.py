@@ -11,7 +11,7 @@ An App installation token gets every permission the App holds unless the
 step that mints it names fewer, so every mint step names its permissions.
 The release steps ask for the Meridian Release Bot's two write permissions.
 
-Run with `python3 -m pytest` from the repo root (needs pytest;
+Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
 """
 
@@ -24,7 +24,10 @@ import yaml
 GITHUB = Path(__file__).resolve().parents[1] / ".github"
 RETIRED_SECRETS = ("CI_PERF_ANTHROPIC_API_KEY", "TRIAGE_ANTHROPIC_API_KEY")
 APP_TOKEN = "actions/create-github-app-token@"
-RELEASE_WORKFLOWS = ("release-please-python.yml", "release-please-vscode.yml")
+RELEASE_WORKFLOWS = (
+    ".github/workflows/release-please-python.yml",
+    ".github/workflows/release-please-vscode.yml",
+)
 
 
 def test_no_workflow_or_action_names_a_retired_anthropic_key():
@@ -48,7 +51,7 @@ def app_token_steps():
         for job in jobs:
             for step in job.get("steps") or []:
                 if step.get("uses", "").startswith(APP_TOKEN):
-                    found.append((path.name, step))
+                    found.append((str(path.relative_to(GITHUB.parent)), step))
     return found
 
 

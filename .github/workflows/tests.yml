@@ -27,6 +27,7 @@ name: tests
       - ".github/workflows/self-test-python-actions.yml"
       - "setup-uv/**"
       - "install-python-dependencies/**"
+      - "slack-approval-ping/**"
       - "slack-release-announce/**"
       - "tests/**"
   pull_request:
@@ -48,6 +49,7 @@ name: tests
       - ".github/workflows/self-test-python-actions.yml"
       - "setup-uv/**"
       - "install-python-dependencies/**"
+      - "slack-approval-ping/**"
       - "slack-release-announce/**"
       - "tests/**"
 
