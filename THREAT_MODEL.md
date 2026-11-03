@@ -149,6 +149,12 @@ guarantee, and what is by design. To report a vulnerability, see
   every publisher its account manages and an Open VSX token every namespace
   of its account; tokens scoped to the one publisher, where a marketplace
   allows it, are an administrative defence separate from this check.
+- **A built docs site is repo output.** In `publish-docs.yml` the `build`
+  job runs the calling repo's code at the release tag (its install, Quarto's
+  pre- and post-render scripts, any executed cells), and the `deploy` job
+  publishes whatever site it uploaded. Separating build from deploy keeps
+  `pages: write` and the OIDC token out of the job that runs that code; it
+  does not check the site's content, which is the release commit's to decide.
 - **Release notes are contributor text.** The announce action reads notes
   assembled from merged commit subjects in the calling repo and treats them
   as untrusted when it builds Slack mrkdwn.
@@ -242,6 +248,13 @@ guarantee, and what is by design. To report a vulnerability, see
   not by digest, so that token is all a replaced binary would hold. The
   Slack token is in the `report` job, which reads nothing from `check` but
   its result.
+- The docs publish workflow deploys only from the tag of a published,
+  non-draft release: the first step of its `build` job refuses any other
+  ref before the checkout. That job, which runs the calling repo's code, holds
+  only the read-only job token, persists no credential into its checkout and
+  restores and saves no Actions cache. Only the `deploy` job holds
+  `pages: write` and `id-token: write`, and it runs no step but
+  `actions/deploy-pages`.
 - The Slack destination of a triage reply comes from the context of the
   failed run that its `report` job produced, resolved by the `context` job
   before the agent runs. It never comes from the agent's manifest, the
