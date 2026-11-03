@@ -20,7 +20,7 @@ tested in `tests/`: each test file lifts the scripts out of the YAML and
 executes them under bash, with stand-ins for `gh`, `pytest` and `curl` on `PATH`
 where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`,
-`tests/test_docs_link_check_workflow.py`;
+`tests/test_docs_link_check_workflow.py`, `tests/test_publish_docs_workflow.py`;
 `tests/test_slack_release_announce.py` covers the announce converter,
 `tests/test_release_notes_heading.py` the release workflows' heading rename, and
 `tests/test_repository.py` checks that no workflow names a retired

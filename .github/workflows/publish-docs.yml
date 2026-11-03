@@ -1,0 +1,125 @@
+---
+name: Publish docs (reusable)
+
+# Reusable workflow: render a repo's Quarto docs site at a release tag and
+# deploy it to GitHub Pages, so the published docs match the released package
+# and docs fixes go live with the next release. Callers run it as a job after
+# their PyPI publish job, on `release: published`.
+#
+# Jobs:
+# - check-ref: refuses any ref that is not the tag of a published release, so
+#   docs for unreleased code never reach the site.
+# - build: installs the project from uv.lock and runs `quarto render`. It runs
+#   the repo's code, so it holds only the read-only job token, persists no
+#   checkout credential and uses no Actions cache.
+# - deploy: deploys the build's Pages artifact with actions/deploy-pages. It
+#   checks out nothing and runs no repo code; it alone holds `pages: write` and
+#   `id-token: write`.
+#
+# One-time setup in the calling repo (an admin):
+# - Settings → Pages → Source: "GitHub Actions". The `gh-pages` branch is then
+#   no longer served, so `quarto publish gh-pages` stops updating the site.
+# - Settings → Environments → github-pages: add a deployment tag rule matching
+#   the release tags (for example `*.*.*`). GitHub creates the environment
+#   allowing only the default branch, which refuses a deploy from a tag.
+#
+# Caller:
+#   jobs:
+#     docs:
+#       needs: publish
+#       if: ${{ github.event_name == 'release' }}
+#       permissions: { contents: read, pages: write, id-token: write }
+#       uses: meridianlabs-ai/actions/.github/workflows/publish-docs.yml@v1
+#       with: { python-version: "3.12", extras: doc }
+
+"on":
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python for the docs build, for example '3.12'."
+        type: string
+        required: true
+      docs-dir:
+        description: "Quarto project directory. The site renders to <docs-dir>/_site."
+        type: string
+        default: "docs"
+      extras:
+        description: "Optional dependencies the docs build needs (quarto-cli and the like), one name per line."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check-ref:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Allow only the tag of a published release
+        # An explicit bash shell adds pipefail, so a failed release lookup
+        # refuses the ref even if its output looks like a release.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          case "$REF" in
+            refs/tags/*)
+              tag="${REF#refs/tags/}"
+              encoded="$(jq -rn --arg t "$tag" '$t | @uri')"
+              if gh api "repos/$REPO/releases/tags/$encoded" \
+                  | jq -e --arg t "$tag" '.tag_name == $t and .draft == false' > /dev/null; then
+                exit 0
+              fi
+              echo "::error::Refusing to publish docs from $REF: no published release has this tag."
+              exit 1
+              ;;
+          esac
+          echo "::error::Refusing to publish docs from $REF: run this from a release tag."
+          exit 1
+
+  build:
+    needs: check-ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    cache-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: meridianlabs-ai/actions/install-python-dependencies@f4ae19412da5597fc283e3ef62db1a67384ae609 # self, re-pin after each change
+        with:
+          versions: locked
+          python-version: ${{ inputs.python-version }}
+          extras: ${{ inputs.extras }}
+          actions-cache: none
+
+      - name: Render docs
+        env:
+          DOCS_DIR: ${{ inputs.docs-dir }}
+        run: uv run --no-sync quarto render "$DOCS_DIR"
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ inputs.docs-dir }}/_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # A second release's deploy waits for the first rather than racing it.
+    concurrency:
+      group: publish-docs-deploy
+      cancel-in-progress: false
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
