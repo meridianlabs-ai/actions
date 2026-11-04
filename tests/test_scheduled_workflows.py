@@ -256,11 +256,12 @@ def test_no_run_step_resolves_upgrades_or_relocks(job):
 
 @pytest.mark.parametrize("job", ["slow-tests", "static-analysis"])
 def test_every_tool_runs_through_uv_run_locked(job):
+    tools = "|".join(TOOLS)
     calls = [line.strip() for s in steps(SCHEDULED, job) for line in (s.get("run") or "").splitlines()
-             if re.match(rf"\s*(uv run --locked )?({'|'.join(TOOLS)})\b", line)]
+             if re.search(rf"\b({tools})\b", line)]
     assert calls, job
     for call in calls:
-        assert call.startswith("uv run --locked "), (job, call)
+        assert re.match(rf"uv run --locked ({tools})\b", call), (job, call)
 
 
 # --- The last-inspect-ai-sha artifact ---------------------------------------------------

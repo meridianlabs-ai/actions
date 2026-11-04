@@ -275,7 +275,7 @@ FAILING_PACKAGES = "MarkupSafe-3.0.3 agent-client-protocol-0.12.1 debugpy-1.8.22
 def test_collect_diffs_the_failed_run_against_the_last_passing_run(tmp_path):
     # The success list holds a newer run that skipped an already-tested
     # commit (green, no artifact, no install): it is passed over for the run
-    # before it that really installed. The diff names the package that moved
+    # before it that tested a commit. The diff names the package that moved
     # (inspect_ai#499: openai 3.14.0 -> 3.14.1), one version per side, and
     # `(absent)` for a package present on one side only.
     versions, r = collect(
@@ -357,26 +357,30 @@ def test_collect_without_a_passing_run_leaves_notes_not_a_diff(tmp_path):
         artifacts={},
     )
     assert "Successfully installed" in (versions / "failing.txt").read_text()
-    assert (versions / "passing.txt").read_text() == "No passing scheduled run with an install log found before this one\n"
+    assert (versions / "passing.txt").read_text() == "No passing scheduled run found before this one\n"
     assert (versions / "diff.txt").read_text() == (versions / "passing.txt").read_text()
     assert json.loads((versions / "passing-run.json").read_text()) == {}
 
 
 def test_collect_against_a_locked_install_log_writes_notes_not_a_diff(tmp_path):
     # The scheduled tests install with uv from inspect_ai's uv.lock, which
-    # writes no `Successfully installed` line. The step does not fail, and
+    # writes no `Successfully installed` line. The step does not fail, the
+    # newest passing run is still the baseline with its tested SHA, and
     # diff.txt says why it holds no diff.
     uv_log = "".join(f"slow-tests (asyncio, 900)\tInstall Python dependencies\t2026-11-04T10:00:00Z {line}\n"
                      for line in ("Installed 312 packages in 1.20s", " + openai==3.14.1", " + inspect-package==0.1"))
     versions, r = collect(
         tmp_path,
-        logs={FAILED_RUN: uv_log, PASSING_RUN: install_log("j", PASSING_PACKAGES)},
-        runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
-        artifacts={PASSING_RUN: PASSING_SHA},
+        logs={FAILED_RUN: uv_log, PASSING_RUN: uv_log, "31276180738": install_log("j", PASSING_PACKAGES)},
+        runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z"), run_entry("31276180738", "2026-08-08T20:08:41Z")],
+        artifacts={PASSING_RUN: PASSING_SHA, "31276180738": "1498e287b930de9963f0793c1b649189d0b8ae2e"},
     )
     assert r.returncode == 0
     assert (versions / "failing.txt").read_text() == f"No install log found for the failed run {FAILED_RUN}\n"
-    assert (versions / "diff.txt").read_text() == "No install log for the failed run, so no version diff\n"
+    assert (versions / "passing.txt").read_text() == f"No install log found for the passing run {PASSING_RUN}\n"
+    info = json.loads((versions / "passing-run.json").read_text())
+    assert info["run_id"] == int(PASSING_RUN) and info["inspect_ai_sha"] == PASSING_SHA
+    assert (versions / "diff.txt").read_text() == "No install log for the failed run or the passing run, so no version diff\n"
 
 
 def test_collect_without_logs_or_run_json_still_writes_every_file(tmp_path):

@@ -77,10 +77,10 @@ guarantee, and what is by design. To report a vulnerability, see
   artifact.
 - **Jobs that run the dependency closure hold nothing that reaches beyond
   the job.** The scheduled inspect_ai suites install upstream's dev closure
-  from inspect_ai's uv.lock at the tested commit, and the canaries
-  (meridianlabs-ai/canaries) run the unlocked, latest dependencies; either
-  way the closure is code this repository does not review, and these jobs
-  execute it. Their job token is
+  from inspect_ai's uv.lock at the tested commit, and the inspect_swe
+  nightly installs its dev closure from PyPI unlocked; either way the
+  closure is code this repository does not review, and these jobs execute
+  it. Their job token is
   declared read-only in the workflow (`permissions: contents: read`, with
   `actions: read` only on the jobs that read this repository's run data),
   so its reach does not depend on the repository's default token setting;
