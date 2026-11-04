@@ -30,6 +30,10 @@ name: tests
       - "install-python-dependencies/**"
       - "slack-approval-ping/**"
       - "slack-release-announce/**"
+      - "sync-labels/**"
+      - "policy-text-check/**"
+      - "policy/**"
+      - "labels.json"
       - "tests/**"
   pull_request:
     paths:
@@ -53,6 +57,10 @@ name: tests
       - "install-python-dependencies/**"
       - "slack-approval-ping/**"
       - "slack-release-announce/**"
+      - "sync-labels/**"
+      - "policy-text-check/**"
+      - "policy/**"
+      - "labels.json"
       - "tests/**"
 
 permissions:

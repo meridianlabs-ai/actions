@@ -1,0 +1,44 @@
+name: Sync labels
+description: >-
+  Create each label in labels.json in the calling repo, or update its color
+  and description if it exists. It never deletes or renames a label.
+
+# Usage (a workflow in the calling repo). The job writes labels to the live
+# repo, so never give it a pull_request trigger.
+#   on:
+#     schedule:
+#       - cron: "0 6 * * 1"
+#     workflow_dispatch:
+#     push:
+#       branches: [main]
+#       paths: [".github/workflows/sync-labels.yml"]
+#   permissions: {}
+#   jobs:
+#     sync-labels:
+#       runs-on: ubuntu-latest
+#       permissions:
+#         issues: write
+#       steps:
+#         - uses: meridianlabs-ai/actions/sync-labels@<full commit SHA> # main
+
+inputs:
+  github-token:
+    description: "Token with issues: write on the calling repo."
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Sync labels
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+      # labels.json sits at the actions repo root, one level up from this action.
+      run: |
+        jq -c '.[]' "$GITHUB_ACTION_PATH/../labels.json" | while read -r label; do
+          gh label create "$(jq -r .name <<<"$label")" \
+            --color "$(jq -r .color <<<"$label")" \
+            --description "$(jq -r .description <<<"$label")" \
+            --force
+        done
