@@ -9,9 +9,8 @@ validates the artifact's fields before any becomes a checkout ref, a job
 output or the Slack destination; the step that composes the landing manifest from what the agent wrote
 (whitelisting, normalizing, and turning every dropped action into a
 fail_run error); and the agent's permission rules, whose allow list must not
-reach a write outside the landing directory. The step that collects the
-installed package versions of the failed run and the last passing run is
-tested too, against a fake `gh` on PATH. The agent job's shape (the
+reach a write outside the landing directory. The step that finds the last
+passing run is tested too, against a fake `gh` on PATH. The agent job's shape (the
 agent runs through meridianlabs-ai/agents' launcher and claude-code-action
 on Anthropic workload identity federation, and the job holds nothing but
 the read-only job token and that model credential) and the land job's
@@ -177,12 +176,12 @@ def test_context_non_object_or_non_string_fields_fall_back(tmp_path, artifact):
     assert out == {"sha": "main", "exact": "false", "channel": "", "thread_ts": ""}
 
 
-# --- Collect installed package versions --------------------------------------
+# --- Find the last passing run ----------------------------------------------
 
 
 FAKE_GH = r"""#!/usr/bin/env bash
-# A stand-in for `gh` serving fixtures from $FAKE_GH_DIR: run view (--log,
-# --log-failed or --json, at an --attempt when given), run list --json, and
+# A stand-in for `gh` serving fixtures from $FAKE_GH_DIR: run view (--log-failed
+# or --json, at an --attempt when given), run list --json, and
 # run download of the last-inspect-ai-sha artifact. A run view is served from
 # the first of logs/<id>.attempt<N>.<kind>.txt, logs/<id>.<kind>.txt and
 # logs/<id>.txt that exists (kind: log, failed or json).
@@ -221,21 +220,9 @@ PASSING_RUN = "35018352720"
 PASSING_SHA = "ba590d5128e3ab2ca5ec74890aa7f24e4cb789e6"
 
 
-def install_log(job: str, packages: str) -> str:
-    """One job's lines of `gh run view --log`: the pip upgrade, the dev install, the fixture package."""
-    return "\n".join(
-        f"{job}\tInstall dependencies\t2026-09-15T22:16:54Z {line}"
-        for line in ("Requirement already satisfied: pip", "Successfully installed pip-26.2.1",
-                     f"Successfully installed {packages}", "Successfully installed inspect_package-0.1")
-    ) + "\n"
-
-
-def collect(tmp_path: Path, *, logs: dict, runs: list, artifacts: dict, run_json=None, attempt: str = "1") -> tuple[Path, subprocess.CompletedProcess]:
+def find_passing(tmp_path: Path, *, runs: list, artifacts: dict, run_json=None) -> tuple[Path, subprocess.CompletedProcess]:
     fake = tmp_path / "fake-gh"
-    (fake / "logs").mkdir(parents=True)
-    (fake / "artifacts").mkdir()
-    for run_id, text in logs.items():
-        (fake / "logs" / f"{run_id}.txt").write_text(text)
+    (fake / "artifacts").mkdir(parents=True)
     for run_id, sha in artifacts.items():
         (fake / "artifacts" / run_id).write_text(sha + "\n")
     (fake / "runs.json").write_text(json.dumps(runs))
@@ -248,15 +235,13 @@ def collect(tmp_path: Path, *, logs: dict, runs: list, artifacts: dict, run_json
         run_json = {"conclusion": "failure", "createdAt": "2026-09-15T22:13:02Z", "jobs": []}
     if run_json is not False:
         (tmp_path / "triage" / "run.json").write_text(json.dumps(run_json))
-    step = agent_step("Collect installed package versions (failed run and last passing run)")
-    assert step["env"]["UPSTREAM_RUN_ATTEMPT"] == "${{ needs.context.outputs.attempt }}"
+    step = agent_step("Find the last passing run")
     env = {
         "PATH": f"{gh.parent}:{os.environ['PATH']}",
         "FAKE_GH_DIR": str(fake),
         "GH_TOKEN": "fake",
         "REPO": "meridianlabs-ai/actions",
         "UPSTREAM_RUN_ID": FAILED_RUN,
-        "UPSTREAM_RUN_ATTEMPT": attempt,
         "TESTS_WORKFLOW": step["env"]["TESTS_WORKFLOW"],
     }
     r = run_bash(step["run"], cwd=tmp_path, env=env)
@@ -268,155 +253,58 @@ def run_entry(run_id: str, created: str) -> dict:
     return {"databaseId": int(run_id), "createdAt": created}
 
 
-PASSING_PACKAGES = "MarkupSafe-3.0.3 agent-client-protocol-0.12.1 debugpy-1.8.21 inspect_ai-0.3.264.dev79+gba590d512 openai-3.14.0 tabulate-0.10.0"
-FAILING_PACKAGES = "MarkupSafe-3.0.3 agent-client-protocol-0.12.1 debugpy-1.8.22 inspect_ai-0.3.264.dev80+g44eb411ae openai-3.14.1 trustme-1.2.1"
-
-
-def test_collect_diffs_the_failed_run_against_the_last_passing_run(tmp_path):
-    # The success list holds a newer run that skipped an already-tested
-    # commit (green, no artifact, no install): it is passed over for the run
-    # before it that tested a commit. The diff names the package that moved
-    # (inspect_ai#499: openai 3.14.0 -> 3.14.1), one version per side, and
-    # `(absent)` for a package present on one side only.
-    versions, r = collect(
+def test_find_passing_run_takes_the_newest_tested_run_before_the_failed_one(tmp_path):
+    # The success list holds a run after the failed one, and a newer run that
+    # skipped an already-tested commit (green, no artifact): both are passed
+    # over for the run before them that tested a commit.
+    versions, _ = find_passing(
         tmp_path,
-        logs={
-            FAILED_RUN: install_log("static-analysis", FAILING_PACKAGES) + install_log("slow-tests (asyncio, 900)", FAILING_PACKAGES),
-            PASSING_RUN: install_log("slow-tests (asyncio, 900)", PASSING_PACKAGES),
-            "35020000000": "check-commit\tCheck if commit was already tested\t2026-09-15T21:00:00Z already tested\n",
-        },
         runs=[run_entry("35040000000", "2026-09-16T00:39:12Z"),   # after the failed run: not a candidate
               run_entry("35020000000", "2026-09-15T21:00:00Z"),
               run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
-        artifacts={PASSING_RUN: PASSING_SHA},
+        artifacts={"35040000000": "1498e287b930de9963f0793c1b649189d0b8ae2e", PASSING_RUN: PASSING_SHA},
     )
-    assert (versions / "failing.txt").read_text().count("Successfully installed") == 6
-    assert (versions / "passing.txt").read_text().startswith("slow-tests (asyncio, 900)\t")
     assert json.loads((versions / "passing-run.json").read_text()) == {
         "run_id": int(PASSING_RUN),
         "url": f"https://github.com/meridianlabs-ai/actions/actions/runs/{PASSING_RUN}",
         "created_at": "2026-09-15T20:13:53Z",
         "inspect_ai_sha": PASSING_SHA,
     }
-    assert (versions / "diff.txt").read_text().splitlines() == [
-        f"package\tpassing run {PASSING_RUN}\tfailing run {FAILED_RUN}",
-        "debugpy\t1.8.21\t1.8.22",
-        "inspect_ai\t0.3.264.dev79+gba590d512\t0.3.264.dev80+g44eb411ae",
-        "openai\t3.14.0\t3.14.1",
-        "tabulate\t0.10.0\t(absent)",
-        "trustme\t(absent)\t1.2.1",
-    ]
-    assert f"passing run {PASSING_RUN}: 5 package(s) differ" in r.stdout
     # Only the scheduled successes of the tests workflow from before the failed
     # run are asked for: the cutoff is in the query, so a re-triage of an old
     # failure is not crowded out of the page by newer successes.
     assert ("--workflow Inspect AI Scheduled Tests --event schedule --status success --created <2026-09-15T22:13:02Z"
             in (tmp_path / "fake-gh" / "list-calls.txt").read_text())
-    assert not (versions / "artifact").exists()
+    assert sorted(p.name for p in versions.iterdir()) == ["passing-run.json"]
 
 
-def test_collect_orders_candidates_itself_and_drops_a_malformed_sha(tmp_path):
+def test_find_passing_run_orders_candidates_itself_and_drops_a_malformed_sha(tmp_path):
     # The runs API has returned pages out of order: the newest passing run
     # wins whatever position it came in. A tested SHA that is not 40 hex is
     # reported as unknown, never as a value.
-    versions, _ = collect(
+    versions, _ = find_passing(
         tmp_path,
-        logs={FAILED_RUN: install_log("j", FAILING_PACKAGES),
-              "31276180738": install_log("j", "openai-2.53.0"),
-              PASSING_RUN: install_log("j", PASSING_PACKAGES)},
         runs=[run_entry("31276180738", "2026-08-08T20:08:41Z"), run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
         artifacts={"31276180738": "1498e287b930de9963f0793c1b649189d0b8ae2e", PASSING_RUN: "main\nexact=true"},
     )
     info = json.loads((versions / "passing-run.json").read_text())
     assert info["run_id"] == int(PASSING_RUN) and info["inspect_ai_sha"] == ""
-    assert "openai\t3.14.0\t3.14.1" in (versions / "diff.txt").read_text()
 
 
-def test_collect_keeps_every_version_when_a_runs_jobs_disagree(tmp_path):
-    # Blocking finding, review round 1: passing jobs on openai 3.9.9, the
-    # failing asyncio job on 3.10.0 and static-analysis still on 3.9.9 must
-    # not collapse to one version per package and read as "nothing differs".
-    versions, r = collect(
-        tmp_path,
-        logs={FAILED_RUN: install_log("static-analysis", "openai-3.9.9 anyio-4.15.1")
-                          + install_log("slow-tests (asyncio, 900)", "openai-3.10.0 anyio-4.15.1"),
-              PASSING_RUN: install_log("static-analysis", "openai-3.9.9 anyio-4.15.1")
-                           + install_log("slow-tests (asyncio, 900)", "openai-3.9.9 anyio-4.15.1")},
-        runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
-        artifacts={PASSING_RUN: PASSING_SHA},
-    )
-    assert (versions / "diff.txt").read_text().splitlines()[1:] == ["openai\t3.9.9\t3.10.0|3.9.9"]
-    assert "1 package(s) differ" in r.stdout
-
-
-def test_collect_without_a_passing_run_leaves_notes_not_a_diff(tmp_path):
-    versions, _ = collect(
-        tmp_path,
-        logs={FAILED_RUN: install_log("j", FAILING_PACKAGES), "35020000000": "skipped\n"},
-        runs=[run_entry("35020000000", "2026-09-15T21:00:00Z")],
-        artifacts={},
-    )
-    assert "Successfully installed" in (versions / "failing.txt").read_text()
-    assert (versions / "passing.txt").read_text() == "No passing scheduled run found before this one\n"
-    assert (versions / "diff.txt").read_text() == (versions / "passing.txt").read_text()
+@pytest.mark.parametrize("run_json", [None, False], ids=["no-tested-run", "no-run-json"])
+def test_find_passing_run_without_one_writes_an_empty_object(tmp_path, run_json):
+    # No candidate has the artifact, or run.json is missing (so no run is
+    # before the cutoff): the step does not fail the job and writes `{}`.
+    versions, r = find_passing(tmp_path, runs=[run_entry("35020000000", "2026-09-15T21:00:00Z")],
+                               artifacts={} if run_json is None else {"35020000000": PASSING_SHA}, run_json=run_json)
     assert json.loads((versions / "passing-run.json").read_text()) == {}
-
-
-def test_collect_against_a_locked_install_log_writes_notes_not_a_diff(tmp_path):
-    # The scheduled tests install with uv from inspect_ai's uv.lock, which
-    # writes no `Successfully installed` line. The step does not fail, the
-    # newest passing run is still the baseline with its tested SHA, and
-    # diff.txt says why it holds no diff.
-    uv_log = "".join(f"slow-tests (asyncio, 900)\tInstall Python dependencies\t2026-11-04T10:00:00Z {line}\n"
-                     for line in ("Installed 312 packages in 1.20s", " + openai==3.14.1", " + inspect-package==0.1"))
-    versions, r = collect(
-        tmp_path,
-        logs={FAILED_RUN: uv_log, PASSING_RUN: uv_log, "31276180738": install_log("j", PASSING_PACKAGES)},
-        runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z"), run_entry("31276180738", "2026-08-08T20:08:41Z")],
-        artifacts={PASSING_RUN: PASSING_SHA, "31276180738": "1498e287b930de9963f0793c1b649189d0b8ae2e"},
-    )
-    assert r.returncode == 0
-    assert (versions / "failing.txt").read_text() == f"No install log found for the failed run {FAILED_RUN}\n"
-    assert (versions / "passing.txt").read_text() == f"No install log found for the passing run {PASSING_RUN}\n"
-    info = json.loads((versions / "passing-run.json").read_text())
-    assert info["run_id"] == int(PASSING_RUN) and info["inspect_ai_sha"] == PASSING_SHA
-    assert (versions / "diff.txt").read_text() == "No install log for the failed run or the passing run, so no version diff\n"
-
-
-def test_collect_without_logs_or_run_json_still_writes_every_file(tmp_path):
-    # `gh` has nothing for either run and run.json is missing: the step does
-    # not fail the job, and each file the prompt names says why it is empty.
-    versions, r = collect(tmp_path, logs={}, runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
-                          artifacts={PASSING_RUN: PASSING_SHA}, run_json=False)
-    assert (versions / "failing.txt").read_text() == f"No install log found for the failed run {FAILED_RUN}\n"
-    assert (versions / "passing.txt").read_text().startswith("No passing scheduled run")
-    assert json.loads((versions / "passing-run.json").read_text()) == {}
-    assert r.returncode == 0
-
-
-def test_collect_reads_the_failed_run_at_the_triaged_attempt_and_passing_runs_at_their_latest(tmp_path):
-    # Review round 1, B2: the failed run gained a second attempt after the
-    # triage was queued. The install log of the attempt being triaged is the
-    # one diffed, not the latest attempt's; the passing baseline, a different
-    # run whose latest attempt is the one that passed, is read unqualified.
-    logs = {
-        f"{FAILED_RUN}.attempt1.log": install_log("slow-tests (asyncio, 900)", "openai-3.14.1 anyio-4.15.1"),
-        f"{FAILED_RUN}.attempt2.log": install_log("slow-tests (asyncio, 900)", "openai-3.15.0 anyio-4.16.0"),
-        PASSING_RUN: install_log("slow-tests (asyncio, 900)", "openai-3.14.0 anyio-4.15.1"),
-    }
-    for attempt, expected in (("1", "openai\t3.14.0\t3.14.1"), ("2", "openai\t3.14.0\t3.15.0")):
-        versions, _ = collect(tmp_path / attempt, logs=logs, runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
-                              artifacts={PASSING_RUN: PASSING_SHA}, attempt=attempt)
-        assert (versions / "diff.txt").read_text().splitlines()[1:] == (["anyio\t4.15.1\t4.16.0"] if attempt == "2" else []) + [expected]
-        views = (tmp_path / attempt / "fake-gh" / "view-calls.txt").read_text().splitlines()
-        assert [v for v in views if v.startswith(f"run view {FAILED_RUN} ")] == [f"run view {FAILED_RUN} --repo meridianlabs-ai/actions --attempt {attempt} --log"]
-        assert [v for v in views if v.startswith(f"run view {PASSING_RUN} ")] == [f"run view {PASSING_RUN} --repo meridianlabs-ai/actions --log"]
+    assert "No passing scheduled run found before this one" in r.stdout
 
 
 # --- Resolve the upstream run attempt, and the reads that take it -----------
 #
 # Review round 1, B2: every read of the upstream run (failed log, run
-# metadata, the failing run's install log, the trusted context) is of one
+# metadata, the trusted context) is of one
 # attempt, resolved once: the event's, or the run's latest for a dispatch.
 
 
@@ -487,13 +375,13 @@ def test_the_failed_log_and_run_metadata_are_read_at_the_resolved_attempt(tmp_pa
 
 def test_every_read_of_the_upstream_run_takes_the_resolved_attempt():
     # The context job resolves the attempt and reads the context at it; the
-    # agent job reads the logs and packages at the attempt context reports.
+    # agent job reads the logs at the attempt context reports.
     wf = load_workflow()
     names = [s.get("name") for s in wf["jobs"]["context"]["steps"]]
     assert names.index("Resolve the upstream run attempt") < names.index("Resolve the trusted triage context")
     assert wf["jobs"]["context"]["outputs"]["attempt"] == "${{ steps.attempt.outputs.attempt }}"
     readers = {"context": ["Resolve the trusted triage context"],
-               "agent": ["Download failed logs from upstream run", "Collect installed package versions (failed run and last passing run)"]}
+               "agent": ["Download failed logs from upstream run"]}
     expected = {"context": "${{ steps.attempt.outputs.attempt }}", "agent": "${{ needs.context.outputs.attempt }}"}
     # Run-level reads, where the attempt does not matter: the run's event and
     # head (the same for every attempt), and the attempt itself.
@@ -1199,7 +1087,7 @@ AGENT_STEPS = [
     "Harden runner",
     "Checkout inspect_ai at tested commit",
     "Download failed logs from upstream run",
-    "Collect installed package versions (failed run and last passing run)",
+    "Find the last passing run",
     "Record the checked-out SHA",
     "Create agent user",
     "Create the scratch directory",

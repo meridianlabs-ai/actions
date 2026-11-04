@@ -181,11 +181,11 @@ jobs:
       # attempt, resolved here once: the attempt whose completion fired this
       # run, or, for a dispatch that names a run, its latest. A triage that
       # starts late or is re-run after the upstream run gained another
-      # attempt would otherwise read attempt 2's failures and installed
-      # packages (unqualified `gh run view` serves the latest attempt) beside
-      # attempt 1's tested SHA and Slack thread. The failed log, the run metadata, the failing run's install
-      # log and the trusted context all take this value; the passing baseline
-      # is a different run, selected on its own.
+      # attempt would otherwise read attempt 2's failures (unqualified
+      # `gh run view` serves the latest attempt) beside attempt 1's tested
+      # SHA and Slack thread. The failed log, the run metadata and the
+      # trusted context all take this value; the passing baseline is a
+      # different run, selected on its own.
       - name: Resolve the upstream run attempt
         id: attempt
         env:
@@ -451,42 +451,18 @@ jobs:
       # commit range. This step finds the last scheduled run before the failed
       # one that passed and tested a commit (a run that skipped an
       # already-tested commit is green with no `last-inspect-ai-sha`), and
-      # records that run's tested inspect_ai SHA. It also reads pip's
-      # `Successfully installed ...` lines from the full log of both runs
-      # (`--log-failed` holds only the failed steps) and diffs the two package
-      # sets, so the agent reads a table rather than two 300-package lines. A
-      # uv install writes no such line; the files then say that there is no
-      # install log. Log
-      # text is data: grepped and written to files, never evaluated; the SHA
-      # is kept only when it is 40 hex.
-      - name: Collect installed package versions (failed run and last passing run)
+      # records that run's tested inspect_ai SHA in passing-run.json (`{}`
+      # when there is none). The SHA is kept only when it is 40 hex.
+      - name: Find the last passing run
         if: needs.context.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TESTS_WORKFLOW: Inspect AI Scheduled Tests
-          # The failed run is read at the attempt being triaged; a passing
-          # run's latest attempt is the one that passed.
-          UPSTREAM_RUN_ATTEMPT: ${{ needs.context.outputs.attempt }}
         run: |
           set -uo pipefail
-          export LC_ALL=C
           dir=triage/versions
           mkdir -p "$dir"
-          # The `Successfully installed ...` lines of a run's full log (job name
-          # first), into $2; further arguments go to `gh run view` (`--attempt N`).
-          installed() {
-            local run=$1 out=$2
-            shift 2
-            gh run view "$run" --repo "$REPO" "$@" --log 2>/dev/null | grep -F "Successfully installed" > "$out" || true
-            [ -s "$out" ]
-          }
-          # name<TAB>version per package named on those lines (the version follows the last `-`).
-          packages() {
-            sed 's/.*Successfully installed //' "$1" | tr ' ' '\n' | sed -E 's/^(.+)-([^-]+)$/\1\t\2/' | sort -u
-          }
-          installed "$UPSTREAM_RUN_ID" "$dir/failing.txt" --attempt "$UPSTREAM_RUN_ATTEMPT" \
-            || echo "No install log found for the failed run $UPSTREAM_RUN_ID" > "$dir/failing.txt"
           created=$(jq -r 'if type == "object" and (.createdAt | type) == "string" then .createdAt else "" end' triage/run.json 2>/dev/null || true)
           passing=""; passing_at=""; passing_sha=""
           # Only runs before the failed one (`--created` puts the cutoff in the query,
@@ -501,7 +477,6 @@ jobs:
             [ -n "$id" ] || continue
             rm -rf "$dir/artifact"
             gh run download "$id" --repo "$REPO" --name last-inspect-ai-sha --dir "$dir/artifact" 2>/dev/null || continue
-            installed "$id" "$dir/passing.txt" || echo "No install log found for the passing run $id" > "$dir/passing.txt"
             passing="$id"; passing_at="$at"
             sha=$(tr -d '[:space:]' < "$dir/artifact/last_sha.txt" 2>/dev/null || true)
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && passing_sha="$sha"
@@ -512,22 +487,8 @@ jobs:
             jq -n --arg id "$passing" --arg at "$passing_at" --arg repo "$REPO" --arg sha "$passing_sha" \
               '{run_id: ($id | tonumber), url: "https://github.com/\($repo)/actions/runs/\($id)", created_at: $at, inspect_ai_sha: $sha}' \
               > "$dir/passing-run.json"
-            if grep -qF "Successfully installed" "$dir/failing.txt" && grep -qF "Successfully installed" "$dir/passing.txt"; then
-              {
-                printf 'package\tpassing run %s\tfailing run %s\n' "$passing" "$UPSTREAM_RUN_ID"
-                # Every distinct version a run installed is kept: jobs that disagree
-                # show as `a|b`, never as whichever job happened to sort last.
-                awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = ($1 in p) ? p[$1] "|" $2 : $2; next } { f[$1] = ($1 in f) ? f[$1] "|" $2 : $2 }
-                  END { for (k in p) if (!(k in f)) print k "\t" p[k] "\t(absent)"
-                        for (k in f) if (!(k in p)) print k "\t(absent)\t" f[k]; else if (p[k] != f[k]) print k "\t" p[k] "\t" f[k] }' \
-                  <(packages "$dir/passing.txt") <(packages "$dir/failing.txt") | sort
-              } > "$dir/diff.txt"
-              echo "Installed-version diff against passing run $passing: $(($(wc -l < "$dir/diff.txt") - 1)) package(s) differ"
-            else
-              echo "No install log for the failed run or the passing run, so no version diff" > "$dir/diff.txt"
-            fi
           else
-            echo "No passing scheduled run found before this one" | tee "$dir/passing.txt" > "$dir/diff.txt"
+            echo "No passing scheduled run found before this one"
             echo '{}' > "$dir/passing-run.json"
           fi
 
@@ -708,19 +669,9 @@ jobs:
             PRs. The workflow wrote `triage/` into it; `triage/` is not part of inspect_ai.
             - `triage/failed.log` — output of failed pytest steps (may be truncated to last 2MB)
             - `triage/run.json` — metadata for the failed GitHub Actions run
-            - `triage/versions/failing.txt` — the `Successfully installed ...` lines from
-              the failed run's install steps (one per job; the job name comes first)
-            - `triage/versions/passing.txt` and `triage/versions/passing-run.json` — the
-              same lines from the last scheduled run before this one that passed, and
-              that run's id, URL, `created_at` and tested inspect_ai SHA (`inspect_ai_sha`,
-              empty when unknown; `{}` and a one-line note when no passing run was found)
-            - A locked (uv) install writes no such lines; these files then hold a
-              one-line note that there is no install log
-            - `triage/versions/diff.txt` — the packages whose installed version differs
-              between those two runs (tab-separated: package, passing run, failing run;
-              `(absent)` when a package is in only one; `a|b` when a run's jobs
-              installed different versions — then read `failing.txt` for the failed
-              job's own line), or a one-line note when a side is missing
+            - `triage/versions/passing-run.json` — the id, URL, `created_at` and tested
+              inspect_ai SHA (`inspect_ai_sha`, empty when unknown) of the last scheduled
+              run before this one that passed; `{}` when no passing run was found
 
             Upstream run: ${{ env.UPSTREAM_RUN_URL }}
             inspect_ai checkout: ${{ steps.base.outputs.sha }}
@@ -853,7 +804,7 @@ jobs:
             ## DEPENDENCY_CHANGES — did a `uv.lock` change land, not an inspect_ai code change?
             The tested job installs the versions in inspect_ai's `uv.lock` at the tested
             commit, so a dependency change shows as a `uv.lock` change in the inspect_ai
-            commit range (step 3). A failure that appears with no relevant
+            commit range (step 2). A failure that appears with no relevant
             inspect_ai code change is therefore often a dependency bump in `uv.lock`.
             Under the old unlocked install, inspect_ai#499 spent five comments on a correct
             mechanism analysis and never noticed that the only difference between the
@@ -864,11 +815,7 @@ jobs:
             1. From the traceback in `triage/failed.log`, list the third-party packages
                implicated (every non-inspect_ai module in the stack, plus the package
                whose exception type or API is involved).
-            2. For each implicated package, find the version in `uv.lock` at the
-               tested commit — for example
-                 grep -n -A1 '^name = "openai"$' uv.lock
-               (the `version = "..."` line follows).
-            3. Read `triage/versions/passing-run.json` for the last passing scheduled
+            2. Read `triage/versions/passing-run.json` for the last passing scheduled
                run's id, URL, time and tested inspect_ai SHA. When the SHA is set,
                  git log --oneline <inspect_ai_sha>..${{ steps.base.outputs.sha }}
                shows what changed in inspect_ai between the two runs (nothing, or
@@ -880,8 +827,7 @@ jobs:
                read the recent `uv.lock` history of the same packages instead, for
                example
                  git log -p -5 ${{ steps.base.outputs.sha }} -- uv.lock | grep -A3 '^[-+ ]name = "openai"$'
-               `failing.txt` and `diff.txt` hold no install log for a locked run.
-            4. For every implicated package whose `uv.lock` version changed, check its
+            3. For every implicated package whose `uv.lock` version changed, check its
                release notes for a plausible trigger before blaming inspect_ai:
                `gh api repos/<owner>/<repo>/releases?per_page=10` on the package's
                GitHub repository (for example `openai/openai-python`), and

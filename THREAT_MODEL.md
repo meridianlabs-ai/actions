@@ -41,7 +41,7 @@ guarantee, and what is by design. To report a vulnerability, see
   upstream `main` with `exact=false`. Triage resolves the attempt once,
   before it reads anything: the attempt whose completion fired it, or the
   latest attempt of the run a dispatcher selects. The failed log, the run
-  metadata, the failing run's install log and the context are all read at
+  metadata and the context are all read at
   that attempt, so a triage that runs after the upstream run gained another
   attempt does not pair one attempt's failures with another's tested SHA
   and thread. The `report` job is only as trusted as the workflow file its
