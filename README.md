@@ -65,7 +65,7 @@ A GitHub Actions workflow that runs [inspect_ai](https://github.com/UKGovernment
 - **Purpose**: Execute slow tests (`--runslow`) that are excluded from regular CI
 
 **Features:**
-- Daily scheduled execution at 2 AM UTC
+- Every 2 hours, slow tests run if inspect_ai main has a commit that has not passed a scheduled run
 - Manual trigger capability
 - 60-minute timeout for long-running tests
 - Proper error handling and reporting
