@@ -2,7 +2,7 @@
   {
     "name": "accepted",
     "color": "0E8A16",
-    "description": "Issues: maintainer-approved for external PR — the gate key"
+    "description": "Issues: maintainer-approved for external PR"
   },
   {
     "name": "deferred",
