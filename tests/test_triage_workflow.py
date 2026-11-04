@@ -1036,6 +1036,8 @@ def decision(command: str) -> str:
         "git blame -L 10,20 src/inspect_ai/model/_openai.py",
         "grep -n 'FAILED' triage/failed.log",
         "grep -n -A1 '^name = \"openai\"$' uv.lock",
+        f"git log -p {SHA}..origin/main -- uv.lock | grep -A3 '^[-+ ]name = \"openai\"$'",
+        "git log -p -5 origin/main -- uv.lock | grep -A3 '^[-+ ]name = \"openai\"$'",
     ],
 )
 def test_reads_the_triage_needs_are_allowed(command):

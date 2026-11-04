@@ -853,9 +853,7 @@ jobs:
             ## DEPENDENCY_CHANGES — did a `uv.lock` change land, not an inspect_ai code change?
             The tested job installs the versions in inspect_ai's `uv.lock` at the tested
             commit, so a dependency change shows as a `uv.lock` change in the inspect_ai
-            commit range:
-              git log -p <inspect_ai_sha>..${{ steps.base.outputs.sha }} -- uv.lock
-            (`<inspect_ai_sha>` from step 3). A failure that appears with no relevant
+            commit range (step 3). A failure that appears with no relevant
             inspect_ai code change is therefore often a dependency bump in `uv.lock`.
             Under the old unlocked install, inspect_ai#499 spent five comments on a correct
             mechanism analysis and never noticed that the only difference between the
@@ -874,11 +872,14 @@ jobs:
                run's id, URL, time and tested inspect_ai SHA. When the SHA is set,
                  git log --oneline <inspect_ai_sha>..${{ steps.base.outputs.sha }}
                shows what changed in inspect_ai between the two runs (nothing, or
-               nothing near the failure, points at a dependency), and
-                 git log -p <inspect_ai_sha>..${{ steps.base.outputs.sha }} -- uv.lock
-               shows each locked version that changed. When the SHA is empty, read
-               the recent `uv.lock` history instead, for example
-                 git log -p -5 ${{ steps.base.outputs.sha }} -- uv.lock
+               nothing near the failure, points at a dependency). The `uv.lock` patch
+               of many days can be very large: read only the implicated packages, for
+               example
+                 git log -p <inspect_ai_sha>..${{ steps.base.outputs.sha }} -- uv.lock | grep -A3 '^[-+ ]name = "openai"$'
+               shows each change to the locked openai version. When the SHA is empty,
+               read the recent `uv.lock` history of the same packages instead, for
+               example
+                 git log -p -5 ${{ steps.base.outputs.sha }} -- uv.lock | grep -A3 '^[-+ ]name = "openai"$'
                `failing.txt` and `diff.txt` hold no install log for a locked run.
             4. For every implicated package whose `uv.lock` version changed, check its
                release notes for a plausible trigger before blaming inspect_ai:
