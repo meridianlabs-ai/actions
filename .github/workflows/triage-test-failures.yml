@@ -827,6 +827,10 @@ jobs:
                read the recent `uv.lock` history of the same packages instead, for
                example
                  git log -p -5 ${{ steps.base.outputs.sha }} -- uv.lock | grep -A3 '^[-+ ]name = "openai"$'
+               Read the version of each implicated package at the tested commit from
+               `uv.lock`, for example
+                 grep -n -A1 '^name = "openai"$' uv.lock
+               (the `version = "..."` line follows).
             3. For every implicated package whose `uv.lock` version changed, check its
                release notes for a plausible trigger before blaming inspect_ai:
                `gh api repos/<owner>/<repo>/releases?per_page=10` on the package's
