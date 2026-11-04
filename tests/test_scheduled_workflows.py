@@ -158,8 +158,8 @@ printf '%s\\n' "$@" > "$FAKE_PYTEST_ARGV"
 """
 
 FAKE_UV = """#!/usr/bin/env bash
-# Run the tool of `uv run --locked <tool> ...`; any other call fails.
-[ "$1 $2" = "run --locked" ] || { echo "unexpected uv call: $*" >&2; exit 2; }
+# Run the tool of `uv run --no-sync <tool> ...`; any other call fails.
+[ "$1 $2" = "run --no-sync" ] || { echo "unexpected uv call: $*" >&2; exit 2; }
 shift 2
 exec "$@"
 """
@@ -218,17 +218,17 @@ printf '%s:%s %s\\n' "$PWD" "${0##*/}" "$*" >> "$LINT_CALLS"
             r = run_bash(s["run"], cwd=checkout / s.get("working-directory", "."), env=env)
             assert r.returncode == 0, r.stderr
     assert calls.read_text().splitlines() == [
-        f"{checkout}:uv run --locked ruff check",
-        f"{checkout}:uv run --locked ruff format --check",
-        f"{checkout}:uv run --locked mypy --exclude tests/test_package src tests",
+        f"{checkout}:uv run --no-sync ruff check",
+        f"{checkout}:uv run --no-sync ruff format --check",
+        f"{checkout}:uv run --no-sync mypy --exclude tests/test_package src tests",
     ]
 
 
 # --- Locked install -----------------------------------------------------------------
 #
 # Both jobs install inspect_ai's uv.lock at the tested commit through
-# install-python-dependencies and run every tool with `uv run --locked`, so no
-# step resolves, upgrades or relocks. The canaries run the unlocked versions.
+# install-python-dependencies and run every tool with `uv run --no-sync`, so no
+# step resolves, upgrades, relocks or syncs again. The canaries run the unlocked versions.
 
 INSTALL = "meridianlabs-ai/actions/install-python-dependencies@"
 TOOLS = ("pytest", "ruff", "mypy")
@@ -255,13 +255,13 @@ def test_no_run_step_resolves_upgrades_or_relocks(job):
 
 
 @pytest.mark.parametrize("job", ["slow-tests", "static-analysis"])
-def test_every_tool_runs_through_uv_run_locked(job):
+def test_every_tool_runs_through_uv_run_no_sync(job):
     tools = "|".join(TOOLS)
     calls = [line.strip() for s in steps(SCHEDULED, job) for line in (s.get("run") or "").splitlines()
              if re.search(rf"\b({tools})\b", line)]
     assert calls, job
     for call in calls:
-        assert re.match(rf"uv run --locked ({tools})\b", call), (job, call)
+        assert re.match(rf"uv run --no-sync ({tools})\b", call), (job, call)
 
 
 # --- The last-inspect-ai-sha artifact ---------------------------------------------------

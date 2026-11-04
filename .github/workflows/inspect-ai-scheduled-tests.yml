@@ -6,7 +6,7 @@
 # slow-tests and static-analysis execute code this repository does not
 # control: install-python-dependencies installs upstream's dev closure from
 # inspect_ai's uv.lock at the tested commit (`versions: locked`), and pytest,
-# ruff and mypy then run it with `uv run --locked` together with upstream's
+# ruff and mypy then run it with `uv run --no-sync` together with upstream's
 # tests. The canaries (meridianlabs-ai/canaries) run the unlocked, latest
 # dependencies.
 # THREAT_MODEL.md names that code as an adversary that can take over its
@@ -347,7 +347,9 @@ jobs:
           # parallelism cuts wall-clock dramatically. -n logical (not auto):
           # with psutil installed, auto counts physical cores — 4 on this
           # hyperthreaded 8-vCPU runner — while logical uses all 8.
-          uv run --locked pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread "${extra_args[@]}"
+          # The locked install above, then `uv run --no-sync` here, syncs
+          # the project environment once.
+          uv run --no-sync pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread "${extra_args[@]}"
 
       - name: Cleanup Docker resources
         if: always()
@@ -399,11 +401,11 @@ jobs:
 
       - name: Run ruff
         run: |
-          uv run --locked ruff check
-          uv run --locked ruff format --check
+          uv run --no-sync ruff check
+          uv run --no-sync ruff format --check
 
       - name: Run mypy
-        run: uv run --locked mypy --exclude tests/test_package src tests
+        run: uv run --no-sync mypy --exclude tests/test_package src tests
 
   # Once-per-run bookkeeping: record the tested SHA (so later scheduled runs
   # skip it) and post the Slack notification. Runs after both matrix legs
