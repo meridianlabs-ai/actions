@@ -4,11 +4,11 @@
 # consumers.
 #
 # slow-tests and static-analysis execute code this repository does not
-# control: `pip install -e ".[dev]"` resolves upstream's whole dev closure
-# against PyPI on the day (no lock file, on purpose: the point of the run is
-# the frontier resolution a new user would get), a TEMPORARY step installs
-# inspect_sentinel from GitHub at the SHA (or `main`) upstream's build.yml
-# pins, and pytest and mypy then import it together with upstream's tests.
+# control: install-python-dependencies installs upstream's dev closure from
+# inspect_ai's uv.lock at the tested commit (`versions: locked`), and pytest,
+# ruff and mypy then run it with `uv run --no-sync` together with upstream's
+# tests. The canaries (meridianlabs-ai/canaries) run the unlocked, latest
+# dependencies.
 # THREAT_MODEL.md names that code as an adversary that can take over its
 # job's runner and read what is there (the provider keys). What these jobs
 # must not have is anything that reaches beyond that one job:
@@ -25,7 +25,8 @@
 #   would outlive the offending release and a key rotation. The workflow-level
 #   `cache-mode: read` makes every job's token refuse a save, so the closure
 #   cannot write one with the token Runner.Worker holds; no step restores one
-#   either. Every job installs fresh; setup-python has no `cache:` input here.
+#   either. Every job installs fresh: install-python-dependencies has
+#   `actions-cache: none`.
 # - The two artifacts (`last-inspect-ai-sha`, `triage-context`) are uploaded
 #   by the report job, which runs only after those jobs have finished. Their
 #   names are claimable by any job of the run attempt (a re-run is a new
@@ -43,7 +44,7 @@ name: Inspect AI Scheduled Tests
 
 "on":
   schedule:
-    # Run every 2 hours
+    # Every 2 hours; check-commit skips the tests if inspect_ai main has no commit since the last successful run
     - cron: "0 */2 * * *"
   # A push runs the suite only when this workflow file itself changes, on any
   # branch: the development cycle for this workflow keeps its per-push checks,
@@ -297,50 +298,18 @@ jobs:
       - name: Create local main ref for inspect_ai install-state check
         run: git branch -f main "$(git merge-base HEAD origin/main)"
 
-      # No pip cache (`cache:` on setup-python, actions/cache on ~/.cache/pip
-      # or its wheels directory): see the header. The install below is a
-      # fresh resolution on a fresh runner every time.
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      # No Actions cache (`actions-cache: none`): see the header. The project
+      # installs editable, so the tests find media files that are not part of
+      # the package. The test fixture extension package is installed here so
+      # inspect_ai's ensure_test_package_installed() short-circuits instead of
+      # installing it mid-run on the xdist critical path (~9s).
+      - name: Install Python dependencies
+        uses: meridianlabs-ai/actions/install-python-dependencies@62bc8360498822ef3eab7c9584d1bd523de3febf # self, re-pin after each change
         with:
+          versions: locked
           python-version: "3.11"
-
-      - name: Install dependencies
-        # -e is required so that the tests can find dependent media files
-        # that are not part of the package.
-        run: |
-          python -m pip install --upgrade pip
-          # Install inspect_ai with development dependencies for testing
-          pip install --only-binary=all -e ".[dev]"
-          pip install pytest-timeout
-          # Pre-install the test fixture extension package so inspect_ai's
-          # ensure_test_package_installed() short-circuits instead of
-          # pip-installing it mid-run on the xdist critical path (~9s).
-          pip install --no-deps ./tests/test_package
-
-      # TEMPORARY, like the step it copies in upstream's build.yml: until
-      # inspect_sentinel is on PyPI and in inspect_ai's dev requirements,
-      # mypy and the sentinel tests need it installed separately. The pin is read
-      # from that step's body in build.yml at the tested commit, so it
-      # follows upstream. The ref must be a 40-hex SHA or exactly `main`.
-      # When upstream drops its step and the dev install provides the
-      # package, this step says so and can be removed.
-      - name: Install inspect_sentinel (TEMPORARY)
-        run: |
-          build=.github/workflows/build.yml
-          specs=$(awk '/^[[:space:]]*- / { f = 0 } /^[[:space:]]*- name: Install inspect_sentinel \(TEMPORARY\)[[:space:]]*$/ { f = 1; next } f' "$build" \
-            | grep -oE '"inspect_sentinel @ git\+https://github\.com/meridianlabs-ai/inspect_sentinel@([0-9a-f]{40}|main)"' | tr -d '"' | sort -u || true)
-          if [ -n "$specs" ] && [[ "$specs" != *$'\n'* ]]; then
-            pip install --no-deps "$specs"
-          elif [ -z "$specs" ] && [ ! -d src/inspect_ai/_sentinel ]; then
-            echo "::notice::This inspect_ai commit predates inspect_sentinel; nothing to install."
-          elif [ -z "$specs" ] && pip show inspect_sentinel > /dev/null 2>&1; then
-            echo "::notice::No inspect_sentinel pin in an 'Install inspect_sentinel (TEMPORARY)' step of $build, and the dev install provides the package; if upstream dropped its step, remove this one."
-          else
-            found=${specs//$'\n'/; }
-            echo "::error::Expected one inspect_sentinel git pin in the 'Install inspect_sentinel (TEMPORARY)' steps of $build, found: ${found:-none} (step renamed or removed, or pin not in the expected form?)"
-            exit 1
-          fi
+          actions-cache: none
+          also-install-without-deps: ./tests/test_package
 
       - name: Run slow tests (${{ matrix.mode }})
         timeout-minutes: 180
@@ -378,7 +347,9 @@ jobs:
           # parallelism cuts wall-clock dramatically. -n logical (not auto):
           # with psutil installed, auto counts physical cores — 4 on this
           # hyperthreaded 8-vCPU runner — while logical uses all 8.
-          pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread "${extra_args[@]}"
+          # The locked install above, then `uv run --no-sync` here, syncs
+          # the project environment once.
+          uv run --no-sync pytest ${{ matrix.pytest_flags }} --runslow --runapi --ignore=tests/agent/test_agent_human.py -k "not test_mcp_sampling_fn" -n logical --timeout=${{ matrix.test_timeout }} --timeout-method=thread "${extra_args[@]}"
 
       - name: Cleanup Docker resources
         if: always()
@@ -387,13 +358,9 @@ jobs:
           docker volume prune -f
 
   # Static analysis (the CI-safe equivalent of inspect_ai's `make check`)
-  # against a fresh dependency resolution. inspect_ai's own CI gates run
-  # mypy/ruff via `uv run`, which syncs the env against uv.lock — so upstream
-  # static analysis only ever validates the locked dependency versions. This
-  # job installs with plain pip (the frontier resolution a new user would
-  # get), where newer deps can break mypy — it reads installed packages'
-  # types/stubs — in ways the locked gate never sees. Separate job rather
-  # than a step in the asyncio/trio matrix so it runs once, not twice.
+  # with the dependency versions in inspect_ai's uv.lock at the tested
+  # commit. Separate job rather than a step in the asyncio/trio matrix so it
+  # runs once, not twice.
   # Mirrors inspect_ai's `make check` recipe, which mutates (`ruff check
   # --fix` auto-fixes, `ruff format` rewrites), swapped for the check-only
   # equivalents. If that recipe changes upstream, this job drifts; accepted
@@ -422,44 +389,23 @@ jobs:
           # its .git/config (setuptools_scm reads local tags).
           persist-credentials: false
 
-      # No pip cache here either (see the header): this job runs the closure
-      # under mypy, and a cache it saved afterwards would be restored by
-      # slow-tests, which holds the provider keys.
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      # No Actions cache here either (see the header): this job runs the
+      # closure under mypy, and a cache it saved afterwards would be restored
+      # by slow-tests, which holds the provider keys.
+      - name: Install Python dependencies
+        uses: meridianlabs-ai/actions/install-python-dependencies@62bc8360498822ef3eab7c9584d1bd523de3febf # self, re-pin after each change
         with:
+          versions: locked
           python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install --only-binary=all -e ".[dev]"
-
-      # Same step as in slow-tests; see the comment there.
-      - name: Install inspect_sentinel (TEMPORARY)
-        run: |
-          build=.github/workflows/build.yml
-          specs=$(awk '/^[[:space:]]*- / { f = 0 } /^[[:space:]]*- name: Install inspect_sentinel \(TEMPORARY\)[[:space:]]*$/ { f = 1; next } f' "$build" \
-            | grep -oE '"inspect_sentinel @ git\+https://github\.com/meridianlabs-ai/inspect_sentinel@([0-9a-f]{40}|main)"' | tr -d '"' | sort -u || true)
-          if [ -n "$specs" ] && [[ "$specs" != *$'\n'* ]]; then
-            pip install --no-deps "$specs"
-          elif [ -z "$specs" ] && [ ! -d src/inspect_ai/_sentinel ]; then
-            echo "::notice::This inspect_ai commit predates inspect_sentinel; nothing to install."
-          elif [ -z "$specs" ] && pip show inspect_sentinel > /dev/null 2>&1; then
-            echo "::notice::No inspect_sentinel pin in an 'Install inspect_sentinel (TEMPORARY)' step of $build, and the dev install provides the package; if upstream dropped its step, remove this one."
-          else
-            found=${specs//$'\n'/; }
-            echo "::error::Expected one inspect_sentinel git pin in the 'Install inspect_sentinel (TEMPORARY)' steps of $build, found: ${found:-none} (step renamed or removed, or pin not in the expected form?)"
-            exit 1
-          fi
+          actions-cache: none
 
       - name: Run ruff
         run: |
-          ruff check
-          ruff format --check
+          uv run --no-sync ruff check
+          uv run --no-sync ruff format --check
 
       - name: Run mypy
-        run: mypy --exclude tests/test_package src tests
+        run: uv run --no-sync mypy --exclude tests/test_package src tests
 
   # Once-per-run bookkeeping: record the tested SHA (so later scheduled runs
   # skip it) and post the Slack notification. Runs after both matrix legs

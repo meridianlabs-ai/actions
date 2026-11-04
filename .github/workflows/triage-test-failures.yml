@@ -181,11 +181,11 @@ jobs:
       # attempt, resolved here once: the attempt whose completion fired this
       # run, or, for a dispatch that names a run, its latest. A triage that
       # starts late or is re-run after the upstream run gained another
-      # attempt would otherwise read attempt 2's failures and installed
-      # packages (unqualified `gh run view` serves the latest attempt) beside
-      # attempt 1's tested SHA and Slack thread. The failed log, the run metadata, the failing run's install
-      # log and the trusted context all take this value; the passing baseline
-      # is a different run, selected on its own.
+      # attempt would otherwise read attempt 2's failures (unqualified
+      # `gh run view` serves the latest attempt) beside attempt 1's tested
+      # SHA and Slack thread. The failed log, the run metadata and the
+      # trusted context all take this value; the passing baseline is a
+      # different run, selected on its own.
       - name: Resolve the upstream run attempt
         id: attempt
         env:
@@ -446,47 +446,23 @@ jobs:
             fi
           fi
 
-      # Dependency versions float in the scheduled tests (`pip install -e
-      # ".[dev]"` resolves against PyPI on the day, not inspect_ai's uv.lock),
-      # so a failure with no relevant inspect_ai commit is often a package
-      # release (inspect_ai#499: openai 3.14.0 -> 3.14.1). `--log-failed`
-      # holds only the failed steps, so the install step's `Successfully
-      # installed ...` line is not in failed.log: take it from the full log of
-      # the failed run and of the last scheduled run before it that passed and
-      # installed (a run that skipped an already-tested commit is green with
-      # no install; a real pass uploads `last-inspect-ai-sha`), record that
-      # run's tested inspect_ai SHA, and diff the two package sets so the
-      # agent reads a table rather than comparing two 300-package lines. Log
-      # text is data: grepped and written to files, never evaluated; the SHA
-      # is kept only when it is 40 hex.
-      - name: Collect installed package versions (failed run and last passing run)
+      # The scheduled tests install from inspect_ai's uv.lock at the tested
+      # commit, so a dependency change is a uv.lock change in the inspect_ai
+      # commit range. This step finds the last scheduled run before the failed
+      # one that passed and tested a commit (a run that skipped an
+      # already-tested commit is green with no `last-inspect-ai-sha`), and
+      # records that run's tested inspect_ai SHA in passing-run.json (`{}`
+      # when there is none). The SHA is kept only when it is 40 hex.
+      - name: Find the last passing run
         if: needs.context.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TESTS_WORKFLOW: Inspect AI Scheduled Tests
-          # The failed run is read at the attempt being triaged; a passing
-          # run's latest attempt is the one that passed.
-          UPSTREAM_RUN_ATTEMPT: ${{ needs.context.outputs.attempt }}
         run: |
           set -uo pipefail
-          export LC_ALL=C
           dir=triage/versions
           mkdir -p "$dir"
-          # The `Successfully installed ...` lines of a run's full log (job name
-          # first), into $2; further arguments go to `gh run view` (`--attempt N`).
-          installed() {
-            local run=$1 out=$2
-            shift 2
-            gh run view "$run" --repo "$REPO" "$@" --log 2>/dev/null | grep -F "Successfully installed" > "$out" || true
-            [ -s "$out" ]
-          }
-          # name<TAB>version per package named on those lines (the version follows the last `-`).
-          packages() {
-            sed 's/.*Successfully installed //' "$1" | tr ' ' '\n' | sed -E 's/^(.+)-([^-]+)$/\1\t\2/' | sort -u
-          }
-          installed "$UPSTREAM_RUN_ID" "$dir/failing.txt" --attempt "$UPSTREAM_RUN_ATTEMPT" \
-            || echo "No install log found for the failed run $UPSTREAM_RUN_ID" > "$dir/failing.txt"
           created=$(jq -r 'if type == "object" and (.createdAt | type) == "string" then .createdAt else "" end' triage/run.json 2>/dev/null || true)
           passing=""; passing_at=""; passing_sha=""
           # Only runs before the failed one (`--created` puts the cutoff in the query,
@@ -501,7 +477,6 @@ jobs:
             [ -n "$id" ] || continue
             rm -rf "$dir/artifact"
             gh run download "$id" --repo "$REPO" --name last-inspect-ai-sha --dir "$dir/artifact" 2>/dev/null || continue
-            installed "$id" "$dir/passing.txt" || continue
             passing="$id"; passing_at="$at"
             sha=$(tr -d '[:space:]' < "$dir/artifact/last_sha.txt" 2>/dev/null || true)
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && passing_sha="$sha"
@@ -512,22 +487,8 @@ jobs:
             jq -n --arg id "$passing" --arg at "$passing_at" --arg repo "$REPO" --arg sha "$passing_sha" \
               '{run_id: ($id | tonumber), url: "https://github.com/\($repo)/actions/runs/\($id)", created_at: $at, inspect_ai_sha: $sha}' \
               > "$dir/passing-run.json"
-            if grep -qF "Successfully installed" "$dir/failing.txt"; then
-              {
-                printf 'package\tpassing run %s\tfailing run %s\n' "$passing" "$UPSTREAM_RUN_ID"
-                # Every distinct version a run installed is kept: jobs that disagree
-                # show as `a|b`, never as whichever job happened to sort last.
-                awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = ($1 in p) ? p[$1] "|" $2 : $2; next } { f[$1] = ($1 in f) ? f[$1] "|" $2 : $2 }
-                  END { for (k in p) if (!(k in f)) print k "\t" p[k] "\t(absent)"
-                        for (k in f) if (!(k in p)) print k "\t(absent)\t" f[k]; else if (p[k] != f[k]) print k "\t" p[k] "\t" f[k] }' \
-                  <(packages "$dir/passing.txt") <(packages "$dir/failing.txt") | sort
-              } > "$dir/diff.txt"
-              echo "Installed-version diff against passing run $passing: $(($(wc -l < "$dir/diff.txt") - 1)) package(s) differ"
-            else
-              echo "No install log for the failed run, so no version diff" > "$dir/diff.txt"
-            fi
           else
-            echo "No passing scheduled run with an install log found before this one" | tee "$dir/passing.txt" > "$dir/diff.txt"
+            echo "No passing scheduled run found before this one"
             echo '{}' > "$dir/passing-run.json"
           fi
 
@@ -708,17 +669,9 @@ jobs:
             PRs. The workflow wrote `triage/` into it; `triage/` is not part of inspect_ai.
             - `triage/failed.log` — output of failed pytest steps (may be truncated to last 2MB)
             - `triage/run.json` — metadata for the failed GitHub Actions run
-            - `triage/versions/failing.txt` — the `Successfully installed ...` lines from
-              the failed run's install steps (one per job; the job name comes first)
-            - `triage/versions/passing.txt` and `triage/versions/passing-run.json` — the
-              same lines from the last scheduled run before this one that passed, and
-              that run's id, URL, `created_at` and tested inspect_ai SHA (`inspect_ai_sha`,
-              empty when unknown; `{}` and a one-line note when no passing run was found)
-            - `triage/versions/diff.txt` — the packages whose installed version differs
-              between those two runs (tab-separated: package, passing run, failing run;
-              `(absent)` when a package is in only one; `a|b` when a run's jobs
-              installed different versions — then read `failing.txt` for the failed
-              job's own line), or a one-line note when a side is missing
+            - `triage/versions/passing-run.json` — the id, URL, `created_at` and tested
+              inspect_ai SHA (`inspect_ai_sha`, empty when unknown) of the last scheduled
+              run before this one that passed; `{}` when no passing run was found
 
             Upstream run: ${{ env.UPSTREAM_RUN_URL }}
             inspect_ai checkout: ${{ steps.base.outputs.sha }}
@@ -848,12 +801,12 @@ jobs:
             + plausible mechanism. If evidence is weak, set it to false and mention the
             uncertainty in the issue body (if one is created).
 
-            ## DEPENDENCY_CHANGES — did a package release land, not an inspect_ai commit?
-            Dependency versions float in the tested job: it installs inspect_ai with
-            `pip install -e ".[dev]"`, so every third-party package is whatever PyPI
-            served that day, NOT the version pinned in inspect_ai's `uv.lock`. A failure
-            that appears with no relevant inspect_ai commit is therefore often a
-            dependency release: inspect_ai#499 spent five comments on a correct
+            ## DEPENDENCY_CHANGES — did a `uv.lock` change land, not an inspect_ai code change?
+            The tested job installs the versions in inspect_ai's `uv.lock` at the tested
+            commit, so a dependency change shows as a `uv.lock` change in the inspect_ai
+            commit range (step 2). A failure that appears with no relevant
+            inspect_ai code change is therefore often a dependency bump in `uv.lock`.
+            Under the old unlocked install, inspect_ai#499 spent five comments on a correct
             mechanism analysis and never noticed that the only difference between the
             last passing run and the first failing run was openai 3.14.0 -> 3.14.1,
             a release that stopped wrapping non-httpx exceptions and unmasked a latent
@@ -862,26 +815,23 @@ jobs:
             1. From the traceback in `triage/failed.log`, list the third-party packages
                implicated (every non-inspect_ai module in the stack, plus the package
                whose exception type or API is involved).
-            2. Read `triage/versions/failing.txt` for the versions the failed run
-               installed (the job that failed matters most; the jobs normally agree).
-               For each implicated package, find the locked version in
-               `uv.lock` — for example
-                 grep -n -A1 '^name = "openai"$' uv.lock
-               (the `version = "..."` line follows) — and note where installed and
-               locked differ.
-            3. Read `triage/versions/diff.txt`: it is the diff of installed versions
-               between the last passing scheduled run and this one (or a note saying
-               why there is none). Read `triage/versions/passing-run.json` for that
-               run's id, URL, time and tested inspect_ai SHA (a passing run days
-               older than this one makes the diff long; weigh it accordingly); when
-               the SHA is set,
+            2. Read `triage/versions/passing-run.json` for the last passing scheduled
+               run's id, URL, time and tested inspect_ai SHA. When the SHA is set,
                  git log --oneline <inspect_ai_sha>..${{ steps.base.outputs.sha }}
                shows what changed in inspect_ai between the two runs (nothing, or
-               nothing near the failure, points at a dependency). When
-               `triage/versions/passing.txt` holds no install log, say so and compare
-               installed against locked only.
-            4. For every implicated package that changed between the two runs (or
-               that is ahead of uv.lock when there is no passing run), check its
+               nothing near the failure, points at a dependency). The `uv.lock` patch
+               of many days can be very large: read only the implicated packages, for
+               example
+                 git log -p <inspect_ai_sha>..${{ steps.base.outputs.sha }} -- uv.lock | grep -A3 '^[-+ ]name = "openai"$'
+               shows each change to the locked openai version. When the SHA is empty,
+               read the recent `uv.lock` history of the same packages instead, for
+               example
+                 git log -p -5 ${{ steps.base.outputs.sha }} -- uv.lock | grep -A3 '^[-+ ]name = "openai"$'
+               Read the version of each implicated package at the tested commit from
+               `uv.lock`, for example
+                 grep -n -A1 '^name = "openai"$' uv.lock
+               (the `version = "..."` line follows).
+            3. For every implicated package whose `uv.lock` version changed, check its
                release notes for a plausible trigger before blaming inspect_ai:
                `gh api repos/<owner>/<repo>/releases?per_page=10` on the package's
                GitHub repository (for example `openai/openai-python`), and
@@ -890,13 +840,13 @@ jobs:
                network access; if you cannot find the repository, say so.
 
             Set `DEPENDENCY_CHANGES` to the list of implicated packages whose version
-            differs (package, locked, installed in the passing run, installed in the
-            failing run, and what its release notes say), or to "none". When you
+            differs (package, `uv.lock` version at the last passing run, `uv.lock`
+            version at the failing run, and what its release notes say), or to "none". When you
             describe a new issue (bucket C or D), put this in its `## Dependency
             versions` section as a small table:
 
-              | package | locked (uv.lock) | last passing run | failing run |
-              |---------|------------------|------------------|-------------|
+              | package | uv.lock at last passing run | uv.lock at failing run |
+              |---------|-----------------------------|------------------------|
 
             with a line per implicated package (differing or not), a link to the
             passing run, and the release-notes finding under the table; write

@@ -17,7 +17,7 @@ are the product; there is no application code.
 
 The `run:` blocks and permission rules in `.github/workflows/*.yml` are
 tested in `tests/`: each test file lifts the scripts out of the YAML and
-executes them under bash, with stand-ins for `gh`, `pytest` and `curl` on `PATH`
+executes them under bash, with stand-ins for `gh`, `pytest`, `uv` and `curl` on `PATH`
 where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`,
 `tests/test_docs_link_check_workflow.py`, `tests/test_publish_docs_workflow.py`;
@@ -86,8 +86,10 @@ clean.
   `inspect-ai-ci-perf.yml`). Do not widen an agent job's permissions or allow
   list without a test for the write vector it closes, and put no secret in a
   step that runs after the agent.
-- A job that installs and runs the day's dependency closure (the scheduled
-  and nightly test suites) holds nothing that reaches beyond the job: the
+- A job that installs and runs third-party dependencies (the scheduled
+  inspect_ai suites install from inspect_ai's `uv.lock` at the tested
+  commit; the inspect_swe nightly installs the day's dependency closure)
+  holds nothing that reaches beyond the job: the
   workflow declares a read-only token, its checkouts set
   `persist-credentials: false`, and it restores and saves no Actions cache
   (workflow-level `cache-mode: read`, so the token refuses a save).
