@@ -44,7 +44,7 @@ name: Inspect AI Scheduled Tests
 
 "on":
   schedule:
-    # Run every 2 hours
+    # Every 2 hours; check-commit skips the tests if inspect_ai main has no commit since the last successful run
     - cron: "0 */2 * * *"
   # A push runs the suite only when this workflow file itself changes, on any
   # branch: the development cycle for this workflow keeps its per-push checks,

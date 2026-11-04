@@ -12,7 +12,7 @@ The workflow addresses the need to run inspect_ai tests that are excluded from t
 
 ### Schedule
 
-- **Automatic**: Slow tests run daily at 2 AM UTC
+- **Automatic**: Every 2 hours, slow tests run if inspect_ai main has a commit that has not passed a scheduled run
 - **Manual**: Both test types can be triggered manually via GitHub Actions UI
 
 ### Jobs
