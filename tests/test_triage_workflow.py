@@ -362,6 +362,23 @@ def test_collect_without_a_passing_run_leaves_notes_not_a_diff(tmp_path):
     assert json.loads((versions / "passing-run.json").read_text()) == {}
 
 
+def test_collect_against_a_locked_install_log_writes_notes_not_a_diff(tmp_path):
+    # The scheduled tests install with uv from inspect_ai's uv.lock, which
+    # writes no `Successfully installed` line. The step does not fail, and
+    # diff.txt says why it holds no diff.
+    uv_log = "".join(f"slow-tests (asyncio, 900)\tInstall Python dependencies\t2026-11-04T10:00:00Z {line}\n"
+                     for line in ("Installed 312 packages in 1.20s", " + openai==3.14.1", " + inspect-package==0.1"))
+    versions, r = collect(
+        tmp_path,
+        logs={FAILED_RUN: uv_log, PASSING_RUN: install_log("j", PASSING_PACKAGES)},
+        runs=[run_entry(PASSING_RUN, "2026-09-15T20:13:53Z")],
+        artifacts={PASSING_RUN: PASSING_SHA},
+    )
+    assert r.returncode == 0
+    assert (versions / "failing.txt").read_text() == f"No install log found for the failed run {FAILED_RUN}\n"
+    assert (versions / "diff.txt").read_text() == "No install log for the failed run, so no version diff\n"
+
+
 def test_collect_without_logs_or_run_json_still_writes_every_file(tmp_path):
     # `gh` has nothing for either run and run.json is missing: the step does
     # not fail the job, and each file the prompt names says why it is empty.

@@ -33,7 +33,7 @@ The workflow addresses the need to run inspect_ai tests that are excluded from t
 ### Required Setup
 
 #### Slow Tests
-No additional setup is required for slow tests. The workflow will automatically install inspect_ai with development dependencies and run the slow tests.
+No additional setup is required for slow tests. The workflow will automatically install inspect_ai with development dependencies from its `uv.lock` and run the slow tests.
 
 #### API Tests  
 API tests may require repository secrets to be configured if the tests need external API credentials. Check the inspect_ai repository documentation for specific requirements.

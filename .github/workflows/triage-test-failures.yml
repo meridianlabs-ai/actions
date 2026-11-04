@@ -446,10 +446,11 @@ jobs:
             fi
           fi
 
-      # Dependency versions float in the scheduled tests (`pip install -e
-      # ".[dev]"` resolves against PyPI on the day, not inspect_ai's uv.lock),
-      # so a failure with no relevant inspect_ai commit is often a package
-      # release (inspect_ai#499: openai 3.14.0 -> 3.14.1). `--log-failed`
+      # The scheduled tests install from inspect_ai's uv.lock at the tested
+      # commit, so a dependency change is a uv.lock change in the inspect_ai
+      # commit range (inspect_ai#499: openai 3.14.0 -> 3.14.1). This step
+      # reads pip's `Successfully installed ...` lines; a uv install writes
+      # none, and the files then say that there is no install log. `--log-failed`
       # holds only the failed steps, so the install step's `Successfully
       # installed ...` line is not in failed.log: take it from the full log of
       # the failed run and of the last scheduled run before it that passed and
@@ -849,11 +850,13 @@ jobs:
             uncertainty in the issue body (if one is created).
 
             ## DEPENDENCY_CHANGES — did a package release land, not an inspect_ai commit?
-            Dependency versions float in the tested job: it installs inspect_ai with
-            `pip install -e ".[dev]"`, so every third-party package is whatever PyPI
-            served that day, NOT the version pinned in inspect_ai's `uv.lock`. A failure
-            that appears with no relevant inspect_ai commit is therefore often a
-            dependency release: inspect_ai#499 spent five comments on a correct
+            The tested job installs the versions in inspect_ai's `uv.lock` at the tested
+            commit, so a dependency change shows as a `uv.lock` change in the inspect_ai
+            commit range:
+              git log -p <inspect_ai_sha>..${{ steps.base.outputs.sha }} -- uv.lock
+            (`<inspect_ai_sha>` from step 3). A failure that appears with no relevant
+            inspect_ai code change is therefore often a dependency bump in `uv.lock`:
+            inspect_ai#499 spent five comments on a correct
             mechanism analysis and never noticed that the only difference between the
             last passing run and the first failing run was openai 3.14.0 -> 3.14.1,
             a release that stopped wrapping non-httpx exceptions and unmasked a latent
