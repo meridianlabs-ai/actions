@@ -39,6 +39,13 @@ runs:
           elif ! grep -qxF "$begin" "$name" || ! grep -qxF "$end" "$name"; then
             echo "::error::$name has no shared text markers."
             status=1
+          elif ! awk -v b="$begin" -v e="$end" '
+              $0 == b { begins++; begin_line = NR }
+              $0 == e { ends++; end_line = NR }
+              END { exit !(begins == 1 && ends == 1 && begin_line < end_line) }
+              ' "$name"; then
+            echo "::error::$name must have exactly one BEGIN and one END shared text marker, in that order."
+            status=1
           elif ! awk -v b="$begin" -v e="$end" '$0 == e { f = 0 } f { print } $0 == b { f = 1 }' "$name" \
               | diff -u "$GITHUB_ACTION_PATH/../policy/$name" -; then
             echo "::error::The shared text in $name differs from policy/$name."

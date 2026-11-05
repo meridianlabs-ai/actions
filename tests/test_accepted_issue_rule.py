@@ -127,3 +127,26 @@ def test_policy_text_check_reports_every_failure(tmp_path):
     r = run_action("policy-text-check", tmp_path, {})
     assert r.returncode == 1
     assert all(f"{name} is missing" in r.stdout for name in POLICY_FILES)
+
+
+@pytest.mark.parametrize("broken", POLICY_FILES)
+@pytest.mark.parametrize("case", ["split", "reversed", "duplicate_begin", "duplicate_end"])
+def test_policy_text_check_rejects_malformed_markers(tmp_path, broken, case):
+    for name in POLICY_FILES:
+        text = with_markers(name, policy(name))
+        if name == broken:
+            begin = f"<!-- BEGIN shared text from meridianlabs-ai/actions policy/{name}. Change it there, not here. -->\n"
+            end = f"<!-- END shared text from meridianlabs-ai/actions policy/{name} -->\n"
+            lines = policy(name).splitlines(keepends=True)
+            middle = len(lines) // 2
+            text = {
+                "split": begin + "".join(lines[:middle]) + end + "Unchecked text\n" + begin + "".join(lines[middle:]) + end,
+                "reversed": end + begin + policy(name),
+                "duplicate_begin": begin + begin + policy(name) + end,
+                "duplicate_end": begin + policy(name) + end + end,
+            }[case]
+        (tmp_path / name).write_text(text)
+    r = run_action("policy-text-check", tmp_path, {})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"{broken} must have exactly one BEGIN and one END shared text marker, in that order." in r.stdout
+    assert "Copy the text" in r.stdout
