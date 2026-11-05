@@ -157,6 +157,13 @@ FAKE_PYTEST = """#!/usr/bin/env bash
 printf '%s\\n' "$@" > "$FAKE_PYTEST_ARGV"
 """
 
+FAKE_UV = """#!/usr/bin/env bash
+# Run the tool of `uv run --no-sync <tool> ...`; any other call fails.
+[ "$1 $2" = "run --no-sync" ] || { echo "unexpected uv call: $*" >&2; exit 2; }
+shift 2
+exec "$@"
+"""
+
 PYTEST_STEPS = [(SCHEDULED, "slow-tests", "Run slow tests", "--timeout-method=thread"), (NIGHTLY, "nightly-tests", "Run tests (fast + slow)", "log_level=warning")]
 MATRIX = {"mode": "asyncio", "pytest_flags": "", "test_timeout": 900}
 
@@ -165,7 +172,7 @@ def run_pytest_step(tmp_path: Path, workflow: Path, job: str, name: str, pytest_
     s = step(workflow, job, name)
     assert s["env"]["PYTEST_ARGS"] == "${{ inputs.pytest_args }}"
     argv = tmp_path / "argv"
-    env = {"PATH": f"{bin_dir(tmp_path, pytest=FAKE_PYTEST)}:{os.environ['PATH']}", "FAKE_PYTEST_ARGV": str(argv), "PYTEST_ARGS": pytest_args}
+    env = {"PATH": f"{bin_dir(tmp_path, pytest=FAKE_PYTEST, uv=FAKE_UV)}:{os.environ['PATH']}", "FAKE_PYTEST_ARGV": str(argv), "PYTEST_ARGS": pytest_args}
     r = run_bash(render(s["run"], matrix=MATRIX), cwd=tmp_path, env=env)
     return r, argv.read_text().splitlines() if argv.exists() else None
 
@@ -205,150 +212,56 @@ def test_static_analysis_runs_without_the_retired_tool_support_directory(tmp_pat
     lint = """#!/usr/bin/env bash
 printf '%s:%s %s\\n' "$PWD" "${0##*/}" "$*" >> "$LINT_CALLS"
 """
-    env = {"PATH": f"{bin_dir(tmp_path, ruff=lint, mypy=lint)}:{os.environ['PATH']}", "LINT_CALLS": str(calls)}
+    env = {"PATH": f"{bin_dir(tmp_path, uv=lint)}:{os.environ['PATH']}", "LINT_CALLS": str(calls)}
     for s in steps(SCHEDULED, "static-analysis"):
         if s.get("name", "").startswith(("Run ruff", "Run mypy")):
             r = run_bash(s["run"], cwd=checkout / s.get("working-directory", "."), env=env)
             assert r.returncode == 0, r.stderr
     assert calls.read_text().splitlines() == [
-        f"{checkout}:ruff check",
-        f"{checkout}:ruff format --check",
-        f"{checkout}:mypy --exclude tests/test_package src tests",
+        f"{checkout}:uv run --no-sync ruff check",
+        f"{checkout}:uv run --no-sync ruff format --check",
+        f"{checkout}:uv run --no-sync mypy --exclude tests/test_package src tests",
     ]
 
 
-# --- inspect_sentinel install (TEMPORARY) -------------------------------------------
+# --- Locked install -----------------------------------------------------------------
+#
+# Both jobs install inspect_ai's uv.lock at the tested commit through
+# install-python-dependencies and run every tool with `uv run --no-sync`, so no
+# step resolves, upgrades, relocks or syncs again. The canaries run the unlocked versions.
 
-SENTINEL_STEP = "Install inspect_sentinel (TEMPORARY)"
-SENTINEL_SPEC = f"inspect_sentinel @ git+https://github.com/meridianlabs-ai/inspect_sentinel@{SHA}"
-FAKE_PIP = """#!/usr/bin/env bash
-# Record each pip call; `pip show` succeeds only when FAKE_PIP_SHOW=1.
-printf '%s\\n' "$*" >> "$FAKE_PIP_CALLS"
-if [ "$1" = show ]; then [ "${FAKE_PIP_SHOW:-0}" = 1 ]; fi
-"""
-
-
-DECOY_SPEC = SENTINEL_SPEC.replace(SHA, "d" * 40)
+INSTALL = "meridianlabs-ai/actions/install-python-dependencies@"
+TOOLS = ("pytest", "ruff", "mypy")
 
 
-def build_yml(*specs: str, temporary: str = """      - name: Install inspect_sentinel (TEMPORARY)
-        if: env.RUN_TESTS == 'true'
-        run: uv pip install --no-deps "{spec}"
-""") -> str:
-    """An upstream build.yml with one TEMPORARY install step per spec (two jobs pin it today), between steps that pin a decoy."""
-    out = "jobs:\n"
-    for i, spec in enumerate(specs):
-        out += f"""  job{i}:
-    steps:
-      - name: Install dev deps
-        run: uv pip install "{DECOY_SPEC}"
-{temporary.format(spec=spec)}      - name: Run tests
-        run: echo "{DECOY_SPEC}"
-"""
-    return out
+@pytest.mark.parametrize("job, without_deps", [("slow-tests", "./tests/test_package"), ("static-analysis", None)])
+def test_both_jobs_install_the_lock_file_without_an_actions_cache(job, without_deps):
+    installs = [s for s in steps(SCHEDULED, job) if str(s.get("uses", "")).startswith(INSTALL)]
+    assert len(installs) == 1, job
+    assert re.fullmatch(r"[0-9a-f]{40}", installs[0]["uses"].removeprefix(INSTALL)), installs[0]["uses"]
+    expected = {"versions": "locked", "python-version": "3.11", "actions-cache": "none"}
+    if without_deps:
+        expected["also-install-without-deps"] = without_deps
+    assert installs[0]["with"] == expected
+    assert not any(str(s.get("uses", "")).startswith("actions/setup-python@") for s in steps(SCHEDULED, job)), job
 
 
-def run_sentinel_step(tmp_path: Path, build: str | None, *, installed: bool = False, sentinel_tree: bool = True) -> tuple[subprocess.CompletedProcess, list[str]]:
-    if sentinel_tree:
-        (tmp_path / "src" / "inspect_ai" / "_sentinel").mkdir(parents=True)
-    if build is not None:
-        (tmp_path / ".github" / "workflows").mkdir(parents=True)
-        (tmp_path / ".github" / "workflows" / "build.yml").write_text(build)
-    calls = tmp_path / "pip_calls"
-    env = {"PATH": f"{bin_dir(tmp_path, pip=FAKE_PIP)}:{os.environ['PATH']}", "FAKE_PIP_CALLS": str(calls), "FAKE_PIP_SHOW": "1" if installed else "0"}
-    r = run_bash(step(SCHEDULED, "slow-tests", SENTINEL_STEP)["run"], cwd=tmp_path, env=env)
-    return r, calls.read_text().splitlines() if calls.exists() else []
+@pytest.mark.parametrize("job", ["slow-tests", "static-analysis"])
+def test_no_run_step_resolves_upgrades_or_relocks(job):
+    for s in steps(SCHEDULED, job):
+        run = s.get("run") or ""
+        for word in ("pip install", "uv pip", "uv lock", "--upgrade"):
+            assert word not in run, (job, s.get("name"), word)
 
 
-def test_both_jobs_install_inspect_sentinel_with_the_same_script_between_install_and_use():
-    for job, user in [("slow-tests", "Run slow tests"), ("static-analysis", "Run mypy")]:
-        names = [s.get("name", "") for s in steps(SCHEDULED, job)]
-        sentinel = names.index(SENTINEL_STEP)
-        assert names.index("Install dependencies") < sentinel < next(i for i, n in enumerate(names) if n.startswith(user)), job
-    assert step(SCHEDULED, "slow-tests", SENTINEL_STEP)["run"] == step(SCHEDULED, "static-analysis", SENTINEL_STEP)["run"]
-
-
-@pytest.mark.parametrize(
-    "temporary",
-    [
-        """      - name: Install inspect_sentinel (TEMPORARY)
-        if: env.RUN_TESTS == 'true'
-        run: uv pip install --no-deps "{spec}"
-""",
-        """      - name: Install inspect_sentinel (TEMPORARY)
-        run: |
-          uv pip install --no-deps \\
-            "{spec}"
-""",
-    ],
-    ids=["one-line", "block"],
-)
-@pytest.mark.parametrize("installed", [False, True], ids=["absent", "already-installed"])
-def test_sentinel_pin_is_read_from_the_temporary_step_only_and_installed_without_deps(temporary, installed, tmp_path):
-    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC, SENTINEL_SPEC, temporary=temporary), installed=installed)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert calls == [f"install --no-deps {SENTINEL_SPEC}"]
-
-
-@pytest.mark.parametrize("installed", [False, True], ids=["absent", "already-installed"])
-def test_a_main_pin_is_installed(installed, tmp_path):
-    spec = SENTINEL_SPEC.replace(SHA, "main")
-    r, calls = run_sentinel_step(tmp_path, build_yml(spec, spec), installed=installed)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert calls == [f"install --no-deps {spec}"]
-
-
-def test_no_pin_is_a_notice_when_the_dev_install_already_provides_inspect_sentinel(tmp_path):
-    r, calls = run_sentinel_step(tmp_path, "jobs: {}\n", installed=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "::notice::No inspect_sentinel pin" in r.stdout and "remove this one" in r.stdout
-    assert calls == ["show inspect_sentinel"]
-
-
-def test_no_pin_is_a_notice_for_a_commit_that_predates_inspect_sentinel(tmp_path):
-    r, calls = run_sentinel_step(tmp_path, "jobs: {}\n", sentinel_tree=False)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "::notice::This inspect_ai commit predates inspect_sentinel" in r.stdout
-    assert calls == []
-
-
-@pytest.mark.parametrize(
-    "build",
-    [
-        None,
-        "jobs: {}\n",
-        build_yml(SENTINEL_SPEC, SENTINEL_SPEC.replace(SHA, "f" * 40)),
-        build_yml(SENTINEL_SPEC.replace("meridianlabs-ai/", "someone-else/")),
-        build_yml(SENTINEL_SPEC.replace(SHA, "develop")),
-        build_yml(SENTINEL_SPEC.replace(SHA, "mainline")),
-        build_yml(SENTINEL_SPEC.replace(SHA, "main/x")),
-        build_yml(SENTINEL_SPEC + "ff"),
-        build_yml(SENTINEL_SPEC + "#subdirectory=x"),
-        build_yml("my_" + SENTINEL_SPEC),
-        build_yml(SENTINEL_SPEC, temporary="""      # - name: Install inspect_sentinel (TEMPORARY)
-      #   run: uv pip install --no-deps "{spec}"
-"""),
-        build_yml(SENTINEL_SPEC, temporary="""      - name: Install inspect_sentinel (TEMPORARY)
-        uses: some/action@v1
-"""),
-    ],
-    ids=["no-build-yml", "no-pin", "two-pins", "other-repo", "branch-not-sha-or-main", "longer-than-main", "under-main", "longer-than-sha", "trailing-fragment", "other-name", "step-commented-out", "step-without-run"],
-)
-def test_a_missing_ambiguous_or_unexpected_sentinel_pin_fails_before_installing(build, tmp_path):
-    r, calls = run_sentinel_step(tmp_path, build)
-    assert r.returncode == 1, r.stdout + r.stderr
-    assert "::error::Expected one inspect_sentinel git pin" in r.stdout
-    other = SENTINEL_SPEC.replace(SHA, "f" * 40)
-    found = f"{SENTINEL_SPEC}; {other}" if build is not None and other in build else "none"
-    assert f"found: {found} (" in r.stdout, r.stdout
-    assert not any(c.startswith("install") for c in calls)
-
-
-def test_only_the_matched_sentinel_spec_reaches_pip(tmp_path):
-    r, calls = run_sentinel_step(tmp_path, build_yml(SENTINEL_SPEC.replace(SHA, SHA + '"; echo INJECTED; "')))
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert calls == [f"install --no-deps {SENTINEL_SPEC}"]
-    assert "INJECTED" not in r.stdout + r.stderr
+@pytest.mark.parametrize("job", ["slow-tests", "static-analysis"])
+def test_every_tool_runs_through_uv_run_no_sync(job):
+    tools = "|".join(TOOLS)
+    calls = [line.strip() for s in steps(SCHEDULED, job) for line in (s.get("run") or "").splitlines()
+             if re.search(rf"\b({tools})\b", line)]
+    assert calls, job
+    for call in calls:
+        assert re.match(rf"uv run --no-sync ({tools})\b", call), (job, call)
 
 
 # --- The last-inspect-ai-sha artifact ---------------------------------------------------
@@ -518,7 +431,7 @@ def workflow_jobs(workflow: Path) -> dict:
 
 
 def runs_third_party_code(job: dict) -> bool:
-    return any("pip install" in (s.get("run") or "") for s in job["steps"])
+    return any("pip install" in (s.get("run") or "") or "/install-python-dependencies@" in str(s.get("uses", "")) for s in job["steps"])
 
 
 @pytest.mark.parametrize("workflow", [SCHEDULED, NIGHTLY], ids=REF_IDS)
@@ -562,6 +475,8 @@ def test_no_job_restores_or_saves_an_actions_cache(workflow):
             assert "cache" not in uses.lower(), (name, uses)
             if uses.startswith("actions/setup-python@"):
                 assert "cache" not in s.get("with", {}) and "cache-dependency-path" not in s.get("with", {}), (name, s["with"])
+            if "/install-python-dependencies@" in uses or "/setup-uv@" in uses:
+                assert s.get("with", {}).get("actions-cache") == "none", (name, s.get("with"))
 
 
 @pytest.mark.parametrize("workflow", [SCHEDULED, NIGHTLY], ids=REF_IDS)

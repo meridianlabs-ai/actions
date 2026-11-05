@@ -41,7 +41,7 @@ guarantee, and what is by design. To report a vulnerability, see
   upstream `main` with `exact=false`. Triage resolves the attempt once,
   before it reads anything: the attempt whose completion fired it, or the
   latest attempt of the run a dispatcher selects. The failed log, the run
-  metadata, the failing run's install log and the context are all read at
+  metadata and the context are all read at
   that attempt, so a triage that runs after the upstream run gained another
   attempt does not pair one attempt's failures with another's tested SHA
   and thread. The `report` job is only as trusted as the workflow file its
@@ -76,9 +76,11 @@ guarantee, and what is by design. To report a vulnerability, see
   attempt's own `report` job as the producer and its recorded id as the
   artifact.
 - **Jobs that run the dependency closure hold nothing that reaches beyond
-  the job.** The scheduled suites install upstream's dev closure from PyPI
-  unlocked (the point of the run), plus inspect_sentinel from GitHub at the
-  SHA, or `main`, that upstream's build.yml pins, and execute it. Their job token is
+  the job.** The scheduled inspect_ai suites install upstream's dev closure
+  from inspect_ai's uv.lock at the tested commit, and the inspect_swe
+  nightly installs its dev closure from PyPI unlocked; either way the
+  closure is code this repository does not review, and these jobs execute
+  it. Their job token is
   declared read-only in the workflow (`permissions: contents: read`, with
   `actions: read` only on the jobs that read this repository's run data),
   so its reach does not depend on the repository's default token setting;
