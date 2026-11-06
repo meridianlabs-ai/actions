@@ -1,0 +1,58 @@
+name: Policy text check
+description: >-
+  Fail if the shared text in CONTRIBUTING.md or AGENTS.md of the calling repo
+  differs from policy/ in this repo. The shared text is the lines between the
+  BEGIN and END markers.
+
+# Usage (a workflow in the calling repo):
+#   on:
+#     pull_request:
+#       paths: [CONTRIBUTING.md, AGENTS.md, .github/workflows/policy-text-check.yml]
+#     push:
+#       branches: [main]
+#       paths: [CONTRIBUTING.md, AGENTS.md, .github/workflows/policy-text-check.yml]
+#   permissions:
+#     contents: read
+#   jobs:
+#     policy-text-check:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+#           with:
+#             persist-credentials: false
+#         - uses: meridianlabs-ai/actions/policy-text-check@<full commit SHA> # main
+
+runs:
+  using: composite
+  steps:
+    - name: Compare shared policy text
+      shell: bash
+      # policy/ sits at the actions repo root, one level up from this action.
+      run: |
+        status=0
+        for name in CONTRIBUTING.md AGENTS.md; do
+          begin="<!-- BEGIN shared text from meridianlabs-ai/actions policy/$name. Change it there, not here. -->"
+          end="<!-- END shared text from meridianlabs-ai/actions policy/$name -->"
+          if [ ! -f "$name" ]; then
+            echo "::error::$name is missing."
+            status=1
+          elif ! grep -qxF "$begin" "$name" || ! grep -qxF "$end" "$name"; then
+            echo "::error::$name has no shared text markers."
+            status=1
+          elif ! awk -v b="$begin" -v e="$end" '
+              $0 == b { begins++; begin_line = NR }
+              $0 == e { ends++; end_line = NR }
+              END { exit !(begins == 1 && ends == 1 && begin_line < end_line) }
+              ' "$name"; then
+            echo "::error::$name must have exactly one BEGIN and one END shared text marker, in that order."
+            status=1
+          elif ! awk -v b="$begin" -v e="$end" '$0 == e { f = 0 } f { print } $0 == b { f = 1 }' "$name" \
+              | diff -u "$GITHUB_ACTION_PATH/../policy/$name" -; then
+            echo "::error::The shared text in $name differs from policy/$name."
+            status=1
+          fi
+        done
+        if [ "$status" -ne 0 ]; then
+          echo "Copy the text from meridianlabs-ai/actions policy/ at the pinned commit."
+        fi
+        exit "$status"

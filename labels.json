@@ -1,0 +1,12 @@
+[
+  {
+    "name": "accepted",
+    "color": "0E8A16",
+    "description": "Issues: maintainer-approved for external PR"
+  },
+  {
+    "name": "deferred",
+    "color": "d93f0b",
+    "description": "Potential for future prioritization"
+  }
+]

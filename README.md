@@ -44,6 +44,26 @@ runner, and `tests/test_python_actions.py` tests their scripts.
   because the unlocked code can change the job. See the action's `action.yml`
   for the full input list.
 
+## Accepted-issue rule
+
+Shared labels and contribution policy text for the accepted-issue rule. Pin
+both actions by the full commit SHA with a version or branch comment;
+Dependabot bumps the pin. `tests/test_accepted_issue_rule.py` tests their
+scripts. Caller examples are in each `action.yml` header comment.
+
+- **`labels.json`** — the labels of the rule (`accepted`, `deferred`), with
+  color and description.
+- **`sync-labels/`** — composite action: create each label in `labels.json`
+  in the calling repo, or update its color and description. It never deletes
+  or renames a label. The job needs `issues: write`. Run it on a schedule, by
+  hand or on a push to main, never on `pull_request`.
+- **`policy/`** — the shared text of `CONTRIBUTING.md` and `AGENTS.md`. A
+  repo's copy of the text sits between the `BEGIN` and `END` shared text
+  markers in its own file. Change the text here, not in the repo.
+- **`policy-text-check/`** — composite action: a CI check that fails when the
+  text between the markers in the repo's `CONTRIBUTING.md` or `AGENTS.md`
+  differs from `policy/`, or when a file or its markers are missing.
+
 ## Workflows
 
 ### Docs Link Check
