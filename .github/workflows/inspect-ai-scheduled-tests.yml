@@ -304,7 +304,7 @@ jobs:
       # inspect_ai's ensure_test_package_installed() short-circuits instead of
       # installing it mid-run on the xdist critical path (~9s).
       - name: Install Python dependencies
-        uses: meridianlabs-ai/actions/install-python-dependencies@62bc8360498822ef3eab7c9584d1bd523de3febf # self, re-pin after each change
+        uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # self, re-pin after each change
         with:
           versions: locked
           python-version: "3.11"
@@ -393,7 +393,7 @@ jobs:
       # closure under mypy, and a cache it saved afterwards would be restored
       # by slow-tests, which holds the provider keys.
       - name: Install Python dependencies
-        uses: meridianlabs-ai/actions/install-python-dependencies@62bc8360498822ef3eab7c9584d1bd523de3febf # self, re-pin after each change
+        uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # self, re-pin after each change
         with:
           versions: locked
           python-version: "3.11"

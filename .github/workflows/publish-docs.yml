@@ -86,7 +86,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: meridianlabs-ai/actions/install-python-dependencies@f4ae19412da5597fc283e3ef62db1a67384ae609 # self, re-pin after each change
+      - uses: meridianlabs-ai/actions/install-python-dependencies@3bc608093ab8b8dd7f82764a863d9d5f9dce61a5 # self, re-pin after each change
         with:
           versions: locked
           python-version: ${{ inputs.python-version }}
