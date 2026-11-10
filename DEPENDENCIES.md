@@ -81,7 +81,7 @@ A cooldown is the minimum time that a release must be on PyPI before uv can use 
 |---|---|---|
 | Default cooldown | 7 days | `[tool.uv] exclude-newer = "7 days"` in the `pyproject.toml` of each Python repository. |
 | Short cooldown | 6 hours | `[tool.uv.exclude-newer-package]`: `<package> = "6 hours"`. Use it only for a direct dependency that is a model provider SDK or an Inspect package. In inspect_sandboxes, a sandbox provider SDK is also permitted. |
-| Emergency entry | A fixed time | `[tool.uv.exclude-newer-package]`: `<package> = "<RFC 3339 time>"`. The entry is temporary. Remove it in less than 7 days. After 7 days, a test fails. |
+| Emergency entry | A fixed time | `[tool.uv.exclude-newer-package]`: `<package> = "<RFC 3339 time>"`. The entry is temporary. Remove it when it is 7 days old. At that time, a test fails. |
 | Dependabot | 7 days | The `uv` entry in `.github/dependabot.yml`: `cooldown.default-days: 7`. The 6-hour packages are in `cooldown.exclude` and have their own group. |
 | Canaries | None | The canaries install with `--exclude-newer false`. Most canaries also use `--no-config`, which removes the per-package entries. Exception: the inspect_flow and inspect_steward canaries keep their 6-hour entries. |
 | JavaScript in ts-mono and inspect_vscode | 7 days | `minimumReleaseAge: 10080` in `pnpm-workspace.yaml`. The npm Dependabot cooldown is 7 days. |
@@ -110,21 +110,19 @@ These procedures apply to all repositories, inspect_ai included. Each repository
 **Use a newer release after its cooldown.** Run `uv lock --upgrade-package <package>` and commit `uv.lock`. Alternatively, wait for the daily Dependabot PR.
 
 **Use a release before its cooldown ends.** Usually, wait for the cooldown. If the release is urgent, for example a security fix, add an emergency entry:
-1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "<timestamp>"`. Use an RFC 3339 time a short time after the upload time of the release. The package must be a direct dependency.
+1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "<timestamp>"`. Use an RFC 3339 time a short time after the upload time of the release. The package must be a direct dependency. If the package has a 6-hour entry, do not replace that entry. Wait for the 6-hour cooldown.
 2. Do not add the entry to `.github/dependabot.yml`.
 3. Run `uv lock --upgrade-package <package>`.
 4. In inspect_ai only: if `sync_models.py` locks the package, add the same entry to the inline script metadata of `sync_models.py`. Then run `uv lock --script src/inspect_ai/model/_model_data/sync_models.py --no-config --upgrade-package <package>`.
 5. Commit all the changed files.
 
-**Remove an emergency entry.** Remove the entry in less than 7 days, after the normal cooldown includes the release.
+**Remove an emergency entry.** A test in `tests/test_dependency_cooldown.py` fails when an emergency entry is 7 days old. Remove the entry at that time. The 7-day cooldown then includes the release. Do not remove the entry earlier. If you do, `uv lock` moves the package back to the previous release.
 1. Delete the entry from `pyproject.toml`.
 2. Run `uv lock --upgrade-package <package>`. A plain `uv lock` does not always remove the entry from `uv.lock`, and then CI fails.
 3. In inspect_ai only: if you added the entry to `sync_models.py`, delete it there and run the `uv lock --script` command from step 4 above.
 4. Commit all the changed files.
 
-A test in `tests/test_dependency_cooldown.py` fails when an emergency entry is 7 days old or older.
-
-**Add a package to the 6-hour cooldown.** Use the 6-hour cooldown only for a direct dependency that is a model provider SDK or an Inspect package.
+**Add a package to the 6-hour cooldown.** Use the 6-hour cooldown only for a direct dependency that is a model provider SDK or an Inspect package. In inspect_sandboxes, a sandbox provider SDK is also permitted.
 1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "6 hours"`.
 2. In `.github/dependabot.yml`, add the package to `cooldown.exclude` of the `uv` entry.
 3. In the same file, add the package to the 6-hour group. In inspect_ai, the group is `provider-sdks`. In the other repositories, the group is `six-hour-cooldown`.
