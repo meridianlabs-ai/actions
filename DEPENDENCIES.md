@@ -48,7 +48,7 @@ Known problems that the design does not permit:
 
 Two intentional exceptions:
 - The inspect_sentinel PR CI installs the test environment of the LiteLLM guardrail with `versions: unlocked`. The jobs are `litellm-guardrail` and `py-build` in `build.yaml`. The LiteLLM version is fixed. The other packages are the newest releases, with no cooldown. These jobs hold no secrets.
-- The inspect_flow workflow `inspect_ai_main.yaml` installs inspect_flow with inspect_ai `main`. It runs every 3 hours and holds no secrets. The inspect_flow PR CI does not use inspect_ai `main`. inspect_flow gets inspect-ai from PyPI. At this time, `inspect_ai_main.yaml` runs `uv sync --dev --upgrade` and then installs inspect_ai `main` from git. `uv sync --dev --upgrade` installs the newest releases that the cooldown permits. inspect_flow#888 changes the workflow to install the inspect_flow lock file and then inspect_ai `main`. It is open.
+- The inspect_flow workflow `inspect_ai_main.yaml` installs inspect_flow with inspect_ai `main`. It runs every 3 hours and holds no secrets. The inspect_flow PR CI does not use inspect_ai `main`. inspect_flow gets inspect-ai from PyPI. At this time, `inspect_ai_main.yaml` runs `uv sync --dev --upgrade` and then installs inspect_ai `main` from git. `uv sync --dev --upgrade` installs the newest releases that the cooldown permits.
 
 ## Where inspect-ai and other Meridian packages come from
 
@@ -60,7 +60,7 @@ Thus, for each repository, the question is: **does the repository need unrelease
 
 | | Needs unreleased inspect_ai changes | Uses only released inspect_ai |
 |---|---|---|
-| **Repositories** | inspect_scout, inspect_sentinel, inspect_swarm and inspect_swe. inspect_sentinel also needs unreleased inspect_scout changes. inspect_swe changed to this method with inspect_swe#226 on 2026-11-10. | inspect_flow, inspect_harbor, inspect_sandboxes, inspect_petri, inspect_ranges, inspect_steward, petri_bloom, petri_dish and inspect_charxiv. |
+| **Repositories** | inspect_scout, inspect_sentinel, inspect_swarm and inspect_swe. inspect_sentinel also needs unreleased inspect_scout changes. | inspect_flow, inspect_harbor, inspect_sandboxes, inspect_petri, inspect_ranges, inspect_steward, petri_bloom, petri_dish and inspect_charxiv. |
 | **Declaration in `pyproject.toml`** | A minimum version in `[project] dependencies`. Also, `[tool.uv.sources]` points to inspect_ai `main` in git. | A minimum version in `[project] dependencies`. |
 | **inspect-ai in PR CI** | The newest commit on inspect_ai `main`. Before the install, CI runs `uv lock --upgrade-package inspect-ai`. After the install, CI restores `uv.lock`. The cooldown does not apply, because a git commit has no PyPI upload time. | The release that `uv.lock` names. The 6-hour cooldown applies. |
 | **inspect-ai on a developer's computer** | The commit that `uv.lock` names. To install the newest commit on `main`, run `uv sync --upgrade-package inspect-ai --extra dev`. | The release in `uv.lock`. |
