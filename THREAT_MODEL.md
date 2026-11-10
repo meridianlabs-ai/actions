@@ -78,7 +78,8 @@ guarantee, and what is by design. To report a vulnerability, see
 - **Jobs that run the dependency closure hold nothing that reaches beyond
   the job.** The scheduled inspect_ai suites install upstream's dev closure
   from inspect_ai's uv.lock at the tested commit, and the inspect_swe
-  nightly installs its dev closure from PyPI unlocked; either way the
+  nightly installs its dev closure from inspect_swe's uv.lock with
+  inspect-ai moved to inspect_ai main's newest commit; either way the
   closure is code this repository does not review, and these jobs execute
   it. Their job token is
   declared read-only in the workflow (`permissions: contents: read`, with
