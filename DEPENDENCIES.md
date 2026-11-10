@@ -25,6 +25,8 @@ PR CI and the slow and nightly tests use the same install, so they share one col
 | Actions cache | A job that holds secrets, an `id-token` or write permissions restores no cache. This rule is for the test, build and release jobs. This document does not include the agent jobs (the Claude workflows). | No cache. |
 | A `uv.lock` that does not agree with `pyproject.toml` | The job fails. The message is *"uv.lock is missing or out of date. Run uv lock and commit it."* In a repository that needs unreleased inspect_ai, the message is *"The lockfile at `uv.lock` needs to be updated"*. | Not applicable. The canaries use no lock file. |
 
+This table does not include the nested package `src/inspect_sandbox_tools` in inspect_ai. That package does not use the inspect_ai `uv.lock`. Its tests install exactly the versions and hashes in `src/inspect_sandbox_tools/tests/requirements.txt`. The first lines of that file give the command that makes it. If you change the dependencies or the test constraints of that package, run that command again and commit the file. For the builds of the sandbox tools, see `src/inspect_sandbox_tools/design/RELEASING.md`.
+
 This table does not tell how the lock files change. For that, see "Cooldown settings" and "Change dependencies" below.
 
 The commands that each column runs:
@@ -112,7 +114,10 @@ These procedures apply to all repositories, inspect_ai included. Each repository
 
 **Use a new API or a necessary fix from a newer release.** If the code of the package needs the newer release, increase the minimum version of the dependency in `pyproject.toml`, for example `inspect-ai>=<version>`. Change the minimum version where `pyproject.toml` declares the dependency. Do not move an optional dependency into `[project] dependencies`. Then run `uv lock` and commit both files. If only the tests need the newer release, do not change the minimum version.
 
-In inspect_ai, the model provider SDKs are optional. They are in the `dev` extra, not in `[project] dependencies`. For these SDKs, inspect_ai checks the installed version when the provider starts. For example, see `MIN_VERSION` and `verify_required_version` in `src/inspect_ai/model/_providers/providers.py`. For such an SDK, increase `MIN_VERSION` and the minimum version in the `dev` extra to the same version. Then run `uv lock` and commit all the changed files.
+In inspect_ai, the packages for the model providers are optional. They are not in `[project] dependencies`. Thus `pyproject.toml` cannot give a user of inspect_ai a minimum version for them. For most of these packages, inspect_ai checks the installed version when the provider starts. For example, see `MIN_VERSION` and `verify_required_version` in `src/inspect_ai/model/_providers/providers.py`. To increase the minimum version of such a package:
+1. Increase `MIN_VERSION` for the provider. If the provider has no version check, add one with `verify_required_version`.
+2. If the package is in the `dev` extra, increase its minimum version there to the same version.
+3. Run `uv lock` and commit all the changed files.
 
 **Use a release before its cooldown ends.** Usually, wait for the cooldown. If the release is urgent, for example a security fix, add an emergency entry:
 1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "<timestamp>"`. Use an RFC 3339 time a short time after the upload time of the release. The package must be a direct dependency. If the package has a 6-hour entry, do not replace that entry. Wait for the 6-hour cooldown.
