@@ -110,7 +110,9 @@ These procedures apply to all repositories, inspect_ai included. Each repository
 
 **Use a newer release after its cooldown.** Run `uv lock --upgrade-package <package>` and commit `uv.lock`. Alternatively, wait for the daily Dependabot PR. This changes only `uv.lock`. Users of the published package can continue to install an older release.
 
-**Use a new API or a necessary fix from a newer release.** If the code of the package needs the newer release, increase the minimum version in `[project] dependencies` in `pyproject.toml`, for example `inspect-ai>=<version>`. Then run `uv lock` and commit both files. If only the tests need the newer release, do not change the minimum version.
+**Use a new API or a necessary fix from a newer release.** If the code of the package needs the newer release, increase the minimum version of the dependency in `pyproject.toml`, for example `inspect-ai>=<version>`. Change the minimum version where `pyproject.toml` declares the dependency. Do not move an optional dependency into `[project] dependencies`. Then run `uv lock` and commit both files. If only the tests need the newer release, do not change the minimum version.
+
+In inspect_ai, the model provider SDKs are optional. They are in the `dev` extra, not in `[project] dependencies`. For these SDKs, inspect_ai checks the installed version when the provider starts. For example, see `MIN_VERSION` and `verify_required_version` in `src/inspect_ai/model/_providers/providers.py`. For such an SDK, increase `MIN_VERSION` and the minimum version in the `dev` extra to the same version. Then run `uv lock` and commit all the changed files.
 
 **Use a release before its cooldown ends.** Usually, wait for the cooldown. If the release is urgent, for example a security fix, add an emergency entry:
 1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "<timestamp>"`. Use an RFC 3339 time a short time after the upload time of the release. The package must be a direct dependency. If the package has a 6-hour entry, do not replace that entry. Wait for the 6-hour cooldown.
