@@ -16,12 +16,11 @@ Security finding 4628345); and the dev-agent and `@auto` jobs opt in to
 landing build and dependency configuration, which the reviewer's workflow
 takes no input for (agents#173: no other automation here runs agent-landed
 branches as the runner); and every job sets a `provision` recipe that installs
-what tests.yml installs, on its Python, since this repo has no pyproject.toml
-and the reusable workflows otherwise provision nothing (decision: Ransom,
-2026-09-24).
+what tests.yml installs (uv.lock's dev group), on its Python (decision:
+Ransom, 2026-09-24).
 
-Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
-`.github/workflows/tests.yml` does the same in CI).
+Run with `uv run python3 -m pytest` from the repo root (pytest and PyYAML
+from uv.lock; `.github/workflows/tests.yml` does the same in CI).
 """
 
 from __future__ import annotations
@@ -94,26 +93,24 @@ def test_the_dev_and_auto_jobs_opt_in_to_build_config_and_the_reviewer_does_not(
 
 
 def ci_recipe() -> str:
-    """The recipe that gives an agent what tests.yml gives CI: a venv on its
-    Python with the packages its `pip install` step installs."""
+    """The recipe that gives an agent what tests.yml gives CI: uv.lock's
+    default (dev) group on tests.yml's Python."""
     steps = load("tests.yml")["jobs"]["pytest"]["steps"]
-    (python,) = [s["with"]["python-version"] for s in steps if s.get("uses", "").startswith("actions/setup-python@")]
-    (install,) = [s["run"] for s in steps if s.get("run", "").startswith("pip install ")]
-    assert "\n" not in install.strip() and install.split()[2:], install
-    return f"uv venv --python {python}\nuv pip install {' '.join(install.split()[2:])}\n"
+    (install,) = [s["with"] for s in steps if s.get("uses") == "./install-python-dependencies"]
+    assert install["versions"] == "locked", install
+    return f"uv sync --frozen --python {install['python-version']}\n"
 
 
 def test_the_ci_recipe_is_what_tests_yml_installs():
     # Pin the derivation, so a tests.yml change that the helper misreads
     # (a second install step, a moved Python pin) fails here, not silently.
-    assert ci_recipe() == "uv venv --python 3.12\nuv pip install pytest pyyaml\n"
+    assert ci_recipe() == "uv sync --frozen --python 3.12\n"
 
 
 @pytest.mark.parametrize("stub", STUBS)
 def test_every_job_provisions_what_the_tests_workflow_installs(stub):
-    # No pyproject.toml here, so without a recipe the reusable workflows'
-    # provisioning step is skipped and the agent has no pytest or PyYAML;
-    # every job runs an agent (the reviewer runs pytest too), so each sets
+    # Each job pins tests.yml's Python and installs uv.lock's dev group, so
+    # the agent has pytest and PyYAML; every job runs an agent (the reviewer runs pytest too), so each sets
     # it, under the current input name.
     for name, job in load(stub)["jobs"].items():
         assert job.get("with", {}).get("provision") == ci_recipe(), (stub, name)
