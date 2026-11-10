@@ -264,6 +264,43 @@ def test_every_tool_runs_through_uv_run_no_sync(job):
         assert re.match(rf"uv run --no-sync ({tools})\b", call), (job, call)
 
 
+MOVE_STEP = "Move inspect-ai to inspect_ai main"
+
+
+def test_the_nightly_installs_what_inspect_swe_pr_ci_installs():
+    # inspect_swe's .github/actions/uv-sync: uv.lock, with inspect-ai moved
+    # to inspect_ai main's newest commit; here with no Actions cache.
+    ss = steps(NIGHTLY, "nightly-tests")
+    setups = [s for s in ss if str(s.get("uses", "")).startswith("meridianlabs-ai/actions/setup-uv@")]
+    installs = [s for s in ss if str(s.get("uses", "")).startswith(INSTALL)]
+    assert len(setups) == 1 and len(installs) == 1
+    sha = installs[0]["uses"].removeprefix(INSTALL)
+    assert re.fullmatch(r"[0-9a-f]{40}", sha) and setups[0]["uses"].endswith("@" + sha)
+    assert setups[0]["with"] == {"python-version": "3.11", "actions-cache": "none"}
+    assert installs[0]["with"] == {"versions": "locked", "python-version": "3.11", "extras": "dev", "actions-cache": "none"}
+    names = [s.get("name") for s in ss]
+    assert names.index(MOVE_STEP) < names.index("Install from uv.lock")
+    assert [s["run"] for s in ss if s.get("name") == MOVE_STEP] == ["uv lock --check\nuv lock --upgrade-package inspect-ai\n"]
+    assert not any(str(s.get("uses", "")).startswith("actions/setup-python@") for s in ss)
+
+
+def test_no_other_nightly_step_resolves_upgrades_or_relocks():
+    for s in steps(NIGHTLY, "nightly-tests"):
+        if s.get("name") == MOVE_STEP:
+            continue
+        run = s.get("run") or ""
+        for word in ("pip install", "uv pip", "uv lock", "--upgrade"):
+            assert word not in run, (s.get("name"), word)
+
+
+def test_the_nightly_runs_pytest_through_uv_run_no_sync():
+    calls = [line.strip() for s in steps(NIGHTLY, "nightly-tests") for line in (s.get("run") or "").splitlines()
+             if re.search(r"\bpytest\b", line) and not line.strip().startswith("#")]
+    assert calls
+    for call in calls:
+        assert call.startswith("uv run --no-sync pytest "), call
+
+
 # --- The last-inspect-ai-sha artifact ---------------------------------------------------
 
 FAKE_GH = r'''#!/usr/bin/env python3

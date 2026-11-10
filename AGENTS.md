@@ -88,7 +88,8 @@ clean.
   step that runs after the agent.
 - A job that installs and runs third-party dependencies (the scheduled
   inspect_ai suites install from inspect_ai's `uv.lock` at the tested
-  commit; the inspect_swe nightly installs the day's dependency closure)
+  commit; the inspect_swe nightly from inspect_swe's `uv.lock`, with
+  inspect-ai moved to inspect_ai main)
   holds nothing that reaches beyond the job: the
   workflow declares a read-only token, its checkouts set
   `persist-credentials: false`, and it restores and saves no Actions cache
