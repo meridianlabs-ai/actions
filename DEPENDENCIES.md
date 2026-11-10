@@ -41,9 +41,11 @@ The workflows in each flow:
 
 Known problems that the design does not permit:
 - The inspect_swe nightly tests run `pip install -e ".[dev]"` with no lock file and no cooldown. actions#169 corrects this. It is open. inspect_swe#229 was merged on 2026-11-10. It added the test tools to the inspect_swe lock file.
-- inspect_harbor `harbor-parity.yml` and inspect_vscode `proxy-routes.yml` install the newest release of each dependency. Other jobs in these repositories restore Actions caches. Canaries for these two repositories already exist. Delete the two workflows.
-- inspect_viz installs JavaScript with plain `yarn install`, without `--frozen-lockfile`.
-- No repository locks the build backend for the editable install.
+- inspect_harbor `harbor-parity.yml` and inspect_vscode `proxy-routes.yml` install the newest release of each dependency. Other jobs in these repositories restore Actions caches. Canaries for these two repositories already exist. Delete the two workflows. See inspect_harbor#224 and inspect_vscode#235.
+- inspect_viz installs JavaScript with plain `yarn install`, without `--frozen-lockfile`. See inspect_viz#59.
+- No repository locks the build backend for the editable install. See actions#172.
+- The inspect_flow action `.github/actions/setup` sets no uv version. See inspect_flow#913.
+- The `make install` target in inspect_harbor and inspect_sandboxes runs plain `uv sync`. See inspect_harbor#223 and inspect_sandboxes#113.
 
 Two intentional exceptions:
 - The inspect_sentinel PR CI installs the test environment of the LiteLLM guardrail with `versions: unlocked`. The jobs are `litellm-guardrail` and `py-build` in `build.yaml`. The LiteLLM version is fixed. The other packages are the newest releases, with no cooldown. These jobs hold no secrets.
