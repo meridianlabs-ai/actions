@@ -36,11 +36,10 @@ The workflows in each flow:
 
 | Flow | Workflows |
 |---|---|
-| PR CI, slow tests and nightly tests | The PR CI of each repository. This includes the inspect_ai slow tests. The workflow `inspect-ai-scheduled-tests.yml` in meridianlabs-ai/actions runs every 2 hours. It installs the inspect_ai `uv.lock` at the tested commit. The workflow `inspect-swe-nightly-tests.yml` in meridianlabs-ai/actions runs at 08:00 UTC. It does not install from the lock file at this time. See the known problems below. |
+| PR CI, slow tests and nightly tests | The PR CI of each repository. This includes the inspect_ai slow tests. The workflow `inspect-ai-scheduled-tests.yml` in meridianlabs-ai/actions runs every 2 hours. It installs the inspect_ai `uv.lock` at the tested commit. The workflow `inspect-swe-nightly-tests.yml` in meridianlabs-ai/actions runs at 08:00 UTC. It first moves the inspect_swe `uv.lock` to the newest commit on inspect_ai `main`, as the inspect_swe PR CI does. Then it installs exactly `uv.lock`. |
 | Canaries | meridianlabs-ai/canaries has one canary for each repository. The inspect_ai and inspect_flow canaries run every 2 hours. The other canaries run at 05:30 UTC. A failed canary runs every 2 hours until it passes. ts-mono and inspect_charxiv have no canary. |
 
 Known problems that the design does not permit:
-- The inspect_swe nightly tests run `pip install -e ".[dev]"` with no lock file and no cooldown. actions#169 corrects this. It is open. inspect_swe#229 was merged on 2026-11-10. It added the test tools to the inspect_swe lock file.
 - inspect_harbor `harbor-parity.yml` and inspect_vscode `proxy-routes.yml` install the newest release of each dependency. Other jobs in these repositories restore Actions caches. Canaries for these two repositories already exist. Delete the two workflows. See inspect_harbor#224 and inspect_vscode#235.
 - inspect_viz installs JavaScript with plain `yarn install`, without `--frozen-lockfile`. See inspect_viz#59.
 - No repository locks the build backend for the editable install. See actions#172.
