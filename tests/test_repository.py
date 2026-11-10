@@ -11,6 +11,10 @@ An App installation token gets every permission the App holds unless the
 step that mints it names fewer, so every mint step names its permissions.
 The release steps ask for the Meridian Release Bot's two write permissions.
 
+`tests.yml` runs on every pull request, with no paths filter, so its `pytest`
+check can be a required check: GitHub leaves a required check pending on a PR
+that a paths filter skips.
+
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
 """
@@ -68,3 +72,10 @@ def test_release_tokens_ask_for_the_release_apps_permissions():
         if name in RELEASE_WORKFLOWS:
             scoped = {k: v for k, v in step["with"].items() if k.startswith("permission-")}
             assert scoped == {"permission-contents": "write", "permission-pull-requests": "write"}, name
+
+
+def test_the_tests_workflow_runs_on_every_pull_request():
+    on = yaml.safe_load((GITHUB / "workflows" / "tests.yml").read_text())["on"]
+    assert "pull_request" in on
+    filters = set(on["pull_request"] or {}) & {"paths", "paths-ignore"}
+    assert filters == set(), f"tests.yml pull_request has a {sorted(filters)} filter"
