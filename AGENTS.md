@@ -10,8 +10,10 @@ it.
 repos: reusable release workflows and composite actions (`README.md`,
 `RELEASING.md`), the scheduled test runs of `inspect_ai` and `inspect_swe`
 and the triage of their failures (`INSPECT_AI_TESTS.md`), the ci-perf
-run, and a weekly link check of the published docs sites. The workflows
-are the product; there is no application code.
+run, and a weekly link check of the published docs sites. It also holds
+`DEPENDENCIES.md`, the one description of how the Inspect repositories
+install and change dependencies. The
+workflows are the product; there is no application code.
 
 ## The workflow scripts are tested
 

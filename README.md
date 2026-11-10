@@ -29,6 +29,11 @@ with a `# vX.Y.Z` comment, as above; Dependabot bumps them. The self-test
 workflow (`.github/workflows/self-test-python-actions.yml`) runs them on a
 runner, and `tests/test_python_actions.py` tests their scripts.
 
+[DEPENDENCIES.md](DEPENDENCIES.md) tells how the Inspect repositories install
+and change dependencies with these actions: the lock file, the canaries, the
+cooldown settings and the procedures to change a dependency. It is the one
+description of these rules for all the Inspect repositories.
+
 - **`setup-uv/`** — composite action: install the pinned uv (and, if asked, a
   Python) with a stated Actions cache rule. Inputs: `python-version` (empty
   installs no Python) and `actions-cache` (`read-write`, `restore-only` or
