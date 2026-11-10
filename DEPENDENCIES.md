@@ -4,7 +4,7 @@
 
 **Summary:**
 - PR CI and the slow and nightly tests install exactly the versions in `uv.lock`.
-- A release gets into `uv.lock` only after it has been on PyPI for 7 days. This time is the cooldown. Provider SDKs and Inspect packages have a 6-hour cooldown.
+- A release gets into `uv.lock` only after it has been on PyPI for 7 days. This time is the cooldown. A compromised release is usually found and removed in less than 7 days. Provider SDKs and Inspect packages have a 6-hour cooldown.
 - By design, the canaries are the only workflows that install the newest release of each dependency. They ignore the lock file and the 7-day cooldown.
 - The canary jobs hold no secrets, so a bad release has nothing to steal there.
 - When a canary fails, the usual cause is a change in a dependency, not a change in our code. There is one other cause. The canary of a repository that needs unreleased inspect_ai changes tests with the newest PyPI release of inspect-ai. That canary fails while the repository's `main` uses an inspect_ai change that is not released.
@@ -18,8 +18,8 @@ PR CI and the slow and nightly tests use the same install, so they share one col
 | PyPI packages: third-party packages, provider SDKs and Inspect packages | Exactly the versions and hashes in `uv.lock`. uv does not resolve versions. | The newest release. uv resolves the versions at install time. |
 | inspect-ai, in repositories that use only released inspect_ai | Exactly the release in `uv.lock`. | The newest PyPI release. |
 | inspect-ai, in repositories that need unreleased inspect_ai | CI first moves `uv.lock` to the newest commit on inspect_ai `main`. Then CI installs exactly `uv.lock`. | The newest PyPI release. `UV_NO_SOURCES=1` makes uv ignore the git source. Exception: the inspect_sentinel canary installs inspect_ai `main` and inspect_scout `main` from git. |
-| Release build tools: `build` and the build backend (setuptools in inspect_ai, hatchling in the other repositories) | Exactly the versions and hashes in `scripts/build-dist/requirements.txt` (`--require-hashes`). The build uses `--no-isolation`. | Not installed. |
-| The build backend for the editable install | **Not locked.** uv resolves `[build-system] requires` at install time. | uv resolves it at install time. |
+| Release build tools: `build` and the build backend (setuptools and setuptools_scm in inspect_ai, hatchling and hatch-vcs in the other repositories) | Exactly the versions and hashes in `scripts/build-dist/requirements.txt` (`--require-hashes`). The build uses `--no-isolation`. | Not installed. |
+| The build backend for the editable install | **Not locked.** uv resolves `[build-system] requires` at install time, without `uv.lock` or hashes. The cooldown applies. | uv resolves it at install time. |
 | JavaScript in ts-mono, inspect_vscode, the inspect_ai viewer and the inspect_scout viewer | Exactly the pnpm lock file (`--frozen-lockfile`). | inspect_vscode: the newest releases, with no lock file. No other canary installs this JavaScript. |
 | JavaScript in inspect_viz | **Not exactly `yarn.lock`.** CI runs plain `yarn install`, without `--frozen-lockfile`. If `yarn.lock` does not agree with `package.json`, yarn resolves new versions and the job does not fail. | The newest releases. No lock file. |
 | Actions cache | A job that holds secrets, an `id-token` or write permissions restores no cache. This rule is for the test, build and release jobs. This document does not include the agent jobs (the Claude workflows). | No cache. |
@@ -80,7 +80,7 @@ A cooldown is the minimum time that a release must be on PyPI before uv can use 
 | Setting | Value | Location |
 |---|---|---|
 | Default cooldown | 7 days | `[tool.uv] exclude-newer = "7 days"` in the `pyproject.toml` of each Python repository. |
-| Short cooldown | 6 hours | `[tool.uv.exclude-newer-package]`: `<package> = "6 hours"`. Use it only for a direct dependency that is a model provider SDK or an Inspect package. In inspect_sandboxes, a sandbox provider SDK is also permitted. |
+| Short cooldown | 6 hours | `[tool.uv.exclude-newer-package]`: `<package> = "6 hours"`. Use it only for a direct dependency that is a model provider SDK or an Inspect package. In inspect_sandboxes, a sandbox provider SDK is also permitted. All other packages keep the 7-day cooldown. This includes packages that a provider needs, for example torch, accelerate, the AWS SDKs and `certifi`. |
 | Emergency entry | A fixed time | `[tool.uv.exclude-newer-package]`: `<package> = "<RFC 3339 time>"`. The entry is temporary. Remove it when it is 7 days old. At that time, a test fails. |
 | Dependabot | 7 days | The `uv` entry in `.github/dependabot.yml`: `cooldown.default-days: 7`. The 6-hour packages are in `cooldown.exclude` and have their own group. |
 | Canaries | None | The canaries install with `--exclude-newer false`. Most canaries also use `--no-config`, which removes the per-package entries. Exception: the inspect_flow and inspect_steward canaries keep their 6-hour entries. |
@@ -123,9 +123,9 @@ These procedures apply to all repositories, inspect_ai included. Each repository
 4. Commit all the changed files.
 
 **Add a package to the 6-hour cooldown.** Use the 6-hour cooldown only for a direct dependency that is a model provider SDK or an Inspect package. In inspect_sandboxes, a sandbox provider SDK is also permitted.
-1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "6 hours"`.
+1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "6 hours"`. If the table does not exist, add it.
 2. In `.github/dependabot.yml`, add the package to `cooldown.exclude` of the `uv` entry.
-3. In the same file, add the package to the 6-hour group. In inspect_ai, the group is `provider-sdks`. In the other repositories, the group is `six-hour-cooldown`.
+3. In the same file, add the package to the 6-hour group. In inspect_ai, the group is `provider-sdks`. In the other repositories, the group is `six-hour-cooldown`. If `cooldown.exclude` or the group does not exist, add it. Copy the form from the inspect_scout `.github/dependabot.yml`.
    - Exception: do not do steps 2 and 3 for a package that is in the `ignore` list of the `uv` entry. Dependabot does not update that package. For example, Dependabot ignores inspect-ai in inspect_scout, inspect_sentinel, inspect_swarm, inspect_swe and inspect_flow.
 4. Run `uv lock`. The new entry changes `uv.lock`.
 5. Run `uv run pytest tests/test_dependency_cooldown.py`. The test makes sure that `pyproject.toml` and `.github/dependabot.yml` agree.
@@ -139,12 +139,14 @@ These procedures apply to all repositories, inspect_ai included. Each repository
 
 **A Dependabot PR fails to lock a 6-hour package.** Dependabot probably proposed a release that is less than 6 hours old. See "Two important facts" above. Do nothing. The next daily Dependabot run updates the PR. If the PR continues to fail, there is a real version conflict. Read the log of the Dependabot job.
 
-**Get the newest inspect_ai `main` in a repository that needs unreleased inspect_ai changes.** Run `uv sync --upgrade-package inspect-ai --extra dev`. In inspect_sentinel, also add `--upgrade-package inspect-scout`. It is optional to commit the changed `uv.lock`. CI always moves `uv.lock` to the newest commit on `main`.
+**Get the newest inspect_ai `main` in a repository that needs unreleased inspect_ai changes.** Run `uv sync --upgrade-package inspect-ai --extra dev`. In inspect_sentinel, also add `--upgrade-package inspect-scout`. If inspect_ai `main` requires a different version of another package, uv also changes that package. All other packages keep their locked versions. It is optional to commit the changed `uv.lock`. CI always moves `uv.lock` to the newest commit on `main`.
 
 **Work with a local inspect_ai checkout.** In a repository that needs unreleased inspect_ai changes, install your checkout over the locked inspect-ai:
 1. Run `uv sync --locked --extra dev`.
 2. Run `uv pip install --no-deps -e ../inspect_ai`. With `--no-deps`, uv installs only your checkout and resolves no versions.
 3. If your inspect_ai checkout needs a package that `uv.lock` does not contain, the import fails. Install that one package by name: `uv pip install <package>`. Run the command in the repository directory, so that uv applies the cooldown. Do not use `--no-config` or `--exclude-newer false`.
 4. Run commands with `.venv/bin/<command>` or `uv run --no-sync <command>`. A plain `uv run` or `uv sync` installs the locked inspect-ai again.
+
+In inspect_sentinel, the same procedure applies to a local inspect_scout checkout. In step 2, use `../inspect_scout`.
 
 The two commands in steps 2 and 3 are the only permitted uses of `uv pip install` in a checkout.
