@@ -118,7 +118,7 @@ These procedures apply to a repository that has a `pyproject.toml` and a `uv.loc
 
 **A Dependabot PR fails to lock a 6-hour package.** Dependabot probably proposed a release that is less than 6 hours old. See "Two important facts" above. Do nothing. The next Dependabot run updates the PR. If the PR continues to fail, there is a real version conflict. Read the log of the Dependabot job.
 
-**Get the newest inspect_ai `main` in a repository that needs unreleased inspect_ai changes.** Add `--upgrade-package inspect-ai` to the setup command, for example `uv sync --upgrade-package inspect-ai --extra dev`. If inspect_ai `main` requires a different version of another package, uv also changes that package. It is optional to commit the changed `uv.lock`.
+**Get the newest inspect_ai `main` in a repository that needs unreleased inspect_ai changes.** Remove `--locked` from the setup command and add `--upgrade-package inspect-ai`. Keep its extras and dependency groups. For example: `uv sync --upgrade-package inspect-ai --extra dev`. If inspect_ai `main` requires a different version of another package, uv also changes that package. It is optional to commit the changed `uv.lock`.
 
 **Work with a local inspect_ai checkout.** In a repository that needs unreleased inspect_ai changes, install your checkout over the locked inspect-ai:
 1. Run the setup command, for example `uv sync --locked --extra dev`.
