@@ -90,12 +90,11 @@ def test_no_expression_reaches_a_run_script():
         assert "${{" not in (s.get("run") or ""), s.get("name")
 
 
-def test_the_upload_fails_on_no_files_a_rerun_replaces_it_and_it_outlasts_the_approval_wait():
+def test_the_upload_fails_on_no_files_and_a_rerun_replaces_it():
     [upload] = steps_using("actions/upload-artifact")
     assert upload["with"] == {
         "name": "dist",
         "path": "dist/",
-        "retention-days": 30,
         "if-no-files-found": "error",
         "overwrite": True,
     }
