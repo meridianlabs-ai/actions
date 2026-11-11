@@ -4,7 +4,7 @@ description: >-
   GitHub release notes (markdown) to Slack mrkdwn. No-ops if webhook is empty.
 
 # Usage (in a repo's release workflow, after a release is created):
-#   - uses: meridianlabs-ai/actions/slack-release-announce@v1
+#   - uses: meridianlabs-ai/actions/slack-release-announce@<commit SHA on main> # main
 #     with:
 #       webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
 #       title: ":rocket: inspect-flow ${{ needs.release-please.outputs.tag_name }} released"

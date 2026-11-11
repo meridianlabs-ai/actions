@@ -83,7 +83,7 @@ name: Release Please — VS Code extension (reusable)
 #       permissions:
 #         contents: write
 #         pull-requests: write
-#       uses: meridianlabs-ai/actions/.github/workflows/release-please-vscode.yml@v1
+#       uses: meridianlabs-ai/actions/.github/workflows/release-please-vscode.yml@<commit SHA on main> # main
 #       with:
 #         extension-id: ukaisi.inspect-ai
 #       secrets: inherit
@@ -290,7 +290,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: meridianlabs-ai/actions
-          ref: v1
+          ref: main
           sparse-checkout: slack-ids.json
           sparse-checkout-cone-mode: false
           path: _meridian_actions
