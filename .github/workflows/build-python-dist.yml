@@ -1,0 +1,105 @@
+---
+name: Build Python dist (reusable)
+
+# Reusable workflow: build a repo's release distributions (sdist and wheel) in
+# a job that holds no publishing credential, and upload them as the `dist`
+# artifact. The caller publishes them from its own job, which does nothing
+# but download that artifact and upload it to PyPI.
+#
+# The build runs the repo's build backend, so it holds only the read-only job
+# token, persists no checkout credential and uses no Actions cache. It has no
+# environment, no secrets and no `id-token: write`. The build tools install at
+# the versions and hashes in the caller's scripts/build-dist/requirements.txt
+# (see DEPENDENCIES.md), and `python -m build --no-isolation` builds with them
+# and nothing else.
+#
+# The publish job is not in this workflow. PyPI trusted publishing does not
+# accept a job inside a reusable workflow from another repo: PyPI compares the
+# token's `job_workflow_ref` claim with the caller repo's workflow file, and
+# for a job here that claim names this repo (pypi/warehouse#11096). A
+# composite action that wraps pypa/gh-action-pypi-publish also fails, because
+# the runner resolves its Docker action against the calling repo
+# (actions/runner#2473). So each caller keeps its own two-step publish job.
+# That job stays in the same workflow file and the same `pypi` environment,
+# so the caller's PyPI trusted publisher entry does not change.
+#
+# pypa/gh-action-pypi-publish runs `twine check` on the files itself, and with
+# trusted publishing it makes PEP 740 attestations by default. Download by
+# artifact ID binds the publish to the artifact this run's build uploaded.
+#
+# Caller:
+#   jobs:
+#     build:
+#       permissions: { contents: read }
+#       uses: meridianlabs-ai/actions/.github/workflows/build-python-dist.yml@<commit SHA on main> # main
+#       with: { python-version: "3.12" }
+#     publish:
+#       needs: build
+#       if: <the repo's own publish condition>
+#       runs-on: ubuntu-latest
+#       timeout-minutes: 15
+#       permissions: { id-token: write }
+#       environment: { name: pypi, url: https://pypi.org/p/<package> }
+#       steps:
+#         - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+#           with:
+#             artifact-ids: ${{ needs.build.outputs.artifact-id }}
+#             path: dist/
+#         - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+"on":
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python for the build, for example '3.12'."
+        type: string
+        required: true
+      lfs:
+        description: "Check out Git LFS files, for a repo whose built assets are in LFS."
+        type: boolean
+        default: false
+    outputs:
+      artifact-id:
+        description: "ID of the uploaded `dist` artifact. Give it to actions/download-artifact as artifact-ids."
+        value: ${{ jobs.build.outputs.artifact-id }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    cache-mode: none
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # hatch-vcs takes the version from the tags.
+          fetch-depth: 0
+          lfs: ${{ inputs.lfs }}
+          persist-credentials: false
+
+      - uses: meridianlabs-ai/actions/install-python-dependencies@4e0837bf4c5b33db42a349f3bed4ea2cb1980269 # self, re-pin after each change
+        with:
+          versions: hashed-requirements
+          python-version: ${{ inputs.python-version }}
+          requirements-file: scripts/build-dist/requirements.txt
+          package-format: wheels-only
+          actions-cache: none
+          environment-dir: ${{ runner.temp }}/build-venv
+
+      - name: Build
+        run: |
+          "$RUNNER_TEMP/build-venv/bin/python" -m build --no-isolation
+          ls -la dist/
+
+      # A re-run replaces the artifact.
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          overwrite: true

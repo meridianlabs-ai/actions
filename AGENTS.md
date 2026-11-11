@@ -24,7 +24,8 @@ where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`,
 `tests/test_docs_link_check_workflow.py`, `tests/test_publish_docs_workflow.py`;
 `tests/test_slack_release_announce.py` covers the announce converter,
-`tests/test_release_notes_heading.py` the release workflows' heading rename, and
+`tests/test_release_notes_heading.py` the release workflows' heading rename,
+`tests/test_build_python_dist_workflow.py` the shared build job's permissions and steps, and
 `tests/test_repository.py` checks that no workflow names a retired
 Anthropic key and that every App token step names its permissions).
 `.github/workflows/tests.yml` runs them in CI on every push and pull request
