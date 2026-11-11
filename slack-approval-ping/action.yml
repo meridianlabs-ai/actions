@@ -7,7 +7,7 @@ description: >-
   webhook is empty.
 
 # Usage (a non-gated notify job in the same run as the gated publish):
-#   - uses: meridianlabs-ai/actions/slack-approval-ping@v1
+#   - uses: meridianlabs-ai/actions/slack-approval-ping@<commit SHA on main> # main
 #     with:
 #       webhook: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
 #       approvers: "dragonstyle jjallaire epatey"

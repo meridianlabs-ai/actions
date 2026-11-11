@@ -17,7 +17,7 @@ name: PR Title Lint (reusable)
 #     lint:
 #       permissions:
 #         pull-requests: read
-#       uses: meridianlabs-ai/actions/.github/workflows/pr-title-lint.yml@v1
+#       uses: meridianlabs-ai/actions/.github/workflows/pr-title-lint.yml@<commit SHA on main> # main
 
 on:
   workflow_call:
@@ -29,7 +29,7 @@ on:
       types-ref:
         description: "git ref of meridianlabs-ai/actions to read the shared type list from"
         type: string
-        default: "v1"
+        default: "main"
 
 permissions:
   pull-requests: read
