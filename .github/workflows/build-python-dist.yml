@@ -17,19 +17,27 @@ name: Build Python dist (reusable)
 # accept a job inside a reusable workflow from another repo: PyPI compares the
 # token's `job_workflow_ref` claim with the caller repo's workflow file, and
 # for a job here that claim names this repo (pypi/warehouse#11096). A
-# composite action that wraps pypa/gh-action-pypi-publish also fails, because
-# the runner resolves its Docker action against the calling repo
-# (actions/runner#2473). So each caller keeps its own two-step publish job.
+# composite action that wraps pypa/gh-action-pypi-publish also fails: inside
+# a composite action, `github.action_repository` and `github.action_ref` are
+# empty (actions/runner#2473), and pypa/gh-action-pypi-publish needs them to
+# find its Docker image. So each caller keeps its own two-step publish job.
 # That job stays in the same workflow file and the same `pypi` environment,
 # so the caller's PyPI trusted publisher entry does not change.
 #
 # pypa/gh-action-pypi-publish runs `twine check` on the files itself, and with
 # trusted publishing it makes PEP 740 attestations by default. Download by
-# artifact ID binds the publish to the artifact this run's build uploaded.
+# artifact ID binds the publish to the artifact that this run's build job
+# uploaded, not to any other artifact named `dist`: the ID reaches only the
+# `with:` of download-artifact, which without `run-id` fetches only from this
+# run.
 #
 # Caller:
 #   jobs:
 #     build:
+#       # If release-please creates the tag earlier in this run, also give the
+#       # build the publish job's `needs: release-please` and
+#       # `if: ${{ needs.release-please.outputs.release_created }}`. If not,
+#       # hatch-vcs builds a dev version before the tag exists.
 #       permissions: { contents: read }
 #       uses: meridianlabs-ai/actions/.github/workflows/build-python-dist.yml@<commit SHA on main> # main
 #       with: { python-version: "3.12" }
@@ -101,5 +109,7 @@ jobs:
         with:
           name: dist
           path: dist/
+          # The build runs before the pypi approval gate, which can wait 30 days.
+          retention-days: 30
           if-no-files-found: error
           overwrite: true
