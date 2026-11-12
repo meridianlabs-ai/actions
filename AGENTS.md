@@ -52,8 +52,8 @@ the real permission engine and when to repeat them.
 ## Checks
 
 ```
-pip install pytest pyyaml        # or a venv; the repo has no lock file
-python3 -m pytest -q tests
+uv sync --locked                 # pytest and PyYAML from uv.lock
+uv run python3 -m pytest -q tests
 actionlint .github/workflows/<changed>.yml
 python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflows/<changed>.yml
 ```
