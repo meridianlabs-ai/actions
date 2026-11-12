@@ -80,7 +80,7 @@ def test_the_types_of_the_workflow_commit_are_output(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
     assert f"Reading types from {REPO}@{head}" in result.stdout
     expected = subprocess.run(["jq", "-r", ".[].type", str(TYPES)], check=True, capture_output=True, text=True).stdout
-    assert "feat\nfix\n" in expected
+    assert {"feat", "fix"} <= set(expected.split())
     assert (tmp_path / "out").read_text() == f"types<<EOF\n{expected}EOF\n"
 
 
