@@ -34,13 +34,15 @@ name: Build Python dist (reusable)
 # artifacts unless it gets a `github-token`.
 #
 # Caller:
+#   # If release-please creates the tag earlier in this run, gate both jobs on
+#   # its output. Give the build job `needs: release-please` and
+#   # `if: ${{ needs.release-please.outputs.release_created }}`. Without that
+#   # `needs:`, hatch-vcs builds a dev version before the tag exists. Give the
+#   # publish job `needs: [release-please, build]`. A job reads only the
+#   # outputs of the jobs in its own `needs:`, so with `needs: build` alone its
+#   # `if:` reads the release-please output as empty and the publish is skipped.
 #   jobs:
 #     build:
-#       # If release-please creates the tag earlier in this run, give the
-#       # build job the same `needs:` and `if:` that gate the publish job on
-#       # the release-please output (for example `needs: release-please` and
-#       # `if: ${{ needs.release-please.outputs.release_created }}`). If not,
-#       # hatch-vcs builds a dev version before the tag exists.
 #       permissions: { contents: read }
 #       uses: meridianlabs-ai/actions/.github/workflows/build-python-dist.yml@<commit SHA on main> # main
 #       with: { python-version: "3.12" }
