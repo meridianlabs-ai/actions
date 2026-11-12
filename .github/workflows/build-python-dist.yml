@@ -94,7 +94,7 @@ jobs:
           lfs: ${{ inputs.lfs }}
           persist-credentials: false
 
-      - uses: meridianlabs-ai/actions/install-python-dependencies@4e0837bf4c5b33db42a349f3bed4ea2cb1980269 # self, re-pin after each change
+      - uses: meridianlabs-ai/actions/install-python-dependencies@6245f003b5628736e543468ca41f61a42549643f # self, re-pin after each change
         with:
           versions: hashed-requirements
           python-version: ${{ inputs.python-version }}

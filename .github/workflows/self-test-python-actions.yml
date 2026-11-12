@@ -308,7 +308,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/install-python-dependencies@0e663813beb1bcfc92b222edcd997287110e0e91 # self, re-pin after each change
+      - uses: meridianlabs-ai/actions/install-python-dependencies@6245f003b5628736e543468ca41f61a42549643f # self, re-pin after each change
         with:
           versions: locked
           python-version: "3.11"
@@ -329,7 +329,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/setup-uv@0e663813beb1bcfc92b222edcd997287110e0e91 # self, re-pin after each change
+      - uses: meridianlabs-ai/actions/setup-uv@6245f003b5628736e543468ca41f61a42549643f # self, re-pin after each change
         with:
           python-version: "3.11"
           actions-cache: none

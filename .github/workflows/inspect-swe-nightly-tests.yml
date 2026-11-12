@@ -103,7 +103,7 @@ jobs:
       # minus the Actions cache (`actions-cache: none`): see the header. The
       # dev extra carries pytest-timeout, pytest-xdist and google-genai.
       - name: Set up uv
-        uses: meridianlabs-ai/actions/setup-uv@330f3df6492418d6b25dc2631fc31143489f4674 # self, re-pin after each change
+        uses: meridianlabs-ai/actions/setup-uv@6245f003b5628736e543468ca41f61a42549643f # self, re-pin after each change
         with:
           python-version: "3.11"
           actions-cache: none
@@ -114,7 +114,7 @@ jobs:
           uv lock --upgrade-package inspect-ai
 
       - name: Install from uv.lock
-        uses: meridianlabs-ai/actions/install-python-dependencies@330f3df6492418d6b25dc2631fc31143489f4674 # self, re-pin after each change
+        uses: meridianlabs-ai/actions/install-python-dependencies@6245f003b5628736e543468ca41f61a42549643f # self, re-pin after each change
         with:
           versions: locked
           python-version: "3.11"
