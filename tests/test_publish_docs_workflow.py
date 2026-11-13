@@ -3,10 +3,10 @@
 The docs site is published only from the tag of a published release (the
 `tag` input when a caller passes one, else the run's ref), so the build job's
 ref check is lifted from the YAML and run under bash with a stand-in for gh on
-PATH, and the checkout renders the ref the check passed. The build job runs the calling repo's code, so it holds only
-the read-only job token, persists no checkout credential and uses no Actions
-cache; the deploy job, which holds `pages: write` and `id-token: write`, runs
-no repo code.
+PATH, and the checkout renders the tag the check passed. The build job runs
+the calling repo's code, so it holds only the read-only job token, persists no
+checkout credential and uses no Actions cache; the deploy job, which holds
+`pages: write` and `id-token: write`, runs no repo code.
 
 Run with `python3 -m pytest` from the repo root (needs pytest, PyYAML and jq).
 """
@@ -96,7 +96,8 @@ def run_check_ref(
 def test_the_tag_of_a_published_release_passes(tmp_path):
     result = run_check_ref(tmp_path, "refs/tags/0.2.72", {"0.2.72": {"tag_name": "0.2.72", "draft": False}})
     assert result.returncode == 0, result.stderr + result.stdout
-    assert result.output == "ref<<EOF\nrefs/tags/0.2.72\nEOF\n"
+    # The checkout's default ref and commit stay in use.
+    assert result.output == ""
 
 
 @pytest.mark.parametrize("ref", ["refs/heads/main", "refs/heads/feature", "refs/pull/12/merge"])

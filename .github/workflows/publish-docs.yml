@@ -11,8 +11,9 @@ name: Publish docs (reusable)
 # Jobs:
 # - build: first refuses any ref that is not the tag of a published release
 #   (`tag` when given, else the run's ref), so docs for unreleased code never
-#   reach the site. Then it checks out that tag, installs the project from
-#   uv.lock and runs `quarto render`. It runs the repo's code, so
+#   reach the site. Then it checks out that tag (the run's own commit when no
+#   `tag` is given), installs the project from uv.lock and runs `quarto
+#   render`. It runs the repo's code, so
 #   it holds only the read-only job token, persists no checkout credential and
 #   uses no Actions cache.
 # - deploy: deploys the build's Pages artifact with actions/deploy-pages. It
@@ -22,13 +23,13 @@ name: Publish docs (reusable)
 # One-time setup in the calling repo (an admin), before the caller merges:
 # - Settings → Pages → Source: "GitHub Actions". The `gh-pages` branch is then
 #   no longer served, so `quarto publish gh-pages` stops updating the site.
-# - Settings → Environments → github-pages: add a deployment rule for the
-#   run's ref. GitHub checks the rule against the run's ref, not the checked
-#   out tag: a tag rule matching the release tags (for example `*.*.*`) for an
-#   `on: release` caller, a branch rule for `main` for a caller that passes
-#   `tag`. The environment's rules otherwise name only `gh-pages` (or the
-#   default branch), and the deploy is refused after PyPI has already
-#   published.
+# - Settings → Environments → github-pages: the deployment rules must allow
+#   the run's ref, which GitHub checks rather than the checked out tag. For an
+#   `on: release` caller, add a tag rule matching the release tags (for
+#   example `*.*.*`). For a caller that passes `tag`, make sure the rules
+#   include `main`; the environment then admits any job on main, so this
+#   workflow's tag check is what keeps unreleased docs off the site. Without
+#   a matching rule the deploy is refused after PyPI has already published.
 #
 # Caller, in a publish workflow that runs `on: release`:
 #   jobs:
@@ -101,7 +102,11 @@ jobs:
               encoded="$(jq -rn --arg t "$tag" '$t | @uri')"
               if gh api "repos/$REPO/releases/tags/$encoded" \
                   | jq -e --arg t "$tag" '.tag_name == $t and .draft == false' > /dev/null; then
-                { echo "ref<<EOF"; echo "$REF"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+                # Without `tag`, the checkout's default keeps the run's own
+                # commit, which a later move of the tag can't change.
+                if [ -n "$TAG" ]; then
+                  { echo "ref<<EOF"; echo "$REF"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+                fi
                 exit 0
               fi
               echo "::error::Refusing to publish docs from $REF: no published release has this tag."
