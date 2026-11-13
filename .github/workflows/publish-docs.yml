@@ -4,12 +4,15 @@ name: Publish docs (reusable)
 # Reusable workflow: render a repo's Quarto docs site at a release tag and
 # deploy it to GitHub Pages, so the published docs match the released package
 # and docs fixes go live with the next release. Callers run it as a job after
-# their PyPI publish job, on `release: published`.
+# their PyPI publish job: on `release: published`, where the run's ref is the
+# release tag, or in the run that created the release, passing its tag as
+# `tag` (the run's ref is then a branch).
 #
 # Jobs:
-# - build: first refuses any ref that is not the tag of a published release,
-#   so docs for unreleased code never reach the site. Then it installs the
-#   project from uv.lock and runs `quarto render`. It runs the repo's code, so
+# - build: first refuses any ref that is not the tag of a published release
+#   (`tag` when given, else the run's ref), so docs for unreleased code never
+#   reach the site. Then it checks out that tag, installs the project from
+#   uv.lock and runs `quarto render`. It runs the repo's code, so
 #   it holds only the read-only job token, persists no checkout credential and
 #   uses no Actions cache.
 # - deploy: deploys the build's Pages artifact with actions/deploy-pages. It
@@ -19,12 +22,15 @@ name: Publish docs (reusable)
 # One-time setup in the calling repo (an admin), before the caller merges:
 # - Settings → Pages → Source: "GitHub Actions". The `gh-pages` branch is then
 #   no longer served, so `quarto publish gh-pages` stops updating the site.
-# - Settings → Environments → github-pages: add a deployment tag rule matching
-#   the release tags (for example `*.*.*`). The environment's rules otherwise
-#   name only branches (`gh-pages`, or the default branch), and a deploy from
-#   a tag is refused after PyPI has already published.
+# - Settings → Environments → github-pages: add a deployment rule for the
+#   run's ref. GitHub checks the rule against the run's ref, not the checked
+#   out tag: a tag rule matching the release tags (for example `*.*.*`) for an
+#   `on: release` caller, a branch rule for `main` for a caller that passes
+#   `tag`. The environment's rules otherwise name only `gh-pages` (or the
+#   default branch), and the deploy is refused after PyPI has already
+#   published.
 #
-# Caller:
+# Caller, in a publish workflow that runs `on: release`:
 #   jobs:
 #     docs:
 #       needs: publish
@@ -32,6 +38,19 @@ name: Publish docs (reusable)
 #       permissions: { contents: read, pages: write, id-token: write }
 #       uses: meridianlabs-ai/actions/.github/workflows/publish-docs.yml@<commit SHA on main> # main
 #       with: { python-version: "3.12", extras: doc }
+#
+# Caller, in a release workflow on push to main that creates the release and
+# publishes to PyPI in the same run:
+#   jobs:
+#     docs:
+#       needs: [release-please, publish]
+#       if: ${{ needs.release-please.outputs.release_created }}
+#       permissions: { contents: read, pages: write, id-token: write }
+#       uses: meridianlabs-ai/actions/.github/workflows/publish-docs.yml@<commit SHA on main> # main
+#       with:
+#         tag: ${{ needs.release-please.outputs.tag_name }}
+#         python-version: "3.12"
+#         extras: doc
 
 "on":
   workflow_call:
@@ -48,6 +67,10 @@ name: Publish docs (reusable)
         description: "Optional dependencies the docs build needs (quarto-cli and the like), one name per line."
         type: string
         default: ""
+      tag:
+        description: "Release tag to render, for a caller whose run is not on that tag (a release workflow on push to main). Leave empty to render the run's ref."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -59,6 +82,7 @@ jobs:
     cache-mode: none
     steps:
       - name: Allow only the tag of a published release
+        id: ref
         # An explicit bash shell adds pipefail, so a failed release lookup
         # refuses the ref even if its output looks like a release.
         shell: bash
@@ -66,13 +90,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
+          TAG: ${{ inputs.tag }}
         run: |
+          if [ -n "$TAG" ]; then
+            REF="refs/tags/$TAG"
+          fi
           case "$REF" in
             refs/tags/*)
               tag="${REF#refs/tags/}"
               encoded="$(jq -rn --arg t "$tag" '$t | @uri')"
               if gh api "repos/$REPO/releases/tags/$encoded" \
                   | jq -e --arg t "$tag" '.tag_name == $t and .draft == false' > /dev/null; then
+                { echo "ref<<EOF"; echo "$REF"; echo "EOF"; } >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               echo "::error::Refusing to publish docs from $REF: no published release has this tag."
@@ -84,6 +113,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.ref.outputs.ref }}
           persist-credentials: false
 
       - uses: meridianlabs-ai/actions/install-python-dependencies@f4ae19412da5597fc283e3ef62db1a67384ae609 # self, re-pin after each change

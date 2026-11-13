@@ -1,8 +1,9 @@
 """Tests for publish-docs.yml.
 
-The docs site is published only from the tag of a published release, so the
-build job's ref check is lifted from the YAML and run under bash with a stand-in
-for gh on PATH. The build job runs the calling repo's code, so it holds only
+The docs site is published only from the tag of a published release (the
+`tag` input when a caller passes one, else the run's ref), so the build job's
+ref check is lifted from the YAML and run under bash with a stand-in for gh on
+PATH, and the checkout renders the ref the check passed. The build job runs the calling repo's code, so it holds only
 the read-only job token, persists no checkout credential and uses no Actions
 cache; the deploy job, which holds `pages: write` and `id-token: write`, runs
 no repo code.
@@ -16,6 +17,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 import yaml
@@ -38,10 +40,21 @@ def ref_check() -> dict:
     return job("build")["steps"][0]
 
 
-def run_check_ref(tmp_path: Path, ref: str, releases: dict[str, dict], gh_exit: int = 0) -> subprocess.CompletedProcess:
+class CheckResult(NamedTuple):
+    returncode: int
+    stdout: str
+    stderr: str
+    output: str
+
+
+def run_check_ref(
+    tmp_path: Path, ref: str, releases: dict[str, dict], gh_exit: int = 0, tag: str = ""
+) -> CheckResult:
     """Run the ref check for `ref` with a gh stand-in that serves `releases` (tag -> release JSON) and 404s anything else.
 
-    With `gh_exit`, gh prints the release and then fails, as a lookup cut off midway does.
+    `tag` is the workflow's `tag` input. With `gh_exit`, gh prints the release
+    and then fails, as a lookup cut off midway does. `output` is what the step
+    wrote to $GITHUB_OUTPUT.
     """
     served = tmp_path / "releases.json"
     served.write_text(json.dumps({f"repos/{REPO}/releases/tags/{tag}": body for tag, body in releases.items()}))
@@ -55,16 +68,26 @@ def run_check_ref(tmp_path: Path, ref: str, releases: dict[str, dict], gh_exit: 
         f"exit {gh_exit}\n"
     )
     gh.chmod(0o755)
+    output = tmp_path / "github_output"
+    output.touch()
     script = ref_check()["run"]
     # A step with `shell: bash` runs as `bash --noprofile --norc -eo pipefail`;
     # test_the_ref_check_runs_under_pipefail checks the step asks for it.
-    return subprocess.run(
+    result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
-        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "REPO": REPO, "REF": ref},
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "REPO": REPO,
+            "REF": ref,
+            "TAG": tag,
+            "GITHUB_OUTPUT": str(output),
+        },
         text=True,
         capture_output=True,
         check=False,
     )
+    return CheckResult(result.returncode, result.stdout, result.stderr, output.read_text())
 
 
 # --- Only the tag of a published release publishes ---------------------------------
@@ -73,6 +96,7 @@ def run_check_ref(tmp_path: Path, ref: str, releases: dict[str, dict], gh_exit: 
 def test_the_tag_of_a_published_release_passes(tmp_path):
     result = run_check_ref(tmp_path, "refs/tags/0.2.72", {"0.2.72": {"tag_name": "0.2.72", "draft": False}})
     assert result.returncode == 0, result.stderr + result.stdout
+    assert result.output == "ref<<EOF\nrefs/tags/0.2.72\nEOF\n"
 
 
 @pytest.mark.parametrize("ref", ["refs/heads/main", "refs/heads/feature", "refs/pull/12/merge"])
@@ -80,6 +104,7 @@ def test_a_branch_is_refused(tmp_path, ref):
     result = run_check_ref(tmp_path, ref, {"0.2.72": {"tag_name": "0.2.72", "draft": False}})
     assert result.returncode == 1
     assert "run this from a release tag" in result.stdout
+    assert result.output == ""
 
 
 def test_a_tag_with_no_release_is_refused(tmp_path):
@@ -106,6 +131,46 @@ def test_the_tag_is_url_encoded_before_it_reaches_the_api(tmp_path):
 def test_a_failed_lookup_is_refused_even_if_it_printed_a_release(tmp_path):
     result = run_check_ref(tmp_path, "refs/tags/0.2.72", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, gh_exit=1)
     assert result.returncode == 1
+    assert result.output == ""
+
+
+# --- A release workflow on main passes the tag it released --------------------------
+
+
+def test_the_tag_input_of_a_published_release_passes_on_a_branch_run(tmp_path):
+    result = run_check_ref(
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72"
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.output == "ref<<EOF\nrefs/tags/0.2.72\nEOF\n"
+
+
+def test_the_tag_input_wins_over_the_runs_tag(tmp_path):
+    result = run_check_ref(
+        tmp_path, "refs/tags/0.2.72", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.73"
+    )
+    assert result.returncode == 1
+    assert "no published release has this tag" in result.stdout
+    assert result.output == ""
+
+
+@pytest.mark.parametrize(
+    "releases",
+    [{}, {"0.2.73": {"tag_name": "0.2.73", "draft": True}}],
+    ids=["no release", "draft release"],
+)
+def test_a_tag_input_without_a_published_release_is_refused(tmp_path, releases):
+    result = run_check_ref(tmp_path, "refs/heads/main", releases, tag="0.2.73")
+    assert result.returncode == 1
+    assert result.output == ""
+
+
+def test_the_checkout_renders_the_ref_the_check_passed():
+    steps = job("build")["steps"]
+    assert ref_check()["id"] == "ref"
+    assert ref_check()["env"]["TAG"] == "${{ inputs.tag }}"
+    assert steps[1]["with"]["ref"] == "${{ steps.ref.outputs.ref }}"
+    assert workflow()["on"]["workflow_call"]["inputs"]["tag"]["default"] == ""
 
 
 def test_the_ref_check_runs_under_pipefail():
