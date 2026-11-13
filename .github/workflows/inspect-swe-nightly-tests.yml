@@ -10,7 +10,7 @@ name: Inspect SWE Nightly Tests
 #
 # It installs inspect_swe's uv.lock with no change (`uv sync --locked`).
 # After inspect_swe no longer uses git main, that is the same install as
-# inspect_swe's PR CI. Then inspect-ai comes from PyPI at the release that
+# inspect_swe's PR CI. From then on, inspect-ai comes from PyPI at the release that
 # uv.lock names. Testing the newest release of everything is the canaries'
 # job (meridianlabs-ai/canaries), which hold no keys.
 #
