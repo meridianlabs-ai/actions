@@ -6,7 +6,9 @@ name: PR Title Lint (reusable)
 # which is what Release Please parses to bump versions and build changelogs.
 # The allowed types are single-sourced from conventional-commit-types.json in
 # this repo (the same list that feeds the release-please changelog sections),
-# so enforcement and changelog can never drift.
+# so enforcement and changelog can never drift. The list is read from the same
+# commit as this workflow file (job.workflow_sha), so a caller pins one SHA and
+# the types follow it.
 #
 # Caller (in a consuming repo, .github/workflows/pr-title-lint.yml):
 #   name: PR Title Lint
@@ -17,7 +19,7 @@ name: PR Title Lint (reusable)
 #     lint:
 #       permissions:
 #         pull-requests: read
-#       uses: meridianlabs-ai/actions/.github/workflows/pr-title-lint.yml@v1
+#       uses: meridianlabs-ai/actions/.github/workflows/pr-title-lint.yml@<commit SHA on main> # main
 
 on:
   workflow_call:
@@ -27,9 +29,9 @@ on:
         type: boolean
         default: false
       types-ref:
-        description: "git ref of meridianlabs-ai/actions to read the shared type list from"
+        description: "Deprecated and ignored: the type list comes from the commit of this workflow. Callers should drop it; it will be removed in a later change."
         type: string
-        default: "v1"
+        default: ""
 
 permissions:
   pull-requests: read
@@ -41,15 +43,27 @@ jobs:
       - name: Fetch shared conventional-commit types
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: meridianlabs-ai/actions
-          ref: ${{ inputs.types-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: conventional-commit-types.json
           sparse-checkout-cone-mode: false
           path: _meridian_actions
 
       - name: Extract allowed types
         id: types
+        env:
+          TYPES_REPO: ${{ job.workflow_repository }}
+          TYPES_SHA: ${{ job.workflow_sha }}
+        # An empty ref makes actions/checkout fetch the default branch; fail
+        # unless the checkout is the workflow's own commit.
         run: |
+          head=$(git -C _meridian_actions rev-parse HEAD)
+          if [ "$head" != "$TYPES_SHA" ]; then
+            echo "::error::checked out $head, not the workflow commit '$TYPES_SHA'"
+            exit 1
+          fi
+          echo "Reading types from $TYPES_REPO@$head"
           {
             echo "types<<EOF"
             jq -r '.[].type' _meridian_actions/conventional-commit-types.json
@@ -57,7 +71,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Lint PR title
-        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        uses: amannn/action-semantic-pull-request@2252a14e810aa9b85c2d560bd7070c802206ecf6 # v6.1.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

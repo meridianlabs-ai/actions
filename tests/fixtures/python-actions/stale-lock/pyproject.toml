@@ -8,3 +8,7 @@ dependencies = ["six==1.16.0", "iniconfig==2.0.0"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# This table makes the fixture the uv config root, so uv does not walk up to
+# the repository root's [tool.uv] (and its exclude-newer) during the self-test.
+[tool.uv]

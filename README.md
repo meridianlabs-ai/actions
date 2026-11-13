@@ -3,12 +3,13 @@ This repository holds shared GitHub Actions and workflows: release automation, S
 
 ## Reusable release workflows
 
-Shared release automation for the Meridian repos. UKGovernmentBEIS/inspect_ai also uses `pr-title-lint.yml`. **See the [release runbook](https://github.com/meridianlabs-ai/meridian-docs/tree/main/releases) in meridian-docs** — how releases work, cadence, who-can-release, hotfixes, and per-repo specifics. Standardized on Release Please, authed by the "Meridian Release Bot" GitHub App (org secrets `RELEASE_PLEASE_APP_ID` / `RELEASE_PLEASE_APP_PRIVATE_KEY`). Pin callers to `@v1`.
+Shared release automation for the Meridian repos. UKGovernmentBEIS/inspect_ai also uses `pr-title-lint.yml`. **See the [release runbook](https://github.com/meridianlabs-ai/meridian-docs/tree/main/releases) in meridian-docs** — how releases work, cadence, who-can-release, hotfixes, and per-repo specifics. Standardized on Release Please, authed by the "Meridian Release Bot" GitHub App (org secrets `RELEASE_PLEASE_APP_ID` / `RELEASE_PLEASE_APP_PRIVATE_KEY`). Callers pin a commit SHA on `main`, with `# main` (for example `@<commit SHA> # main`). Dependabot moves the pin in each repository's weekly `github-actions` group.
 
 - **`.github/workflows/pr-title-lint.yml`** — enforce Conventional Commits on PR titles (we squash-merge, so the PR title becomes the commit). Allowed types are read from `conventional-commit-types.json`.
 - **`.github/workflows/release-please-vscode.yml`** — Release Please + publish for a VS Code extension (Marketplace + Open VSX + `.vsix` release asset). The publish job verifies that the built `.vsix` names exactly `extension-id` at the release tag's version before any PAT is used; see the header comment and [THREAT_MODEL.md](THREAT_MODEL.md).
 - **`.github/workflows/release-please-python.yml`** — Release Please for Python packages (release-please only; publishing stays in the repo's `publish.yaml`, auto-triggered by the GitHub Release — PyPI trusted publishing can't run from a cross-repo reusable workflow).
 - **`.github/workflows/publish-docs.yml`** — render a repo's Quarto docs site at a release tag and deploy it to GitHub Pages, so the site matches the released package. Callers run it as a job after their PyPI publish job on `release: published`; it refuses any ref that is not the tag of a published release. The calling repo's Pages source must be "GitHub Actions" and its `github-pages` environment needs a deployment tag rule; see the header comment.
+- **`.github/workflows/build-python-dist.yml`** — build a Python repo's release distributions in a job that holds no publishing credential, and upload them as an artifact. The caller publishes from its own job, which downloads that artifact by ID and runs `pypa/gh-action-pypi-publish` (PyPI trusted publishing can't run from a cross-repo reusable workflow); see the header comment.
 - **`conventional-commit-types.json`** — single source of truth for commit types, feeding both PR-title lint and the release-please changelog sections.
 - **`scripts/gen-release-please-config.sh`** — generate a repo's committed `.release-please-config.json` from the shared type list.
 - **`slack-approval-ping/`** — composite action: post an "awaiting approval" ping to `#release-approvals`, @-mentioning approvers, **deep-linking to the exact paused run**. Call it from a non-gated notify job in the *same run* as the gated publish (so `run-url` = `github.run_id` is the paused run). Reads `slack-ids.json` via `$GITHUB_ACTION_PATH`.
@@ -28,6 +29,11 @@ each call says where the versions come from. Pin both by the full commit SHA
 with a `# vX.Y.Z` comment, as above; Dependabot bumps them. The self-test
 workflow (`.github/workflows/self-test-python-actions.yml`) runs them on a
 runner, and `tests/test_python_actions.py` tests their scripts.
+
+[DEPENDENCIES.md](DEPENDENCIES.md) tells how the Inspect repositories install
+and change dependencies with these actions: the lock file, the canaries, the
+cooldown settings and the procedures to change a dependency. It is the one
+description of these rules for all the Inspect repositories.
 
 - **`setup-uv/`** — composite action: install the pinned uv (and, if asked, a
   Python) with a stated Actions cache rule. Inputs: `python-version` (empty

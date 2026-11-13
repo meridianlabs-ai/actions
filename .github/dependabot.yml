@@ -14,12 +14,35 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # Self-pins are re-pinned by hand after a change to `setup-uv/` or
+    # `install-python-dependencies/`. Without this, Dependabot moves them to
+    # `main`'s head each week.
+    ignore:
+      - dependency-name: "meridianlabs-ai/actions/*"
     # One PR per week for every action update, majors included.
     groups:
       github-actions:
         patterns:
           - "*"
+        # This bump changes `setup-uv/` and needs a hand-made pin commit for
+        # the pin guard. A separate PR keeps the weekly group PR mergeable.
+        exclude-patterns:
+          - "astral-sh/setup-uv"
     # pr-title-lint requires a Conventional Commits title; `ci` keeps these
     # out of the release notes.
+    commit-message:
+      prefix: "ci"
+
+  # pytest and PyYAML in uv.lock (tests.yml, agent provisioning).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    cooldown:
+      default-days: 7
+    groups:
+      python-packages:
+        patterns:
+          - "*"
     commit-message:
       prefix: "ci"

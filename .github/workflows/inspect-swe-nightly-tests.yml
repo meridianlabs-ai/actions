@@ -8,10 +8,14 @@ name: Inspect SWE Nightly Tests
 # check: inspect_swe breaks via upstream drift (weekly inspect_ai releases,
 # agent CLI churn), so re-testing an unchanged commit is the point.
 #
-# nightly-tests runs code this repository does not control: `pip install -e
-# ".[dev]"` resolves inspect_swe's dev closure against PyPI on the day (no
-# lock file, on purpose), sdist build hooks included, and pytest imports it
-# with the provider keys in env. THREAT_MODEL.md names that code as an adversary
+# It installs exactly what inspect_swe's PR CI installs (its
+# .github/actions/uv-sync): inspect_swe's uv.lock, with inspect-ai moved to
+# inspect_ai main's newest commit. Testing the newest release of everything
+# is the canaries' job (meridianlabs-ai/canaries), which hold no keys.
+#
+# nightly-tests still runs code this repository does not control: the
+# locked dev closure and inspect_ai main, build hooks included, which pytest
+# imports with the provider keys in env. THREAT_MODEL.md names that code as an adversary
 # that can take over its job's runner. So the job holds nothing that reaches
 # beyond the job: the token is declared read-only (workflow-level
 # `permissions`) rather than left to the repository's default setting, the
@@ -95,35 +99,27 @@ jobs:
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "ref=${INSPECT_SWE_REF:-main}" >> "$GITHUB_OUTPUT"
 
-      # No pip cache (`cache:` on setup-python or actions/cache on
-      # ~/.cache/pip): see the header. Fresh resolution on a fresh runner.
-      - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      # The same install as inspect_swe's PR CI (its .github/actions/uv-sync),
+      # minus the Actions cache (`actions-cache: none`): see the header. The
+      # dev extra carries pytest-timeout, pytest-xdist and google-genai.
+      - name: Set up uv
+        uses: meridianlabs-ai/actions/setup-uv@330f3df6492418d6b25dc2631fc31143489f4674 # self, re-pin after each change
         with:
           python-version: "3.11"
+          actions-cache: none
 
-      - name: Install dependencies
+      - name: Move inspect-ai to inspect_ai main
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          # Not in the dev extras; mirrors the inspect_ai scheduled tests
-          # (xdist for docker/API latency, per-test timeouts).
-          pip install pytest-timeout pytest-xdist
-          # The gemini_cli tests are gated on GOOGLE_API_KEY (which we set)
-          # but inspect_ai's Google provider needs google-genai installed —
-          # without it they fail with PrerequisiteError instead of skipping.
-          pip install google-genai
-          # inspect_ai 0.3.259 raised its OpenAI provider's runtime floor to
-          # openai>=3.1.0, but litellm (pulled in by mini_swe_agent) still
-          # declares openai<3.0.0, so the resolver lands on 2.54.0 and every
-          # openai/* test dies with:
-          #   PrerequisiteError: OpenAI API requires at least version 3.1.0 of
-          #   package openai (you have version 2.54.0 installed)
-          # The litellm cap is stale metadata rather than a real
-          # incompatibility — with openai 3.1.0 forced, litellm and
-          # minisweagent both import and the fast suite is green — so override
-          # it here. Drop this once litellm ships a release allowing openai 3.
-          pip install --upgrade 'openai>=3.1.0'
+          uv lock --check
+          uv lock --upgrade-package inspect-ai
+
+      - name: Install from uv.lock
+        uses: meridianlabs-ai/actions/install-python-dependencies@330f3df6492418d6b25dc2631fc31143489f4674 # self, re-pin after each change
+        with:
+          versions: locked
+          python-version: "3.11"
+          extras: dev
+          actions-cache: none
 
       - name: Run tests (fast + slow)
         timeout-minutes: 120
@@ -184,7 +180,7 @@ jobs:
           #
           # --durations=15 keeps that measurement coming, so the ceiling can
           # be re-tuned from data instead of guesswork.
-          pytest --runslow -n auto --timeout=900 --timeout-method=signal --durations=15 --tb=short -o log_level=warning "${extra_args[@]}"
+          uv run --no-sync pytest --runslow -n auto --timeout=900 --timeout-method=signal --durations=15 --tb=short -o log_level=warning "${extra_args[@]}"
 
       - name: Cleanup Docker resources
         if: always()

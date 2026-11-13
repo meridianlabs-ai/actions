@@ -10,8 +10,10 @@ it.
 repos: reusable release workflows and composite actions (`README.md`,
 `RELEASING.md`), the scheduled test runs of `inspect_ai` and `inspect_swe`
 and the triage of their failures (`INSPECT_AI_TESTS.md`), the ci-perf
-run, and a weekly link check of the published docs sites. The workflows
-are the product; there is no application code.
+run, and a weekly link check of the published docs sites. It also holds
+`DEPENDENCIES.md`, the one description of how the Inspect repositories
+install and change dependencies. The
+workflows are the product; there is no application code.
 
 ## The workflow scripts are tested
 
@@ -22,7 +24,8 @@ where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`,
 `tests/test_docs_link_check_workflow.py`, `tests/test_publish_docs_workflow.py`;
 `tests/test_slack_release_announce.py` covers the announce converter,
-`tests/test_release_notes_heading.py` the release workflows' heading rename, and
+`tests/test_release_notes_heading.py` the release workflows' heading rename,
+`tests/test_build_python_dist_workflow.py` the shared build job's permissions and steps, and
 `tests/test_repository.py` checks that no workflow names a retired
 Anthropic key, that every App token step names its permissions, and that
 `tests.yml` runs on every pull request).
@@ -50,8 +53,8 @@ the real permission engine and when to repeat them.
 ## Checks
 
 ```
-pip install pytest pyyaml        # or a venv; the repo has no lock file
-python3 -m pytest -q tests
+uv sync --locked                 # pytest and PyYAML from uv.lock
+uv run python3 -m pytest -q tests
 actionlint .github/workflows/<changed>.yml
 python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflows/<changed>.yml
 ```
@@ -89,7 +92,8 @@ clean.
   step that runs after the agent.
 - A job that installs and runs third-party dependencies (the scheduled
   inspect_ai suites install from inspect_ai's `uv.lock` at the tested
-  commit; the inspect_swe nightly installs the day's dependency closure)
+  commit; the inspect_swe nightly from inspect_swe's `uv.lock`, with
+  inspect-ai moved to inspect_ai main)
   holds nothing that reaches beyond the job: the
   workflow declares a read-only token, its checkouts set
   `persist-credentials: false`, and it restores and saves no Actions cache

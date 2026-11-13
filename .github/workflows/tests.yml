@@ -26,6 +26,7 @@ name: tests
       - ".github/workflows/release-please-python.yml"
       - ".github/workflows/self-test-python-actions.yml"
       - ".github/workflows/publish-docs.yml"
+      - ".github/workflows/build-python-dist.yml"
       - "setup-uv/**"
       - "install-python-dependencies/**"
       - "slack-approval-ping/**"
@@ -35,6 +36,8 @@ name: tests
       - "policy/**"
       - "labels.json"
       - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
   # Runs on every PR (no paths filter) so pytest can be a required check.
   pull_request:
 
@@ -49,10 +52,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      # pytest and PyYAML from uv.lock (the `dev` group of pyproject.toml).
+      - uses: ./install-python-dependencies
         with:
+          versions: locked
           python-version: "3.12"
-      - run: pip install pytest pyyaml
+          project-install: skip
       # The VS Code release tests run the publish job's cross-check step against
       # vsce's own reader: install the vsce release-please-vscode.yml pins.
       - run: npm install -g --ignore-scripts @vscode/vsce@3.9.2
@@ -66,4 +71,4 @@ jobs:
           tar -xzf lychee.tar.gz
           install -D lychee-x86_64-unknown-linux-gnu/lychee "$RUNNER_TEMP/lychee/bin/lychee"
           echo "$RUNNER_TEMP/lychee/bin" >> "$GITHUB_PATH"
-      - run: python3 -m pytest -q tests
+      - run: uv run --no-sync python3 -m pytest -q tests
