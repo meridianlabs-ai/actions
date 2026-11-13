@@ -146,6 +146,6 @@ def test_the_caller_template_publishes_only_the_artifact_this_run_built():
 
 
 def test_the_tests_workflow_runs_on_changes_to_this_workflow():
+    # pull_request has no paths filter (test_repository.py), so only push lists it.
     on = yaml.safe_load(TESTS_WORKFLOW.read_text())["on"]
-    for event in ("push", "pull_request"):
-        assert ".github/workflows/build-python-dist.yml" in on[event]["paths"], event
+    assert ".github/workflows/build-python-dist.yml" in on["push"]["paths"]

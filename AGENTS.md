@@ -27,16 +27,17 @@ where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_release_notes_heading.py` the release workflows' heading rename,
 `tests/test_build_python_dist_workflow.py` the shared build job's permissions and steps, and
 `tests/test_repository.py` checks that no workflow names a retired
-Anthropic key and that every App token step names its permissions).
-`.github/workflows/tests.yml` runs them in CI on every push and pull request
-that touches a path it lists.
+Anthropic key, that every App token step names its permissions, and that
+`tests.yml` runs on every pull request).
+`.github/workflows/tests.yml` runs them in CI on every pull request, and on
+every push to `main` that touches a path in its `push.paths` list.
 
 So a change to a workflow script is not done until:
 
 - its test is added or updated in the matching `tests/` file (a task that
   says "keep the diff to the workflow file" is about churn elsewhere, not a
   reason to leave new logic untested);
-- the workflow's path is in the `paths:` lists of `tests.yml` if it is new;
+- the workflow's path is in the `push.paths` list of `tests.yml` if it is new;
 - the checks below pass.
 
 The permission-rule tests match commands against the agent's allow and deny

@@ -168,5 +168,4 @@ def test_every_action_is_pinned_by_commit():
 
 def test_the_tests_workflow_runs_on_changes_to_this_workflow():
     on = yaml.safe_load(TESTS_WORKFLOW.read_text())["on"]
-    for event in ("push", "pull_request"):
-        assert ".github/workflows/publish-docs.yml" in on[event]["paths"], event
+    assert ".github/workflows/publish-docs.yml" in on["push"]["paths"]
