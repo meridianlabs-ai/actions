@@ -1,5 +1,8 @@
 # Dependencies
 
+> [!NOTE]
+> **Policy transition in progress:** We have decided to stop tracking GitHub `main` of in-house packages (`inspect-*`, `petri*`) via `[tool.uv.sources]`, `UV_NO_SOURCES`, and `release-pin-deps.yml`, and instead consume published PyPI releases with raised minimum version floors. Local editable installs remain fine for development, while PRs must target PyPI-published dependencies before merging. Under `[tool.uv.exclude-newer-package]` in `pyproject.toml`, in-house packages have no uv install cooldown (`<package> = false`), while model provider SDKs and sandbox providers keep the 6-hour uv cooldown (with both excluded from Dependabot's 7-day cooldown in `.github/dependabot.yml` where Dependabot updates them). We are actively working through all repositories to conform to this decision; the sections below still reflect the prior setup until that rollout finishes.
+
 *This document gives the rules that the Inspect repositories, inspect_ai included, use to install and change dependencies. It gives only the rules that are the same in each repository. A repository can have exceptions and extra steps. Its `CONTRIBUTING.md` lists them.*
 
 **Summary:**
