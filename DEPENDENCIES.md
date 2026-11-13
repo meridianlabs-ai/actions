@@ -45,7 +45,7 @@ A cooldown is the minimum time that a release must be on PyPI before uv can use 
 | Short cooldown | 6 hours | `[tool.uv.exclude-newer-package]`: `<package> = "6 hours"`. Use it only for a direct dependency that is a model provider SDK or a sandbox provider (`e2b`, `modal`). All other third-party packages keep the 7-day cooldown. This includes packages that a provider needs, for example torch, the AWS SDKs and `certifi`. |
 | In-house packages | None | `[tool.uv.exclude-newer-package]`: `<package> = false`. Use it for each in-house package (`inspect-*`, `petri*`) that the project depends on. We publish these packages, so we do not wait for them. |
 | Emergency entry | A fixed time | `[tool.uv.exclude-newer-package]`: `<package> = "<RFC 3339 time>"`. The entry is temporary. A test fails when the entry is 7 days old. |
-| Dependabot | 7 days | The `uv` entry in `.github/dependabot.yml`: `cooldown.default-days: 7`. The 6-hour packages and the in-house packages are in `cooldown.exclude` and in the `six-hour-cooldown` group. |
+| Dependabot | 7 days | The `uv` entry in `.github/dependabot.yml`: `cooldown.default-days: 7`. The 6-hour packages and the in-house packages are in `cooldown.exclude` and in the short-cooldown group. Most repositories name that group `six-hour-cooldown`. inspect_ai names it `provider-sdks`. A repository that has no short-cooldown packages yet may not have the group; add the group when you add the first package. |
 | Canaries | None | The canaries install with no lock file and no cooldown (`--no-config` or `--exclude-newer false`). Only the canaries use these two options. |
 | JavaScript that uses pnpm | 7 days | `minimumReleaseAge: 10080` in `pnpm-workspace.yaml`. |
 | uv in CI | One version | The shared action `meridianlabs-ai/actions/setup-uv` sets the uv version. |
@@ -55,7 +55,7 @@ Two important facts:
 - **Dependabot counts its cooldown in full days.** Thus Dependabot cannot set a 6-hour cooldown. Dependabot does not apply its cooldown to the packages in `cooldown.exclude`. uv applies the 6-hour cooldown, or no cooldown for an in-house package. Thus a Dependabot PR can propose a release of a 6-hour package that is less than 6 hours old. In that case, `uv lock` fails in the PR. This is expected. The next Dependabot run succeeds.
 - **The cooldown continues to apply to the dependencies of an in-house package.** A new release of an in-house package can go into `uv.lock` immediately. If that release needs a newer release of a third-party package, uv uses that release only after its cooldown.
 
-A repository can tell Dependabot to ignore an in-house package when a different workflow updates that package. For example, inspect_flow ignores inspect-ai because its `inspect-update.yml` updates inspect-ai from PyPI. A package that Dependabot ignores must not be in `cooldown.exclude` or in the `six-hour-cooldown` group. The repository's `CONTRIBUTING.md` tells about the exception.
+A repository can tell Dependabot to ignore an in-house package when a different workflow updates that package. For example, inspect_flow ignores inspect-ai because its `inspect-update.yml` updates inspect-ai from PyPI. A package that Dependabot ignores must not be in `cooldown.exclude` or in that short-cooldown group. The repository's `CONTRIBUTING.md` tells about the exception.
 
 ## Change dependencies
 
@@ -96,16 +96,16 @@ These procedures apply to a repository that has a `pyproject.toml` and a `uv.loc
 **Add a package to the 6-hour cooldown.** Use the 6-hour cooldown only for a direct dependency that is a model provider SDK or a sandbox provider (`e2b`, `modal`). Do not use it for an in-house package. See "Remove the cooldown of an in-house package".
 1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = "6 hours"`. If the table does not exist, add it.
 2. In `.github/dependabot.yml`, add the package to `cooldown.exclude` of the `uv` entry.
-3. In the same file, add the package to the `six-hour-cooldown` group. If `cooldown.exclude` or the group does not exist, add it.
+3. In the same file, add the package to the short-cooldown group (`six-hour-cooldown` in most repositories; `provider-sdks` in inspect_ai). If `cooldown.exclude` or the group does not exist, add it.
 4. Run `uv lock`. The new entry changes `uv.lock`.
 5. Run `uv run pytest tests/test_dependency_cooldown.py`. The test makes sure that `pyproject.toml` and `.github/dependabot.yml` agree. If the test fails, its message tells you what to change. For example, a package that Dependabot ignores must not be in the two lists.
 6. Commit all the changed files.
 
 **Remove the cooldown of an in-house package.** Do this for each in-house package (`inspect-*`, `petri*`) that the project depends on.
 1. In `pyproject.toml`, under `[tool.uv.exclude-newer-package]`, add `<package> = false`. If the package has a 6-hour entry, replace that entry. If the table does not exist, add it.
-2. In `.github/dependabot.yml`, add the package to `cooldown.exclude` of the `uv` entry and to the `six-hour-cooldown` group, as for a 6-hour package. If Dependabot ignores the package, do not add it to these lists.
+2. In `.github/dependabot.yml`, add the package to `cooldown.exclude` of the `uv` entry and to the short-cooldown group, as for a 6-hour package. If Dependabot ignores the package, do not add it to these lists.
 3. Run `uv lock`. The new entry changes `uv.lock`.
-4. Run `uv run pytest tests/test_dependency_cooldown.py`.
+4. Run `uv run pytest tests/test_dependency_cooldown.py`. If the test still expects every `exclude-newer-package` entry to be `"6 hours"` or a date, update the test in the same change so it accepts `false` for in-house packages.
 5. Commit all the changed files.
 
 **Update the release build tools.** This procedure applies to a repository that has `scripts/build-dist`. The release build tools are in `scripts/build-dist/requirements.txt`, with exact versions and hashes. `scripts/build-dist/requirements.in` names the tools. To update the file manually:
