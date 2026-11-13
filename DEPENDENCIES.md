@@ -4,7 +4,7 @@
 
 **Summary:**
 - PR CI and the slow and nightly tests install exactly the versions in `uv.lock`.
-- The in-house packages (`inspect-*`, `petri*`) come from PyPI, as all other dependencies do. No repository installs an in-house package from git.
+- The in-house packages (`inspect-*`, `petri*`) come from PyPI, as all other dependencies do. A repository must not install an in-house package from git. Five repositories still have a git source on `main` (inspect_scout, inspect_sentinel, inspect_steward, inspect_swarm and inspect_swe) until their companion PRs merge.
 - A release gets into `uv.lock` after it has been on PyPI for 7 days. This time is the cooldown. A compromised release is usually found and removed in less than 7 days.
 - The in-house packages have no cooldown. Some provider SDKs and sandbox providers have a 6-hour cooldown. An emergency entry lets one release in before its cooldown ends.
 - By design, the canaries install the newest release of each dependency. They ignore the lock file and the cooldown. The canary jobs hold no secrets, so a bad release has nothing to steal there.
@@ -43,10 +43,10 @@ A cooldown is the minimum time that a release must be on PyPI before uv can use 
 |---|---|---|
 | Default cooldown | 7 days | `[tool.uv] exclude-newer = "7 days"` in `pyproject.toml`. |
 | Short cooldown | 6 hours | `[tool.uv.exclude-newer-package]`: `<package> = "6 hours"`. Use it only for a direct dependency that is a model provider SDK or a sandbox provider (`e2b`, `modal`). All other third-party packages keep the 7-day cooldown. This includes packages that a provider needs, for example torch, the AWS SDKs and `certifi`. |
-| In-house packages | None | `[tool.uv.exclude-newer-package]`: `<package> = false`. Use it for each in-house package (`inspect-*`, `petri*`) that the project depends on. We publish these packages, so we do not wait for them. |
+| In-house packages | None | `[tool.uv.exclude-newer-package]`: `<package> = false`. Use it for each in-house package (`inspect-*`, `petri*`) that the project depends on. Meridian Labs publishes these packages, so a repository does not wait for them. |
 | Emergency entry | A fixed time | `[tool.uv.exclude-newer-package]`: `<package> = "<RFC 3339 time>"`. The entry is temporary. A test fails when the entry is 7 days old. |
 | Dependabot | 7 days | The `uv` entry in `.github/dependabot.yml`: `cooldown.default-days: 7`. The 6-hour packages and the in-house packages are in `cooldown.exclude` and in the short-cooldown group. Most repositories name that group `six-hour-cooldown`. inspect_ai names it `provider-sdks`. A repository that has no short-cooldown packages yet may not have the group; add the group when you add the first package. |
-| Canaries | None | The canaries install with no lock file and no cooldown (`--no-config` or `--exclude-newer false`). Only the canaries use these two options. |
+| Canaries | None | The canaries install with no lock file and no cooldown (`--no-config` or `--exclude-newer false`). Do not use these two options to install the project's dependencies, except in the canaries. |
 | JavaScript that uses pnpm | 7 days | `minimumReleaseAge: 10080` in `pnpm-workspace.yaml`. |
 | uv in CI | One version | The shared action `meridianlabs-ai/actions/setup-uv` sets the uv version. |
 | Minimum uv for a checkout | `>=0.13.4` | `required-version` in `[tool.uv]`. An older uv does not sync or lock the project. uv 0.13.4 is the first version that does not trust the compromised emSign root (GHSA-hq85-5cpj-mr62). |
