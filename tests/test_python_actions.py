@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -990,6 +991,19 @@ def test_the_self_test_checks_the_stale_lock_text_that_install_sh_matches():
     text = "The lockfile at `uv.lock` needs to be updated"
     assert text in run_step("stale-lock", "uv prints the stale-lock text")["run"]
     assert text in (INSTALL / "install.sh").read_text()
+
+
+@pytest.mark.parametrize("fixture", ["locked-project", "stale-lock"])
+def test_the_locked_fixtures_stop_uv_at_their_own_tool_uv_table(fixture):
+    # Without it, uv applies the root [tool.uv] exclude-newer and --locked fails for the wrong reason.
+    assert "uv" in tomllib.loads((FIXTURES / fixture / "pyproject.toml").read_text())["tool"]
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_the_self_test_runs_when_the_root_uv_config_changes(event):
+    # The root pyproject.toml and uv.lock reach the fixtures; a change to them must run the self-test.
+    paths = yaml.safe_load(SELF_TEST.read_text())["on"][event]["paths"]
+    assert {"pyproject.toml", "uv.lock"} <= set(paths)
 
 
 # --- The locked-hashed-validation guard counts its outcomes --------------------
