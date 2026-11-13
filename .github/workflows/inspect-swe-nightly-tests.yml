@@ -8,14 +8,15 @@ name: Inspect SWE Nightly Tests
 # check: inspect_swe breaks via upstream drift (weekly inspect_ai releases,
 # agent CLI churn), so re-testing an unchanged commit is the point.
 #
-# It installs exactly what inspect_swe's PR CI installs (its
-# .github/actions/uv-sync): inspect_swe's uv.lock, with inspect-ai moved to
-# inspect_ai main's newest commit. Testing the newest release of everything
-# is the canaries' job (meridianlabs-ai/canaries), which hold no keys.
+# It installs inspect_swe's uv.lock with no change (`uv sync --locked`).
+# After inspect_swe no longer uses git main, that is the same install as
+# inspect_swe's PR CI. From then on, inspect-ai comes from PyPI at the release that
+# uv.lock names. Testing the newest release of everything is the canaries'
+# job (meridianlabs-ai/canaries), which hold no keys.
 #
 # nightly-tests still runs code this repository does not control: the
-# locked dev closure and inspect_ai main, build hooks included, which pytest
-# imports with the provider keys in env. THREAT_MODEL.md names that code as an adversary
+# locked dev closure, build hooks included, which pytest imports with the
+# provider keys in env. THREAT_MODEL.md names that code as an adversary
 # that can take over its job's runner. So the job holds nothing that reaches
 # beyond the job: the token is declared read-only (workflow-level
 # `permissions`) rather than left to the repository's default setting, the
@@ -99,7 +100,7 @@ jobs:
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "ref=${INSPECT_SWE_REF:-main}" >> "$GITHUB_OUTPUT"
 
-      # The same install as inspect_swe's PR CI (its .github/actions/uv-sync),
+      # The same install as inspect_swe's PR CI (exactly uv.lock),
       # minus the Actions cache (`actions-cache: none`): see the header. The
       # dev extra carries pytest-timeout, pytest-xdist and google-genai.
       - name: Set up uv
@@ -107,11 +108,6 @@ jobs:
         with:
           python-version: "3.11"
           actions-cache: none
-
-      - name: Move inspect-ai to inspect_ai main
-        run: |
-          uv lock --check
-          uv lock --upgrade-package inspect-ai
 
       - name: Install from uv.lock
         uses: meridianlabs-ai/actions/install-python-dependencies@330f3df6492418d6b25dc2631fc31143489f4674 # self, re-pin after each change
