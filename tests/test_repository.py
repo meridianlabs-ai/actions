@@ -11,6 +11,10 @@ An App installation token gets every permission the App holds unless the
 step that mints it names fewer, so every mint step names its permissions.
 The release steps ask for the Meridian Release Bot's two write permissions.
 
+Dependabot leaves the self-pins alone (they are re-pinned by hand) and keeps
+the `astral-sh/setup-uv` bump, which needs a hand-made pin commit, out of the
+weekly group PR.
+
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
 """
@@ -68,3 +72,10 @@ def test_release_tokens_ask_for_the_release_apps_permissions():
         if name in RELEASE_WORKFLOWS:
             scoped = {k: v for k, v in step["with"].items() if k.startswith("permission-")}
             assert scoped == {"permission-contents": "write", "permission-pull-requests": "write"}, name
+
+
+def test_dependabot_skips_self_pins_and_splits_out_setup_uv():
+    config = yaml.safe_load((GITHUB / "dependabot.yml").read_text())
+    (actions,) = [u for u in config["updates"] if u["package-ecosystem"] == "github-actions"]
+    assert {"dependency-name": "meridianlabs-ai/actions/*"} in actions["ignore"]
+    assert "astral-sh/setup-uv" in actions["groups"]["github-actions"]["exclude-patterns"]
