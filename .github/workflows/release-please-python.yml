@@ -23,7 +23,12 @@ name: Release Please — Python package (reusable)
 #       permissions: { contents: write, pull-requests: write }
 #       uses: meridianlabs-ai/actions/.github/workflows/release-please-python.yml@<commit SHA on main> # main
 #       with: { approvers: "login1 login2" }
-#       secrets: inherit
+#       # Name the secrets, not `secrets: inherit`, which would hand this
+#       # workflow every repository and organization secret.
+#       secrets:
+#         RELEASE_PLEASE_APP_ID: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+#         RELEASE_PLEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+#         SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
 #     publish: { needs: release-please, if: ..., ... }
 
 on:
