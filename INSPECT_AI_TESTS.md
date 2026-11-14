@@ -74,3 +74,21 @@ To modify the workflow:
 2. **Python Version**: Change `python-version` in the setup steps
 3. **Timeout**: Adjust `timeout-minutes` value as needed
 4. **Reporting**: Implement custom notification logic in the "Report test results" step
+
+## Workflow: `inspect-ai-windows-tests.yml`
+
+### Purpose
+
+inspect_ai's own CI (`build.yml`) runs ubuntu-only, so Windows-specific breakage in pure-Python paths (path separators, file URIs, sockets, subprocess) goes undetected (e.g. UKGovernmentBEIS/inspect_ai#4765). This workflow runs the **fast unit suite** — the same pytest invocation as the main repo's `test` job — on `windows-latest`, nightly.
+
+Slow/sandbox tests are deliberately excluded: GitHub's Windows runners cannot run Linux containers.
+
+### Schedule
+
+- **Automatic**: Nightly at 05:30 UTC against inspect_ai `main`
+- **Manual**: `workflow_dispatch` with optional `inspect_ai_ref` and `pytest_args`
+- **Dev cycle**: Pushing a branch named `windows-tests**` to this repo triggers a run
+
+### Reporting
+
+Scheduled runs post pass/fail to Slack (same bot/channel as the scheduled slow tests, without `@channel`). Dispatch and dev-cycle runs report via the Actions UI only.
