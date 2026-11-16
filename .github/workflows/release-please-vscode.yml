@@ -65,11 +65,11 @@ name: Release Please — VS Code extension (reusable)
 # .vsix in the repo root. Add required reviewers to the `environment` (default
 # `marketplace`) to gate who can ship, and store VSCE_PAT / OVSX_PAT as
 # ENVIRONMENT secrets on that environment, not as repository or organisation
-# secrets. The caller passes `secrets: inherit`, and the caller's own
-# release.yml is repo-authored code on the release branch: if the PATs were
-# repo-level, any job added to that file could read them with no approval and
-# without touching this workflow. Environment-scoped secrets are only exposed to
-# jobs that reference the environment, which puts the reviewer gate in the path.
+# secrets. The caller's own release.yml is repo-authored code on the release
+# branch: if the PATs were repo-level, any job added to that file could read
+# them with no approval and without touching this workflow. Environment-scoped
+# secrets are only exposed to jobs that reference the environment, which puts
+# the reviewer gate in the path.
 # The caller workflow file itself therefore stays inside the trust boundary —
 # before approving, reviewers should confirm the run's workflow file is the
 # expected one and unchanged.
@@ -86,7 +86,17 @@ name: Release Please — VS Code extension (reusable)
 #       uses: meridianlabs-ai/actions/.github/workflows/release-please-vscode.yml@<commit SHA on main> # main
 #       with:
 #         extension-id: ukaisi.inspect-ai
-#       secrets: inherit
+#       # Name the secrets, not `secrets: inherit`, which would hand this
+#       # workflow every repository and organization secret. Keep the PAT
+#       # lines even when the PATs are environment secrets: the caller sees
+#       # them as empty, and the publish job, which sets the environment,
+#       # gets the environment's value. A PAT left out here stays empty there.
+#       secrets:
+#         RELEASE_PLEASE_APP_ID: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+#         RELEASE_PLEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+#         VSCE_PAT: ${{ secrets.VSCE_PAT }}
+#         OVSX_PAT: ${{ secrets.OVSX_PAT }}
+#         SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
 
 on:
   workflow_call:
