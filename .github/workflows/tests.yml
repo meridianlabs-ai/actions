@@ -20,6 +20,7 @@ name: tests
       - ".github/workflows/docs-link-check.yml"
       - ".github/lychee.toml"
       - ".github/workflows/release-please-vscode.yml"
+      - "vscode-publish/**"
       - ".github/workflows/tests.yml"
       - ".github/workflows/keep-alive.yml"
       - ".github/workflows/pr-title-lint.yml"
