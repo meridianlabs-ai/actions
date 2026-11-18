@@ -75,6 +75,22 @@ name: Release Please — VS Code extension (reusable)
 # before approving, reviewers should confirm the run's workflow file is the
 # expected one and unchanged.
 #
+# Marketplace auth (`marketplace-auth`): `oidc` (the default) publishes with
+# the Marketplace's Trusted Publishing — `vsce publish --oidc` exchanges the
+# job's GitHub OIDC token for a Marketplace credential, requested for the one
+# publisher and valid for 15 minutes — so no VSCE_PAT is needed, and the job fails
+# if one is passed, so that a PAT left in the environment is noticed and
+# retired. Create the publisher's Trusted Publishing policy for the CALLER's
+# repository, its workflow file (e.g. release.yml) and `environment`. The
+# caller must grant `id-token: write` (see the example below): the publish
+# job requests it whatever the mode, since job permissions cannot depend on
+# an input. `pat` keeps the old path (`vsce publish --pat "$VSCE_PAT"`) as a
+# fallback. With `id-token: write`, every step of the publish job can mint an
+# OIDC token, including the Open VSX step, which runs ovsx and its
+# dependencies; such a token can be exchanged for that same short-lived
+# credential. Before, that step could not reach the
+# Marketplace at all; the trade is a publisher-wide, long-lived PAT for this.
+#
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
 #   on:
@@ -84,6 +100,7 @@ name: Release Please — VS Code extension (reusable)
 #       permissions:
 #         contents: write
 #         pull-requests: write
+#         id-token: write # Marketplace Trusted Publishing in the publish job
 #       uses: meridianlabs-ai/actions/.github/workflows/release-please-vscode.yml@<commit SHA on main> # main
 #       with:
 #         extension-id: ukaisi.inspect-ai
@@ -92,10 +109,10 @@ name: Release Please — VS Code extension (reusable)
 #       # lines even when the PATs are environment secrets: the caller sees
 #       # them as empty, and the publish job, which sets the environment,
 #       # gets the environment's value. A PAT left out here stays empty there.
+#       # VSCE_PAT only with `marketplace-auth: pat`.
 #       secrets:
 #         RELEASE_PLEASE_APP_ID: ${{ secrets.RELEASE_PLEASE_APP_ID }}
 #         RELEASE_PLEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-#         VSCE_PAT: ${{ secrets.VSCE_PAT }}
 #         OVSX_PAT: ${{ secrets.OVSX_PAT }}
 #         SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
 
@@ -117,6 +134,10 @@ on:
         description: "Deployment environment for the publish job. Add required reviewers to gate releases, and store VSCE_PAT / OVSX_PAT as environment secrets on it (not repo secrets) so only approved jobs can read them."
         type: string
         default: "marketplace"
+      marketplace-auth:
+        description: "How the publish job authenticates to the VS Code Marketplace: `oidc` (Trusted Publishing; needs a policy for the caller's repo, workflow file and environment, `id-token: write` from the caller, and no VSCE_PAT) or `pat` (VSCE_PAT)."
+        type: string
+        default: "oidc"
       config-file:
         type: string
         default: ".release-please-config.json"
@@ -132,9 +153,9 @@ on:
         type: string
         default: ""
       vsce-version:
-        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
+        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest. `marketplace-auth: oidc` needs 4.1.0 or later."
         type: string
-        default: "3.9.2"
+        default: "4.1.0"
       ovsx-version:
         description: "Pinned ovsx version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected."
         type: string
@@ -145,7 +166,7 @@ on:
       RELEASE_PLEASE_APP_PRIVATE_KEY:
         required: true
       VSCE_PAT:
-        required: true
+        required: false # only with marketplace-auth: pat
       OVSX_PAT:
         required: false
       SLACK_APPROVALS_WEBHOOK_URL:
@@ -437,8 +458,10 @@ jobs:
     environment: ${{ inputs.environment }}
     permissions:
       contents: write
+      id-token: write # Marketplace Trusted Publishing (marketplace-auth: oidc)
     env:
       EXTENSION_ID: ${{ inputs.extension-id }}
+      MARKETPLACE_AUTH: ${{ inputs.marketplace-auth }}
       TAG: ${{ needs.release-please.outputs.tag_name }}
       VSCE_VERSION: ${{ inputs.vsce-version }}
       OVSX_VERSION: ${{ inputs.ovsx-version }}
@@ -803,8 +826,9 @@ jobs:
       # the pins cover only vsce/ovsx themselves) and any lifecycle scripts run
       # without the PATs in the environment. --ignore-scripts skips those
       # scripts altogether; the only native module in the tree is vsce's
-      # optional keytar, which vsce loads lazily and only when no --pat is
-      # given, so publish --pat is unaffected.
+      # optional keytar, which vsce loads lazily and only when neither --pat
+      # nor --oidc is given, so publishing is unaffected. The step also
+      # rejects a marketplace-auth other than oidc or pat before anything runs.
       #
       # The version inputs are controlled by the caller workflow, and npm treats
       # anything after `@` as a package spec, not just a version: an alias such
@@ -820,6 +844,13 @@ jobs:
               exit 1
             fi
           done
+          case "$MARKETPLACE_AUTH" in
+            oidc|pat) ;;
+            *)
+              echo "::error::marketplace-auth must be oidc or pat, got '$MARKETPLACE_AUTH'"
+              exit 1
+              ;;
+          esac
           npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
 
       # A second reader, still with no PAT in the environment: read the package
@@ -894,7 +925,26 @@ jobs:
                   "$listing" > /dev/null 2>&1; then
             echo "v${VERSION} already on VS Code Marketplace, skipping"
           else
-            vsce publish --packagePath "$VSIX" --pat "$VSCE_PAT"
+            case "$MARKETPLACE_AUTH" in
+              oidc)
+                if [ -n "$VSCE_PAT" ]; then
+                  echo "::error::marketplace-auth is oidc but a VSCE_PAT was passed; stop passing it (and retire it) or set marketplace-auth: pat"
+                  exit 1
+                fi
+                vsce publish --packagePath "$VSIX" --oidc
+                ;;
+              pat)
+                if [ -z "$VSCE_PAT" ]; then
+                  echo "::error::marketplace-auth is pat but VSCE_PAT is empty"
+                  exit 1
+                fi
+                vsce publish --packagePath "$VSIX" --pat "$VSCE_PAT"
+                ;;
+              *)
+                echo "::error::marketplace-auth must be oidc or pat, got '$MARKETPLACE_AUTH'"
+                exit 1
+                ;;
+            esac
           fi
 
       - name: Publish to Open VSX

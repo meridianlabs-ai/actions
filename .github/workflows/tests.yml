@@ -59,8 +59,12 @@ jobs:
           python-version: "3.12"
           project-install: skip
       # The VS Code release tests run the publish job's cross-check step against
-      # vsce's own reader: install the vsce release-please-vscode.yml pins.
-      - run: npm install -g --ignore-scripts @vscode/vsce@3.9.2
+      # vsce's own reader: install the vsce release-please-vscode.yml pins, on
+      # the Node its publish job uses by default (vsce 4 needs Node 22 or later).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: npm install -g --ignore-scripts @vscode/vsce@4.1.0
       # The docs link check tests run lychee against a local server: install
       # the release docs-link-check.yml pins, checked against its digest.
       - name: Install lychee
