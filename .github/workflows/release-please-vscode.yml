@@ -9,7 +9,8 @@ name: Release Please — VS Code extension (reusable)
 #   build   — checks out the release commit, installs, lints, builds, tests and
 #             packages the extension, then uploads the single .vsix as an
 #             artifact. Runs with NO secrets and NO environment, and only a
-#             read-only token.
+#             read-only token. Restores and saves no Actions cache and
+#             persists no checkout credential.
 #   publish — gated by `environment`. Downloads the .vsix artifact, verifies
 #             that it names the extension and version this release authorizes
 #             (see below), publishes it to the VS Code Marketplace + Open VSX,
@@ -342,10 +343,16 @@ jobs:
   # hooks, package.json scripts, tests, vsce:package) happens here, with no
   # secrets, no environment and a read-only token. Do NOT add `secrets.*` or
   # `environment:` to this job — see the header comment.
+  # It also uses no Actions cache and persists no checkout credential: a
+  # restored pnpm store would decide what this job installs and packages
+  # into the published .vsix, and a cache saved after repo code ran would be
+  # restored by later runs. `cache-mode: none` makes the job's cache token
+  # refuse both; no step asks for a cache either.
   build:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
+    cache-mode: none
     permissions:
       contents: read
     outputs:
@@ -353,6 +360,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install pnpm
         uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -361,7 +370,7 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ inputs.node-version }}
-          cache: "pnpm"
+          package-manager-cache: false
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

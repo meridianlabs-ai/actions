@@ -272,6 +272,12 @@ guarantee, and what is by design. To report a vulnerability, see
   converter escapes Slack control syntax and emits only `http(s)` links;
   callers must supply a trusted release URL for the separate full-release
   link, which is not converted.
+- The VS Code release workflow's `build` job, which runs the calling repo's
+  code and its dependencies and produces the `.vsix` the `publish` job
+  ships, holds only the read-only job token, persists no credential into
+  its checkout and restores and saves no Actions cache (`cache-mode: none`;
+  no step asks for a cache), so no cache entry from an earlier run decides
+  what it installs and packages, and it can plant none for a later run.
 - The VS Code publish job publishes only a package it has bound to the
   release: before any step holds a PAT, its inline validator opens the
   downloaded `.vsix` without executing anything in it and fails the job

@@ -1005,6 +1005,23 @@ def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
     assert not any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"])
 
 
+def test_build_job_restores_and_saves_no_actions_cache_and_persists_no_credential():
+    # The build runs repo and dependency code and its .vsix is what gets published:
+    # a restored pnpm store would decide its contents, and a save after that code ran
+    # would reach later runs. The token refuses both; no step asks for a cache.
+    job = workflow()["jobs"]["build"]
+    assert job["cache-mode"] == "none"
+    checkouts = [s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+    assert checkouts
+    assert all(s["with"]["persist-credentials"] is False for s in checkouts)
+    for s in job["steps"]:
+        uses, with_ = s.get("uses", ""), s.get("with") or {}
+        assert not uses.startswith("actions/cache"), uses
+        assert not any(k == "cache" or k.startswith("cache-") or k.startswith("cache_") for k in with_), uses
+    [node] = [s for s in job["steps"] if s.get("uses", "").startswith("actions/setup-node@")]
+    assert node["with"]["package-manager-cache"] is False
+
+
 def vsce_listing(*versions: str, publisher: str | None = PUBLISHER, name: str | None = NAME) -> str:
     listing = {"publisher": {"publisherName": publisher, "displayName": "UK AISI"}, "extensionName": name, "versions": [{"version": v, "flags": "validated"} for v in versions]}
     if publisher is None:
