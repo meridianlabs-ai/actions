@@ -613,7 +613,7 @@ jobs:
       - name: Run Claude triage agent
         id: claude
         if: needs.context.result == 'success'
-        uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe # v1.0.269
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         with:
           anthropic_federation_rule_id: fdrl_01GTpfwJqVdfsAbMYLqt3sLX
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
