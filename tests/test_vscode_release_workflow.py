@@ -808,10 +808,11 @@ def vsce_view(publisher=PUBLISHER, name=NAME, version=VERSION, *, xml: dict | No
     return {"manifest": {"publisher": publisher, "name": name, "version": version}, "xmlManifest": {"PackageManifest": {"Metadata": [{"Identity": [{"$": identity}]}]}}}
 
 
-SECRETS = {"VSCE_PAT": "fake-vsce-pat", "OVSX_PAT": "fake-ovsx-pat", "GITHUB_TOKEN": "fake-github-token"}
+# The Marketplace is published to with Trusted Publishing (vsce --oidc); only Open VSX has a PAT.
+SECRETS = {"OVSX_PAT": "fake-ovsx-pat", "GITHUB_TOKEN": "fake-github-token"}
 EXPRESSIONS = {
     "${{ inputs.extension-id }}": EXTENSION_ID,
-    "${{ inputs.vsce-version }}": "3.9.2",
+    "${{ inputs.vsce-version }}": "4.1.0",
     "${{ inputs.ovsx-version }}": "0.10.12",
     "${{ needs.release-please.outputs.tag_name }}": TAG,
     "${{ github.repository }}": "meridianlabs-ai/inspect_vscode",
@@ -909,10 +910,10 @@ def test_intended_release_is_verified_then_published_and_uploaded(tmp_path):
     run = run_publish_job(tmp_path)
     assert run.outcomes == {"Setup Node.js": "success", "Download VSIX artifact": "success", VERIFY: "success", INSTALL: "success", CROSSCHECK: "success", MARKETPLACE: "success", OPENVSX: "success", UPLOAD: "success"}
     vsix = f"vsix/{FILENAME}"
-    assert run.argv("npm") == [["install", "-g", "--ignore-scripts", "@vscode/vsce@3.9.2", "ovsx@0.10.12"]]
+    assert run.argv("npm") == [["install", "-g", "--ignore-scripts", "@vscode/vsce@4.1.0", "ovsx@0.10.12"]]
     assert run.argv("readVSIXPackage") == [[vsix]]
     assert f"vsce reads {vsix} as {EXTENSION_ID} {VERSION}" in run.logs[CROSSCHECK].stdout
-    assert run.argv("vsce") == [["show", EXTENSION_ID, "--json"], ["publish", "--packagePath", vsix, "--pat", "fake-vsce-pat"]]
+    assert run.argv("vsce") == [["show", EXTENSION_ID, "--json"], ["publish", "--packagePath", vsix, "--oidc"]]
     assert run.argv("ovsx") == [["get", EXTENSION_ID, "--metadata"], ["publish", vsix, "--pat", "fake-ovsx-pat"]]
     assert run.argv("gh") == [["release", "upload", TAG, vsix, "--clobber"]]
 
@@ -1005,6 +1006,29 @@ def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
     assert not any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"])
 
 
+# --- Marketplace auth: Trusted Publishing only -----------------------------------------------------
+
+
+def test_publish_job_may_request_an_oidc_token_and_nothing_else_does():
+    # vsce --oidc reads ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN, which the runner sets only for a job
+    # granted id-token: write.
+    jobs = workflow()["jobs"]
+    assert jobs["publish"]["permissions"] == {"contents": "write", "id-token": "write"}
+    for name, job in jobs.items():
+        if name != "publish":
+            assert "id-token" not in job.get("permissions", {}), name
+
+
+def test_no_marketplace_pat_is_declared_or_used():
+    # A caller that still passes VSCE_PAT then fails at startup instead of after the release is tagged.
+    doc = workflow()
+    call = doc.get("on", doc.get(True))["workflow_call"]
+    assert "VSCE_PAT" not in call["secrets"]
+    assert "marketplace-auth" not in call["inputs"]
+    assert "--pat" not in step(MARKETPLACE)["run"]
+    assert "secrets." not in yaml.safe_dump(step(MARKETPLACE).get("env", {}))
+
+
 def test_build_job_restores_and_saves_no_actions_cache_and_persists_no_credential():
     # The build runs repo and dependency code and its .vsix is what gets published:
     # a restored pnpm store would decide its contents, and a save after that code ran
@@ -1057,7 +1081,7 @@ def ovsx_listing(latest: str, *others: str, namespace: str | None = PUBLISHER, n
 def test_marketplace_skip_check_compares_the_exact_identity_and_version_from_the_listing(tmp_path, vsce_show, published):
     run = run_publish_job(tmp_path, vsce_show=vsce_show)
     assert run.outcomes[MARKETPLACE] == "success"
-    assert (["publish", "--packagePath", f"vsix/{FILENAME}", "--pat", "fake-vsce-pat"] in run.argv("vsce")) is published
+    assert (["publish", "--packagePath", f"vsix/{FILENAME}", "--oidc"] in run.argv("vsce")) is published
     assert ("already on VS Code Marketplace" in run.logs[MARKETPLACE].stdout) is not published
 
 

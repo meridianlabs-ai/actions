@@ -151,6 +151,13 @@ guarantee, and what is by design. To report a vulnerability, see
   every publisher its account manages and an Open VSX token every namespace
   of its account; tokens scoped to the one publisher, where a marketplace
   allows it, are an administrative defence separate from this check.
+  The Marketplace side has no PAT: `vsce publish --oidc` exchanges the job's GitHub OIDC token for a
+  15-minute credential requested for the one publisher, under a Trusted
+  Publishing policy bound to the caller's repository, workflow file and
+  environment. The publish job holds `id-token: write` for this, so every
+  step in it, the Open VSX step (ovsx and its dependencies) included, can
+  mint such a token; that step previously held nothing for the
+  Marketplace. The Open VSX token is still a PAT.
 - **A built docs site is repo output.** In `publish-docs.yml` the `build`
   job runs the calling repo's code at the release tag (its install, Quarto's
   pre- and post-render scripts, any executed cells), and the `deploy` job
