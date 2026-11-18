@@ -55,6 +55,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "release-please-vscode.yml"
+ACTION = ROOT / "vscode-publish" / "action.yml"
 
 PUBLISHER, NAME, VERSION = "ukaisi", "inspect-ai", "0.9.19"
 EXTENSION_ID = f"{PUBLISHER}.{NAME}"
@@ -74,8 +75,13 @@ def workflow() -> dict:
     return yaml.safe_load(WORKFLOW.read_text())
 
 
+def action() -> dict:
+    return yaml.safe_load(ACTION.read_text())
+
+
 def publish_steps() -> list[dict]:
-    return workflow()["jobs"]["publish"]["steps"]
+    """The publish steps: the vscode-publish composite action, which runs in the caller's own job."""
+    return action()["runs"]["steps"]
 
 
 def step(name: str) -> dict:
@@ -750,7 +756,7 @@ def test_step_writes_its_outputs_with_heredocs_and_uses_the_step_env(tmp_path):
     output = tmp_path / "output"
     output.touch()
     s = step(VERIFY)
-    assert s["env"] == {"VSIX_DIR": "vsix"}
+    assert s["env"] == {"VSIX_DIR": "vsix", "EXTENSION_ID": "${{ inputs.extension-id }}", "TAG": "${{ inputs.tag }}"}
     env = {**s["env"], "EXTENSION_ID": EXTENSION_ID, "TAG": TAG, "GITHUB_OUTPUT": str(output)}
     result = run_bash(s["run"], cwd=tmp_path, env=env)
     assert result.returncode == 0, result.stderr
@@ -812,8 +818,12 @@ def vsce_view(publisher=PUBLISHER, name=NAME, version=VERSION, *, xml: dict | No
 SECRETS = {"OVSX_PAT": "fake-ovsx-pat", "GITHUB_TOKEN": "fake-github-token"}
 EXPRESSIONS = {
     "${{ inputs.extension-id }}": EXTENSION_ID,
+    "${{ inputs.tag }}": TAG,
+    "${{ inputs.node-version }}": "22",
     "${{ inputs.vsce-version }}": "4.1.0",
     "${{ inputs.ovsx-version }}": "0.10.12",
+    "${{ inputs.ovsx-pat }}": "fake-ovsx-pat",
+    "${{ inputs.github-token }}": "fake-github-token",
     "${{ needs.release-please.outputs.tag_name }}": TAG,
     "${{ github.repository }}": "meridianlabs-ai/inspect_vscode",
     **{f"${{{{ secrets.{k} }}}}": v for k, v in SECRETS.items()},
@@ -844,13 +854,12 @@ def resolve(value, outputs: dict[str, str]) -> str:
 def should_run(condition, job_ok: bool) -> bool:
     if condition is None:
         return job_ok
-    if condition == "${{ inputs.publish-openvsx }}":
+    if condition == "${{ inputs.publish-openvsx == 'true' }}":
         return job_ok  # the default input is true
     raise AssertionError(f"step condition not modelled: {condition}")
 
 
 def run_publish_job(tmp_path: Path, *, items=None, filename: str = FILENAME, vsce_show: str | None = None, ovsx_get: str | None = None, vsce_reads: dict | None = vsce_view()) -> JobRun:
-    job = workflow()["jobs"]["publish"]
     store = tmp_path / "store"
     store.mkdir()
     if vsce_reads is not None:
@@ -874,12 +883,11 @@ def run_publish_job(tmp_path: Path, *, items=None, filename: str = FILENAME, vsc
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "FAKE_STORE": str(store),
         "RUNNER_TEMP": str(runner_temp),
-        **{k: resolve(v, {}) for k, v in job["env"].items()},
     }
     run = JobRun()
     outputs: dict[str, str] = {}
     job_ok = True
-    for s in job["steps"]:
+    for s in publish_steps():
         name = s.get("name") or s["uses"]
         if not should_run(s.get("if"), job_ok):
             run.outcomes[name] = "skipped"
@@ -984,16 +992,17 @@ def test_verify_runs_after_download_and_before_any_step_that_holds_a_secret_or_i
     names = [s.get("name") or s["uses"] for s in publish_steps()]
     verify = names.index(VERIFY)
     assert names.index("Download VSIX artifact") < verify < names.index(INSTALL) < names.index(CROSSCHECK) < names.index(MARKETPLACE)
+    credentials = ("secrets.", "inputs.ovsx-pat", "inputs.github-token")
     for s in publish_steps()[: verify + 1]:
-        assert "secrets." not in yaml.safe_dump(s), f"{s.get('name')} holds a secret before the package is verified"
+        assert not any(c in yaml.safe_dump(s) for c in credentials), f"{s.get('name')} holds a credential before the package is verified"
     for s in publish_steps():
-        if "secrets." in yaml.safe_dump(s.get("env", {})):
-            assert s["name"] in (MARKETPLACE, OPENVSX, UPLOAD)
+        if any(c in yaml.safe_dump(s.get("env", {})) for c in credentials):
+            assert s["name"] in (OPENVSX, UPLOAD)
 
 
 def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
-    job = workflow()["jobs"]["publish"]
-    assert "needs.build" not in yaml.safe_dump(job)
+    steps = publish_steps()
+    assert "needs." not in yaml.safe_dump(action())
     assert "version" not in workflow()["jobs"]["build"]["outputs"]
     for name in (CROSSCHECK, MARKETPLACE, OPENVSX, UPLOAD):
         assert step(name)["env"]["VSIX"] == "${{ steps.verify.outputs.vsix }}"
@@ -1001,32 +1010,39 @@ def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
         assert step(name)["env"]["VERSION"] == "${{ steps.verify.outputs.version }}"
         assert step(name)["env"]["PUBLISHER"] == "${{ steps.verify.outputs.publisher }}"
         assert step(name)["env"]["NAME"] == "${{ steps.verify.outputs.name }}"
-    assert job["env"]["EXTENSION_ID"] == "${{ inputs.extension-id }}"
-    assert job["env"]["TAG"] == "${{ needs.release-please.outputs.tag_name }}"
-    assert not any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"])
+    for name in (VERIFY, MARKETPLACE, OPENVSX):
+        assert step(name)["env"]["EXTENSION_ID"] == "${{ inputs.extension-id }}"
+    for name in (VERIFY, UPLOAD):
+        assert step(name)["env"]["TAG"] == "${{ inputs.tag }}"
+    assert not any(s.get("uses", "").startswith("actions/checkout") for s in steps)
+    assert all(s.get("shell") == "bash" for s in steps if "run" in s)
 
 
 # --- Marketplace auth: Trusted Publishing only -----------------------------------------------------
 
 
-def test_publish_job_may_request_an_oidc_token_and_nothing_else_does():
-    # vsce --oidc reads ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN, which the runner sets only for a job
-    # granted id-token: write.
-    jobs = workflow()["jobs"]
-    assert jobs["publish"]["permissions"] == {"contents": "write", "id-token": "write"}
-    for name, job in jobs.items():
-        if name != "publish":
-            assert "id-token" not in job.get("permissions", {}), name
-
-
-def test_no_marketplace_pat_is_declared_or_used():
-    # A caller that still passes VSCE_PAT then fails at startup instead of after the release is tagged.
+def test_publishing_happens_in_the_callers_job_not_in_the_reusable_workflow():
+    # The Marketplace matches the token's job_workflow_ref: a job inside the reusable workflow names this
+    # repo's file, never the caller's release.yml, and the exchange 401s. So the reusable workflow has no
+    # publish job, requests no id-token and takes no publish credential; it hands the caller its outputs.
     doc = workflow()
+    assert set(doc["jobs"]) == {"release-please", "build"}
+    for name, job in doc["jobs"].items():
+        assert "id-token" not in job.get("permissions", {}), name
+        assert "environment" not in job, name
     call = doc.get("on", doc.get(True))["workflow_call"]
-    assert "VSCE_PAT" not in call["secrets"]
-    assert "marketplace-auth" not in call["inputs"]
+    assert set(call["secrets"]) == {"RELEASE_PLEASE_APP_ID", "RELEASE_PLEASE_APP_PRIVATE_KEY", "SLACK_APPROVALS_WEBHOOK_URL"}
+    assert call["outputs"] == {
+        "release_created": {"description": call["outputs"]["release_created"]["description"], "value": "${{ jobs.release-please.outputs.release_created }}"},
+        "tag_name": {"description": call["outputs"]["tag_name"]["description"], "value": "${{ jobs.release-please.outputs.tag_name }}"},
+    }
+
+
+def test_marketplace_is_published_with_oidc_only():
     assert "--pat" not in step(MARKETPLACE)["run"]
-    assert "secrets." not in yaml.safe_dump(step(MARKETPLACE).get("env", {}))
+    assert "vsce publish --packagePath \"$VSIX\" --oidc" in step(MARKETPLACE)["run"]
+    assert "VSCE_PAT" not in ACTION.read_text()
+    assert "secrets." not in yaml.safe_dump(action())
 
 
 def test_build_job_restores_and_saves_no_actions_cache_and_persists_no_credential():
@@ -1113,8 +1129,7 @@ BOUND = {"vsix": f"vsix/{FILENAME}", "version": VERSION, "publisher": PUBLISHER,
 
 
 def pinned_vsce_version() -> str:
-    doc = workflow()
-    return doc.get("on", doc.get(True))["workflow_call"]["inputs"]["vsce-version"]["default"]  # PyYAML reads `on` as True
+    return action()["inputs"]["vsce-version"]["default"]
 
 
 @pytest.fixture
@@ -1176,3 +1191,95 @@ def test_extension_packaged_by_real_vsce_passes_verify_and_the_cross_check(tmp_p
     result = run_crosscheck(tmp_path, vsce_bin, BOUND)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"vsce reads vsix/{FILENAME} as {EXTENSION_ID} {VERSION}" in result.stdout
+
+
+# --- publish-tag: rebuild and publish an existing release ------------------------------------------
+
+EXISTING = "Existing release tag"
+TAG_SHA = "a" * 40
+
+FAKE_GH = f'''#!{sys.executable}
+"""Stand-in for gh in the Existing release tag step: a release exists for tags listed in $FAKE_RELEASES."""
+import os, sys
+
+args = sys.argv[1:]
+releases = os.environ.get("FAKE_RELEASES", "").split()
+if args[:2] == ["release", "view"]:
+    if args[2] in releases:
+        print(args[2])
+        sys.exit(0)
+    sys.exit("release not found")
+if args[:1] == ["api"] and args[1].endswith("/commits/refs/tags/" + args[1].rsplit("/", 1)[-1]):
+    print(os.environ.get("FAKE_TAG_SHA", ""))
+    sys.exit(0)
+sys.exit("unexpected gh call: " + " ".join(args))
+'''
+
+
+def release_please_step(name: str) -> dict:
+    for s in workflow()["jobs"]["release-please"]["steps"]:
+        if s.get("name") == name:
+            return s
+    raise KeyError(name)
+
+
+def run_existing(tmp_path: Path, publish_tag: str, *, releases: str = TAG, sha: str = TAG_SHA, release_created: str = "") -> tuple[subprocess.CompletedProcess, dict]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_GH)
+    (bin_dir / "gh").chmod(0o755)
+    output = tmp_path / "output"
+    output.touch()
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "PUBLISH_TAG": publish_tag, "RELEASE_CREATED": release_created, "GH_REPO": "meridianlabs-ai/inspect_vscode", "GITHUB_OUTPUT": str(output), "FAKE_RELEASES": releases, "FAKE_TAG_SHA": sha}
+    result = run_bash(release_please_step(EXISTING)["run"], cwd=tmp_path, env=env)
+    return result, read_outputs(output)
+
+
+def test_existing_tag_step_runs_only_for_publish_tag_and_feeds_the_outputs():
+    s = release_please_step(EXISTING)
+    assert s["id"] == "existing"
+    assert s["if"] == "${{ inputs.publish-tag != '' }}"
+    assert s["env"]["PUBLISH_TAG"] == "${{ inputs.publish-tag }}"
+    outputs = workflow()["jobs"]["release-please"]["outputs"]
+    assert outputs["release_created"] == "${{ steps.existing.outputs.release_created || steps.release.outputs.release_created }}"
+    assert outputs["tag_name"] == "${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}"
+    assert outputs["sha"] == "${{ steps.existing.outputs.sha || github.sha }}"
+    [checkout] = [s for s in workflow()["jobs"]["build"]["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+    assert checkout["with"]["ref"] == "${{ needs.release-please.outputs.sha }}"
+
+
+@pytest.mark.parametrize("tag", [TAG, VERSION, f"inspect-ai-{TAG}"])
+def test_existing_release_tag_is_output_with_its_commit(tmp_path, tag):
+    result, outputs = run_existing(tmp_path, tag, releases=tag)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert outputs == {"release_created": "true", "tag_name": tag, "sha": TAG_SHA}
+
+
+@pytest.mark.parametrize("tag", ["main", "v0.10", "v0.10.2;id", "v0.10.2\nsha=evil", "refs/tags/v0.10.2", "../v0.10.2", " v0.10.2"])
+def test_publish_tag_that_is_not_a_release_tag_is_refused(tmp_path, tag):
+    result, outputs = run_existing(tmp_path, tag, releases=tag)
+    assert result.returncode == 1
+    assert "::error::publish-tag must be a release tag" in result.stdout
+    assert outputs == {}
+
+
+def test_publish_tag_without_a_github_release_is_refused(tmp_path):
+    result, outputs = run_existing(tmp_path, TAG, releases="v0.9.18")
+    assert result.returncode == 1
+    assert f"::error::publish-tag '{TAG}' does not name a GitHub release" in result.stdout
+    assert outputs == {}
+
+
+def test_publish_tag_is_refused_when_this_run_created_a_release(tmp_path):
+    result, outputs = run_existing(tmp_path, TAG, release_created="true")
+    assert result.returncode == 1
+    assert "::error::this run created a release" in result.stdout
+    assert outputs == {}
+
+
+@pytest.mark.parametrize("sha", ["", "not-a-sha", "A" * 40, "a" * 39])
+def test_publish_tag_that_does_not_resolve_to_a_commit_is_refused(tmp_path, sha):
+    result, outputs = run_existing(tmp_path, TAG, sha=sha)
+    assert result.returncode == 1
+    assert "::error::could not resolve publish-tag" in result.stdout
+    assert outputs == {}

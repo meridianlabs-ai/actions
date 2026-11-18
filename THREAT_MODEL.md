@@ -144,7 +144,8 @@ guarantee, and what is by design. To report a vulnerability, see
   and vsce and ovsx publish to whatever publisher, name and version the
   package's own manifests declare. Separating build from publish confines
   where that code runs; it does not bind the publisher-wide PATs to one
-  extension. The `publish` job's "Verify VSIX" step does that (see the
+  extension. The "Verify VSIX" step of `vscode-publish`, which runs in the
+  caller's own `publish` job, does that (see the
   guarantees below); what it cannot do is stop a compromised release commit
   from becoming the content of the one extension version it authorizes,
   which is what building is. A Marketplace PAT covers every extension of
@@ -154,10 +155,17 @@ guarantee, and what is by design. To report a vulnerability, see
   The Marketplace side has no PAT: `vsce publish --oidc` exchanges the job's GitHub OIDC token for a
   15-minute credential requested for the one publisher, under a Trusted
   Publishing policy bound to the caller's repository, workflow file and
-  environment. The publish job holds `id-token: write` for this, so every
+  environment. The Marketplace matches the token's `job_workflow_ref`, so
+  the publish job is the caller's own (a job inside the reusable workflow
+  names this repo's file and the exchange is refused), which puts that job's
+  definition in the caller's `release.yml`, already inside the trust
+  boundary. The publish job holds `id-token: write` for this, so every
   step in it, the Open VSX step (ovsx and its dependencies) included, can
   mint such a token; that step previously held nothing for the
-  Marketplace. The Open VSX token is still a PAT.
+  Marketplace. The Open VSX token is still a PAT. `publish-tag` lets a
+  workflow_dispatch rebuild and publish an existing release tag; it is
+  validated as a tag shape, must name a GitHub release, and goes through
+  the same environment approval.
 - **A built docs site is repo output.** In `publish-docs.yml` the `build`
   job runs the calling repo's code at the release tag (its install, Quarto's
   pre- and post-render scripts, any executed cells), and the `deploy` job
@@ -285,7 +293,7 @@ guarantee, and what is by design. To report a vulnerability, see
   its checkout and restores and saves no Actions cache (`cache-mode: none`;
   no step asks for a cache), so no cache entry from an earlier run decides
   what it installs and packages, and it can plant none for a later run.
-- The VS Code publish job publishes only a package it has bound to the
+- The VS Code publish job (`vscode-publish`) publishes only a package it has bound to the
   release: before any step holds a PAT, its inline validator opens the
   downloaded `.vsix` without executing anything in it and fails the job
   unless `extension/package.json` and `extension.vsixmanifest` agree and

@@ -1,138 +1,109 @@
 name: Release Please — VS Code extension (reusable)
 
-# Reusable workflow: Release Please for a VS Code extension repo.
+# Reusable workflow: Release Please and the build for a VS Code extension
+# repo. The PUBLISH happens in the caller's own job, with the
+# meridianlabs-ai/actions/vscode-publish composite action (see its
+# action.yml for why: the Marketplace's Trusted Publishing matches the
+# workflow file the token's job comes from, and for a job in a reusable
+# workflow that is this file, never the caller's).
 #
 # On push to main, release-please maintains a rolling release PR (release-type
 # node — it owns the package.json version). Merging the PR creates the tag and
-# triggers two further jobs:
+# triggers the build job, and then the caller's publish job:
 #
 #   build   — checks out the release commit, installs, lints, builds, tests and
-#             packages the extension, then uploads the single .vsix as an
-#             artifact. Runs with NO secrets and NO environment, and only a
-#             read-only token. Restores and saves no Actions cache and
+#             packages the extension, then uploads the single .vsix as the
+#             `vsix` artifact. Runs with NO secrets and NO environment, and
+#             only a read-only token. Restores and saves no Actions cache and
 #             persists no checkout credential.
-#   publish — gated by `environment`. Downloads the .vsix artifact, verifies
-#             that it names the extension and version this release authorizes
-#             (see below), publishes it to the VS Code Marketplace + Open VSX,
-#             then attaches it to the GitHub release. It never checks out the
-#             repo or runs pnpm install, so no code from the consuming repo
-#             (package.json scripts, dependency install hooks,
-#             vscode:prepublish) executes here.
+#   publish — the CALLER's job, gated by its `environment`. Runs
+#             vscode-publish, which downloads the .vsix artifact, verifies
+#             that it names the extension and version this release authorizes,
+#             publishes it to the VS Code Marketplace + Open VSX, then attaches
+#             it to the GitHub release. It never checks out the repo or runs
+#             pnpm install, so no code from the consuming repo (package.json
+#             scripts, dependency install hooks, vscode:prepublish) executes
+#             there.
 #
 # The split exists so that code authored in the consuming repo — or in any of
 # its dependencies — never runs in a job that holds the publish credentials
-# (the Marketplace's OIDC exchange, the publisher-wide OVSX_PAT). The environment reviewer gate controls who can START a
-# publish; it cannot stop a compromised release commit from reading secrets in
-# the job that runs it, so the job that runs it must not hold them. The
-# marketplace CLIs used by publish are pinned via `vsce-version` /
-# `ovsx-version` rather than resolved from the repo's devDependencies, for the
-# same reason, and are installed with --ignore-scripts in a step that holds no
-# secrets. The version inputs are validated as exact x.y.z so a caller cannot
-# smuggle an npm alias or git spec into the install (the caller controls the
-# inputs, and the environment reviewer never sees them). Note the pins cover
-# only vsce/ovsx themselves, not their transitive dependency trees (neither
-# ships a lockfile), and the CLIs necessarily see their credentials at run time — so this is
-# hardening, not isolation, for the CLIs. Auth for release-please is a
-# short-lived token from the Meridian release GitHub App.
-#
-# The split confines where repo code RUNS; it does not, by itself, confine
-# what the publisher-wide PATs PUBLISH. vsce and ovsx publish to whatever
-# publisher, name and version the .vsix's own manifests declare, and the .vsix
-# is the output of the build job, i.e. of repo code. So before any step that
-# holds a PAT, the publish job's "Verify VSIX" step opens the downloaded
-# package (a zip; nothing in it is executed) and fails the job unless
-# extension/package.json and extension.vsixmanifest agree with each other and
-# name exactly `extension-id` (a caller input the build cannot change) at the
-# version encoded in the release-please tag (an output of the release-please
-# job, which runs no repo code); a later step, still before any PAT, reads
-# the package again with vsce's own reader and fails unless it names the
-# same identity and version. The build job's version output and the
-# artifact's file name are not evidence and are not used: the tag supplies
-# the version, and the artifact directory must hold exactly one regular file
-# with a plain name. The validator is inline in this file rather than fetched,
-# so the publish job still checks out nothing and the check moves with the
-# workflow revision the caller pinned. What this binds: the identity and
-# version the PATs act on for a given approved release. What it cannot do:
-# stop a compromised release commit from becoming the content of that one
-# extension version (that is what building is), or narrow the Open VSX token
-# itself, which covers every namespace of its account. Tokens
-# scoped to the one publisher, where a marketplace allows it, are an
-# administrative defence to apply separately; do not read this workflow's
-# structure as providing it.
+# (the Marketplace's OIDC exchange, the publisher-wide OVSX_PAT). The
+# environment reviewer gate controls who can START a publish; it cannot stop a
+# compromised release commit from reading secrets in the job that runs it, so
+# the job that runs it must not hold them. vscode-publish pins vsce and ovsx
+# and verifies the package before publishing; see its action.yml.
 #
 # The consuming repo must provide these pnpm scripts: lint, build,
 # build:production, test, vsce:package. `vsce:package` must produce exactly one
-# .vsix in the repo root. Add required reviewers to the `environment` (default
-# `marketplace`) to gate who can ship, and store OVSX_PAT as an
-# ENVIRONMENT secret on that environment, not as repository or organisation
-# secrets. The caller's own release.yml is repo-authored code on the release
-# branch: if the PAT were repo-level, any job added to that file could read
-# them with no approval and without touching this workflow. Environment-scoped
-# secrets are only exposed to jobs that reference the environment, which puts
-# the reviewer gate in the path.
-# The caller workflow file itself therefore stays inside the trust boundary —
+# .vsix in the repo root. Add required reviewers to the publish job's
+# `environment` (e.g. `marketplace`) to gate who can ship, and store OVSX_PAT as
+# an ENVIRONMENT secret on that environment, not as a repository or
+# organisation secret: the caller's release.yml is repo-authored code on the
+# release branch, and environment-scoped secrets are only exposed to jobs that
+# reference the environment, which puts the reviewer gate in the path. The
+# caller workflow file itself therefore stays inside the trust boundary —
 # before approving, reviewers should confirm the run's workflow file is the
 # expected one and unchanged.
 #
-# The VS Code Marketplace is published to with Trusted Publishing only:
-# `vsce publish --oidc` exchanges the job's GitHub OIDC token for a
-# Marketplace credential, requested for the one publisher and valid for 15
-# minutes. There is no PAT path: Azure DevOps retires the global PATs the
-# Marketplace needs on 2026-12-01. Create the publisher's Trusted Publishing
-# policy for the CALLER's repository, its workflow file (e.g. release.yml)
-# and `environment`, and grant `id-token: write` in the caller (see the
-# example below). A caller that still passes VSCE_PAT fails at startup, since
-# this workflow no longer declares it. If the token exchange fails, the
-# release is already tagged and a re-run uses the same commit, so fix the
-# policy and publish that .vsix by hand or cut the next version. With
-# `id-token: write`, every step of the publish job can mint an OIDC token,
-# including the Open VSX step, which runs ovsx and its dependencies; such a
-# token can be exchanged for that same short-lived credential. Before, that
-# step could not reach the Marketplace at all; the trade is a publisher-wide,
-# long-lived PAT for this.
+# Marketplace: Trusted Publishing only (`vsce publish --oidc`; Azure DevOps
+# retires the global PATs the Marketplace needs on 2026-12-01). Create the
+# publisher's Trusted Publishing policy for the caller's repository, its
+# workflow file (release.yml) and the publish job's environment. If the token
+# exchange fails, the release is already tagged; fix the policy and publish
+# the tag again with `publish-tag` (below) from a workflow_dispatch.
+#
+# `publish-tag` (from the caller's workflow_dispatch input): publish an
+# EXISTING release tag that never reached the marketplaces. The release-please
+# job then also outputs that tag as created (after checking that it names a
+# GitHub release and that this run created no other), and the build job checks
+# out the tag's commit instead of the triggering one. Leave it empty for
+# normal runs.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
 #   on:
 #     push: { branches: [main] }
+#     workflow_dispatch:
+#       inputs:
+#         publish-tag:
+#           description: "Publish an existing release tag that failed to publish (e.g. v1.2.3). Leave empty for a normal run."
+#           type: string
+#           default: ""
 #   jobs:
 #     release:
 #       permissions:
 #         contents: write
 #         pull-requests: write
-#         id-token: write # Marketplace Trusted Publishing in the publish job
 #       uses: meridianlabs-ai/actions/.github/workflows/release-please-vscode.yml@<commit SHA on main> # main
 #       with:
-#         extension-id: ukaisi.inspect-ai
+#         publish-tag: ${{ inputs.publish-tag }}
 #       # Name the secrets, not `secrets: inherit`, which would hand this
-#       # workflow every repository and organization secret. Keep the PAT
-#       # line even when the PAT is an environment secret: the caller sees
-#       # it as empty, and the publish job, which sets the environment,
-#       # gets the environment's value. A PAT left out here stays empty there.
+#       # workflow every repository and organization secret.
 #       secrets:
 #         RELEASE_PLEASE_APP_ID: ${{ secrets.RELEASE_PLEASE_APP_ID }}
 #         RELEASE_PLEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-#         OVSX_PAT: ${{ secrets.OVSX_PAT }}
 #         SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
+#     publish:
+#       needs: release
+#       if: ${{ needs.release.outputs.release_created == 'true' }}
+#       runs-on: ubuntu-latest
+#       environment: marketplace
+#       permissions:
+#         contents: write # attach the .vsix to the GitHub release
+#         id-token: write # Marketplace Trusted Publishing
+#       steps:
+#         - uses: meridianlabs-ai/actions/vscode-publish@<same commit SHA> # main
+#           with:
+#             extension-id: ukaisi.inspect-ai
+#             tag: ${{ needs.release.outputs.tag_name }}
+#             ovsx-pat: ${{ secrets.OVSX_PAT }}
 
 on:
   workflow_call:
     inputs:
-      extension-id:
-        description: "Marketplace extension id, e.g. ukaisi.inspect-ai"
-        type: string
-        required: true
       node-version:
         type: string
         default: "22"
-      publish-openvsx:
-        description: "Also publish to Open VSX"
-        type: boolean
-        default: true
-      environment:
-        description: "Deployment environment for the publish job. Add required reviewers to gate releases, and store OVSX_PAT as an environment secret on it (not a repo secret) so only approved jobs can read it. Name it in the Marketplace's Trusted Publishing policy."
-        type: string
-        default: "marketplace"
       config-file:
         type: string
         default: ".release-please-config.json"
@@ -147,23 +118,24 @@ on:
         description: "Branch Release Please manages. Leave empty for the default branch (normal releases); set to a maintenance branch (e.g. hotfix/1.4.x) to cut a hotfix release from a released tag."
         type: string
         default: ""
-      vsce-version:
-        description: "Pinned @vscode/vsce version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest. Trusted Publishing (--oidc) needs 4.1.0 or later, and vsce 4 needs a `node-version` of 22 or later."
+      publish-tag:
+        description: "Build and output an EXISTING release tag (e.g. v1.2.3) for the caller's publish job, to publish a release that never reached the marketplaces. Leave empty for normal runs."
         type: string
-        default: "4.1.0"
-      ovsx-version:
-        description: "Pinned ovsx version used by the publish job (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected."
-        type: string
-        default: "0.10.12"
+        default: ""
     secrets:
       RELEASE_PLEASE_APP_ID:
         required: true
       RELEASE_PLEASE_APP_PRIVATE_KEY:
         required: true
-      OVSX_PAT:
-        required: false
       SLACK_APPROVALS_WEBHOOK_URL:
         required: false # if set, posts a Slack ping to a dedicated approvals channel when a release awaits publish approval
+    outputs:
+      release_created:
+        description: "'true' when this run created a release (or `publish-tag` named one); the caller's publish job runs only then."
+        value: ${{ jobs.release-please.outputs.release_created }}
+      tag_name:
+        description: "The release tag the caller's publish job passes to vscode-publish as `tag`."
+        value: ${{ jobs.release-please.outputs.tag_name }}
 
 jobs:
   release-please:
@@ -172,8 +144,9 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_created: ${{ steps.existing.outputs.release_created || steps.release.outputs.release_created }}
+      tag_name: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
+      sha: ${{ steps.existing.outputs.sha || github.sha }}
     steps:
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
@@ -308,6 +281,44 @@ jobs:
                   sys.exit(1)
           PY
 
+      # publish-tag: hand an existing release tag to the build and the caller's
+      # publish job. The tag is a caller (workflow_dispatch) input, so it is
+      # validated against a tag shape before it becomes a ref, must name a
+      # GitHub release, and is refused if this run also created a release.
+      # The build checks out the commit the tag resolves to here.
+      - name: Existing release tag
+        id: existing
+        if: ${{ inputs.publish-tag != '' }}
+        env:
+          PUBLISH_TAG: ${{ inputs.publish-tag }}
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! [[ "$PUBLISH_TAG" =~ ^([A-Za-z0-9._-]+-)?v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::publish-tag must be a release tag such as v1.2.3, got '$PUBLISH_TAG'"
+            exit 1
+          fi
+          if [ "$RELEASE_CREATED" = "true" ]; then
+            echo "::error::this run created a release; publish it from this run, not with publish-tag"
+            exit 1
+          fi
+          if ! gh release view "$PUBLISH_TAG" --json tagName --jq .tagName > /dev/null; then
+            echo "::error::publish-tag '$PUBLISH_TAG' does not name a GitHub release"
+            exit 1
+          fi
+          sha="$(gh api "repos/$GH_REPO/commits/refs/tags/$PUBLISH_TAG" --jq .sha)"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve publish-tag '$PUBLISH_TAG' to a commit"
+            exit 1
+          fi
+          {
+            echo "release_created<<EOF"; echo "true"; echo "EOF"
+            echo "tag_name<<EOF"; echo "$PUBLISH_TAG"; echo "EOF"
+            echo "sha<<EOF"; echo "$sha"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing existing release $PUBLISH_TAG at $sha"
+
       # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
       # @-mention the right people.
       - name: Fetch Slack ID map
@@ -372,9 +383,11 @@ jobs:
     outputs:
       vsix: ${{ steps.package.outputs.vsix }}
     steps:
+      # The release commit: the triggering commit, or the publish-tag's commit.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.release-please.outputs.sha }}
           persist-credentials: false
 
       - name: Install pnpm
@@ -432,510 +445,3 @@ jobs:
           path: ${{ steps.package.outputs.vsix }}
           retention-days: 30
           if-no-files-found: error
-
-  # Holds the Marketplace OIDC exchange (id-token: write), the Open VSX PAT and
-  # the release-upload token, and is gated by the
-  # `environment` reviewers. Deliberately has no checkout and no pnpm install:
-  # nothing from the consuming repo runs here. Publishing a pre-built
-  # --packagePath does not invoke vscode:prepublish or any other repo script.
-  #
-  # Nothing from `needs.build.outputs` is used here: the build job ran repo
-  # code, so its outputs are repo-controlled. The extension identity comes
-  # from the caller's `extension-id` input and the version from the
-  # release-please tag; the Verify VSIX step binds the downloaded package to
-  # both and is the only source of the VSIX path and VERSION the later steps
-  # use.
-  publish:
-    needs: [release-please, build]
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-    permissions:
-      contents: write
-      id-token: write # Marketplace Trusted Publishing (vsce publish --oidc)
-    env:
-      EXTENSION_ID: ${{ inputs.extension-id }}
-      TAG: ${{ needs.release-please.outputs.tag_name }}
-      VSCE_VERSION: ${{ inputs.vsce-version }}
-      OVSX_VERSION: ${{ inputs.ovsx-version }}
-    steps:
-      - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ inputs.node-version }}
-
-      - name: Download VSIX artifact
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: vsix
-          path: vsix
-
-      # Bind the package to this release before any PAT is in the environment.
-      # The validator never extracts or executes anything. Before Python's
-      # zipfile reads the archive it checks the zip structure itself, since
-      # zipfile and vsce's reader (yauzl) do not find the central directory
-      # the same way: the end record must be the last 22 bytes (no comment),
-      # with no Zip64 fields, and no Zip64 end or locator signature or
-      # second end-record signature anywhere outside entry data (see the
-      # scan for why entry data is skipped); the central directory it names must end exactly at it
-      # and hold the number of entries it counts; zipfile must list those
-      # same entries; and the manifests' local headers must match their
-      # directory records. It then parses extension/package.json and
-      # extension.vsixmanifest strictly (no duplicate JSON keys, no DTD or
-      # entities, one Metadata/Identity), and rejects an archive whose
-      # entries could make two consumers read different manifests (repeated
-      # or case-variant names, unsafe paths, symlinks). The "Cross-check VSIX
-      # with vsce's reader" step then reads the package the way vsce publish
-      # does. Its `vsix`, `version`, `publisher` and `name` outputs are what
-      # the publish and upload steps use. Inline rather than fetched: see the
-      # header.
-      - name: Verify VSIX
-        id: verify
-        env:
-          VSIX_DIR: vsix
-        run: |
-          python3 - <<'PY'
-          """Bind the downloaded .vsix to the extension identity and version this release authorizes.
-
-          Trusted inputs: EXTENSION_ID (a caller input) and TAG (the release-please
-          job's tag). Untrusted: everything under VSIX_DIR, which the build job
-          produced by running repo code. Prints ::error:: and exits 1 on any doubt.
-          """
-          import io
-          import json
-          import os
-          import re
-          import stat
-          import struct
-          import sys
-          import xml.etree.ElementTree as ET
-          import zipfile
-
-          NAME = r"[a-z0-9][a-z0-9-]*"  # vsce's rule for a publisher or extension name
-          NAME_RE = re.compile(NAME, re.IGNORECASE)
-          EXTENSION_ID_RE = re.compile(rf"({NAME})\.({NAME})", re.IGNORECASE)
-          SEMVER = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-          VERSION_RE = re.compile(SEMVER)
-          # The tag shapes release-please produces for the callers' configs:
-          # vX.Y.Z (default), X.Y.Z (include-v-in-tag: false), and either with a
-          # <component>- prefix (include-component-in-tag). Only the trailing
-          # X.Y.Z is used; the component is not checked against anything. No
-          # prerelease suffix: the Marketplace rejects those, so no intended
-          # release carries one.
-          TAG_RE = re.compile(rf"(?:[A-Za-z0-9][A-Za-z0-9._/-]*-)?v?({SEMVER})")
-          FILENAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.vsix")
-          PACKAGE_JSON = "extension/package.json"
-          VSIXMANIFEST = "extension.vsixmanifest"
-          VSX = "{http://schemas.microsoft.com/developer/vsx-schema/2011}"
-          MAX_MANIFEST = 1 << 20
-          END_SIG = b"PK\x05\x06"
-          ZIP64_END_SIG = b"PK\x06\x06"
-          ZIP64_LOCATOR_SIG = b"PK\x06\x07"
-          CENTRAL_SIG = b"PK\x01\x02"
-          LOCAL_SIG = b"PK\x03\x04"
-          DESCRIPTOR_SIG = b"PK\x07\x08"
-
-
-          class Rejected(Exception):
-              pass
-
-
-          def one_file(directory):
-              entries = sorted(os.listdir(directory))
-              if len(entries) != 1:
-                  raise Rejected(f"expected exactly one file in {directory}/, found {entries}")
-              name = entries[0]
-              if not FILENAME_RE.fullmatch(name):
-                  raise Rejected(f"artifact name {name!r} is not a plain <name>.vsix")
-              path = os.path.join(directory, name)
-              if not stat.S_ISREG(os.lstat(path).st_mode):
-                  raise Rejected(f"{path} is not a regular file")
-              return path
-
-
-          def check_entry_name(name):
-              parts = name.split("/")
-              if parts and parts[-1] == "":
-                  parts = parts[:-1]  # a directory entry
-              if (not parts or "\\" in name or "\x00" in name or name.startswith("/")
-                      or re.match(r"[A-Za-z]:", name) or any(p in ("", ".", "..") for p in parts)):
-                  raise Rejected(f"unsafe archive entry name {name!r}")
-
-
-          def check_extra_fields(info):
-              # An Info-ZIP Unicode Path extra field (0x7075) carries a second
-              # name for an entry. Some readers apply it (yauzl, vsce's reader;
-              # Python's zipfile from 3.12) and others keep the header name
-              # (Java's ZipFile, older Python), so an entry could be one file to
-              # one consumer and the manifest to another. vsce's own packager
-              # writes no such field: reject any, naming both the header name
-              # (orig_filename, on every Python) and the field's, and reject
-              # extra data that does not parse as (id, length, data) records.
-              extra, offset = info.extra, 0
-              while offset < len(extra):
-                  if offset + 4 > len(extra):
-                      raise Rejected(f"archive entry {info.orig_filename!r} has malformed extra-field data")
-                  field_id = int.from_bytes(extra[offset:offset + 2], "little")
-                  length = int.from_bytes(extra[offset + 2:offset + 4], "little")
-                  if offset + 4 + length > len(extra):
-                      raise Rejected(f"archive entry {info.orig_filename!r} has malformed extra-field data")
-                  if field_id == 0x7075:
-                      alias = extra[offset + 9:offset + 4 + length].decode("utf-8", "replace")
-                      raise Rejected(f"archive entry {info.orig_filename!r} carries a Unicode Path extra field naming it {alias!r}, which some readers apply")
-                  offset += 4 + length
-
-
-          def check_structure(data):
-              # Python's zipfile and yauzl (vsce's reader) find the central
-              # directory differently. zipfile follows a Zip64 locator to the
-              # record just before it and reads the directory that ends there;
-              # yauzl follows the locator's offset field, or without a locator
-              # the end record's own fields. So an archive with Zip64 records,
-              # a comment, or a directory that does not end at the end record
-              # can list different entries to each. vsce's packager writes none
-              # of these, so refuse them all, before zipfile reads anything.
-              # Returns the central-directory records in order, as
-              # (name, crc, compressed size, size, local header offset).
-              if len(data) < 22 or data[-22:-18] != END_SIG:
-                  raise Rejected("the archive's last 22 bytes are not an end-of-central-directory record (a zip comment or trailing data is not allowed)")
-              end = len(data) - 22
-              disk, cd_disk, disk_count, count, cd_size, cd_offset, comment = struct.unpack("<HHHHIIH", data[end + 4:])
-              if comment or disk or cd_disk or disk_count != count:
-                  raise Rejected("the end-of-central-directory record has a comment or names more than one disk")
-              if count == 0xFFFF or 0xFFFFFFFF in (cd_size, cd_offset):
-                  raise Rejected("the end-of-central-directory record defers to Zip64 records")
-              if cd_offset + cd_size != end:
-                  raise Rejected(f"the central directory ({cd_size} bytes at offset {cd_offset}) does not end at the end-of-central-directory record (offset {end})")
-              records, pos = [], cd_offset
-              while pos < end:
-                  if pos + 46 > end or data[pos:pos + 4] != CENTRAL_SIG:
-                      raise Rejected(f"malformed central-directory record at offset {pos}")
-                  flags, crc, csize, size, n, m, k, first_disk, offset = struct.unpack("<8xH6xIIIHHHH6xI", data[pos:pos + 46])
-                  name = data[pos + 46:pos + 46 + n]
-                  pos += 46 + n + m + k
-                  if pos > end:
-                      raise Rejected(f"central-directory record for {name!r} runs past the directory")
-                  if first_disk or 0xFFFFFFFF in (csize, size, offset):
-                      raise Rejected(f"central-directory record for {name!r} defers to Zip64 fields")
-                  records.append((name, flags, crc, csize, size, offset))
-              if len(records) != count:
-                  raise Rejected(f"the end-of-central-directory record counts {count} entries but the central directory holds {len(records)}")
-              data_ranges = []
-              for name, flags, crc, csize, size, offset in records:
-                  if offset + 30 > cd_offset or data[offset:offset + 4] != LOCAL_SIG:
-                      raise Rejected(f"archive entry {name!r} has no local header at offset {offset}")
-                  lflags, lcrc, lcsize, lsize, n, m = struct.unpack("<6xH6xIIIHH", data[offset:offset + 30])
-                  local_name = data[offset + 30:offset + 30 + n]
-                  if local_name != name:
-                      raise Rejected(f"archive entry {name!r} is named {local_name!r} in its local header")
-                  start = offset + 30 + n + m
-                  if start + csize > cd_offset:
-                      raise Rejected(f"archive entry {name!r} runs into the central directory")
-                  if name in (PACKAGE_JSON.encode(), VSIXMANIFEST.encode()):
-                      # With bit 3 set (vsce sets it for files it streams from
-                      # disk) the local header's CRC and sizes are zero and a
-                      # data descriptor after the data carries them.
-                      sizes = (crc, csize, size)
-                      if flags & 8 != lflags & 8:
-                          matches = False
-                      elif flags & 8:
-                          descriptor = start + csize
-                          matches = ((lcrc, lcsize, lsize) in ((0, 0, 0), sizes) and descriptor + 16 <= cd_offset
-                                     and data[descriptor:descriptor + 16] == DESCRIPTOR_SIG + struct.pack("<III", *sizes))
-                      else:
-                          matches = (lcrc, lcsize, lsize) == sizes
-                      if not matches:
-                          raise Rejected(f"{name.decode()}'s local header does not match its central-directory record")
-                  data_ranges.append((offset, start, start + csize))
-              data_ranges.sort()
-              for (_, _, prev_end), (next_offset, _, _) in zip(data_ranges, data_ranges[1:]):
-                  if next_offset < prev_end:
-                      raise Rejected(f"archive entries overlap at offset {next_offset}")
-              # Refuse these signatures anywhere except inside an entry's data
-              # (decision: Ransom, 2026-09-30). Compressed or stored data can
-              # hold those 4 bytes by chance, or legitimately in a bundled zip,
-              # and refusing it would fail honest releases. Skipping it is safe:
-              # both readers take the end record from the last 22 bytes and
-              # read a Zip64 locator only from the 20 bytes before it, which lie
-              # in the central directory since it ends there; that directory
-              # and every local header are outside the data ranges, which come
-              # from the checked directory and do not overlap each other or it.
-              for sig, what in ((ZIP64_END_SIG, "a Zip64 end-of-central-directory signature"),
-                                (ZIP64_LOCATOR_SIG, "a Zip64 end-of-central-directory locator signature"),
-                                (END_SIG, "a second end-of-central-directory signature")):
-                  at = data.find(sig)
-                  while at != -1:
-                      if at != end and not any(s <= at and at + 4 <= e for _, s, e in data_ranges):
-                          raise Rejected(f"the archive contains {what} at offset {at}")
-                      at = data.find(sig, at + 1)
-              return [(name, crc, csize, size, offset) for name, _, crc, csize, size, offset in records]
-
-
-          def read_manifests(path):
-              with open(path, "rb") as f:
-                  data = f.read()
-              records = check_structure(data)
-              try:
-                  zf = zipfile.ZipFile(io.BytesIO(data))
-              except Exception as e:
-                  raise Rejected(f"{path} is not a readable zip archive: {e}")
-              with zf:
-                  listed = [(i.orig_filename.encode("utf-8" if i.flag_bits & 0x800 else "cp437"), i.CRC, i.compress_size, i.file_size, i.header_offset) for i in zf.infolist()]
-                  if listed != records:
-                      raise Rejected("Python's zipfile lists different entries from the ones the central directory holds")
-                  by_lower = {}
-                  for info in zf.infolist():
-                      check_entry_name(info.filename)
-                      check_extra_fields(info)
-                      if stat.S_ISLNK(info.external_attr >> 16):
-                          raise Rejected(f"archive entry {info.filename!r} is a symlink")
-                      lower = info.filename.lower()
-                      if lower in by_lower:
-                          raise Rejected(f"ambiguous archive: entries {by_lower[lower]!r} and {info.filename!r} repeat or differ only in case")
-                      by_lower[lower] = info.filename
-                  blobs = []
-                  for wanted in (PACKAGE_JSON, VSIXMANIFEST):
-                      actual = by_lower.get(wanted)
-                      if actual is None:
-                          raise Rejected(f"{wanted} is missing from the archive")
-                      if actual != wanted:
-                          raise Rejected(f"{actual!r} would be read as {wanted} by vsce but not by every consumer")
-                      info = zf.getinfo(wanted)
-                      if info.file_size > MAX_MANIFEST:
-                          raise Rejected(f"{wanted} is larger than {MAX_MANIFEST} bytes")
-                      try:
-                          with zf.open(info) as f:
-                              data = f.read(MAX_MANIFEST + 1)
-                      except Exception as e:
-                          raise Rejected(f"{wanted} could not be read: {e}")
-                      if len(data) > MAX_MANIFEST:
-                          raise Rejected(f"{wanted} is larger than {MAX_MANIFEST} bytes")
-                      blobs.append(data)
-              return blobs
-
-
-          def identity(publisher, name, version, source):
-              for field, value, shape in (("publisher", publisher, NAME_RE), ("name", name, NAME_RE), ("version", version, VERSION_RE)):
-                  if not isinstance(value, str) or not shape.fullmatch(value):
-                      raise Rejected(f"{source}: {field} {value!r} is missing or malformed")
-              return (publisher, name, version)
-
-
-          def parse_package_json(data):
-              def no_duplicates(pairs):
-                  keys = [k for k, _ in pairs]
-                  if len(set(keys)) != len(keys):
-                      raise ValueError("duplicate keys")
-                  return dict(pairs)
-
-              def no_constants(token):
-                  raise ValueError(f"{token} is not JSON")  # Python would accept NaN/Infinity; JSON.parse does not
-
-              try:
-                  manifest = json.loads(data.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constants)
-              except (UnicodeDecodeError, ValueError) as e:
-                  raise Rejected(f"{PACKAGE_JSON} is not strict JSON: {e}")
-              if not isinstance(manifest, dict):
-                  raise Rejected(f"{PACKAGE_JSON} is not a JSON object")
-              return identity(manifest.get("publisher"), manifest.get("name"), manifest.get("version"), PACKAGE_JSON)
-
-
-          def parse_vsixmanifest(data):
-              try:
-                  text = data.decode("utf-8")
-              except UnicodeDecodeError as e:
-                  raise Rejected(f"{VSIXMANIFEST} is not UTF-8: {e}")
-              if re.search(r"<!(?:DOCTYPE|ENTITY)", text, re.IGNORECASE):
-                  raise Rejected(f"{VSIXMANIFEST} declares a DTD or entities")
-              try:
-                  root = ET.fromstring(text)
-              except ET.ParseError as e:
-                  raise Rejected(f"{VSIXMANIFEST} is not well-formed XML: {e}")
-              if root.tag != VSX + "PackageManifest":
-                  raise Rejected(f"{VSIXMANIFEST}: root element is {root.tag}, not PackageManifest")
-              # vsce's xml2js reader ignores namespaces and takes the first
-              # Metadata and the first Identity it meets, so an element of either
-              # name in any namespace, anywhere, is a competing identity: require
-              # exactly one of each in the whole document, in the vsx namespace,
-              # with Identity directly under Metadata directly under the root.
-              metadata = [e for e in root.iter() if e.tag.rsplit("}", 1)[-1] == "Metadata"]
-              if len(metadata) != 1 or metadata[0].tag != VSX + "Metadata" or metadata[0] not in list(root):
-                  raise Rejected(f"{VSIXMANIFEST}: expected one Metadata element under the root, found {[e.tag for e in metadata]}")
-              identities = [e for e in root.iter() if e.tag.rsplit("}", 1)[-1] == "Identity"]
-              if len(identities) != 1 or identities[0].tag != VSX + "Identity" or identities[0] not in list(metadata[0]):
-                  raise Rejected(f"{VSIXMANIFEST}: expected one Identity element under Metadata, found {[e.tag for e in identities]}")
-              a = identities[0].attrib
-              if any(k.startswith("{") for k in a):
-                  raise Rejected(f"{VSIXMANIFEST}: Identity has namespaced attributes {sorted(k for k in a if k.startswith('{'))}")
-              return identity(a.get("Publisher"), a.get("Id"), a.get("Version"), VSIXMANIFEST)
-
-
-          def describe(ident):
-              return f"{ident[0]}.{ident[1]} {ident[2]}"
-
-
-          def verify(directory, extension_id, tag):
-              m = EXTENSION_ID_RE.fullmatch(extension_id)
-              if not m:
-                  raise Rejected(f"extension-id {extension_id!r} is not <publisher>.<name>")
-              t = TAG_RE.fullmatch(tag)
-              if not t:
-                  raise Rejected(f"release tag {tag!r} does not end in an X.Y.Z version")
-              expected = (m.group(1), m.group(2), t.group(1))
-              path = one_file(directory)
-              raw_json, raw_xml = read_manifests(path)
-              pkg = parse_package_json(raw_json)
-              xml = parse_vsixmanifest(raw_xml)
-              if pkg != xml:
-                  raise Rejected(f"{PACKAGE_JSON} says {describe(pkg)} but {VSIXMANIFEST} says {describe(xml)}")
-              if pkg != expected:
-                  raise Rejected(f"package is {describe(pkg)}; this release may only publish {describe(expected)} (extension-id {extension_id}, tag {tag})")
-              return path, expected[2]
-
-
-          def main():
-              directory, extension_id, tag = (os.environ.get(k, "") for k in ("VSIX_DIR", "EXTENSION_ID", "TAG"))
-              try:
-                  path, version = verify(directory, extension_id, tag)
-              except Rejected as e:
-                  print(f"::error::VSIX rejected: {e}")
-                  return 1
-              print(f"Verified {path}: {extension_id} {version} (tag {tag})")
-              output = os.environ.get("GITHUB_OUTPUT")
-              if output:
-                  publisher, name = extension_id.split(".")
-                  with open(output, "a", encoding="utf-8") as f:
-                      for key, value in (("vsix", path), ("version", version), ("publisher", publisher), ("name", name)):
-                          f.write(f"{key}<<EOF\n{value}\nEOF\n")
-              return 0
-
-
-          if __name__ == "__main__":
-              sys.exit(main())
-          PY
-
-      # Install both CLIs in one step that holds no secrets, so the npm install
-      # (which resolves their transitive dependencies fresh from the registry —
-      # the pins cover only vsce/ovsx themselves) and any lifecycle scripts run
-      # without the PATs in the environment. --ignore-scripts skips those
-      # scripts altogether; the only native module in the tree is vsce's
-      # optional keytar, which vsce loads lazily and only when neither --pat
-      # nor --oidc is given, so publishing is unaffected.
-      #
-      # The version inputs are controlled by the caller workflow, and npm treats
-      # anything after `@` as a package spec, not just a version: an alias such
-      # as `npm:other-package` or a hosted-git spec like `github:user/repo`
-      # would install arbitrary code as the `vsce` / `ovsx` binaries that later
-      # run with the PATs. Require an exact x.y.z version so only the pinned
-      # registry package can be installed.
-      - name: Install marketplace CLIs
-        run: |
-          for v in "$VSCE_VERSION" "$OVSX_VERSION"; do
-            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::vsce-version / ovsx-version must be exact x.y.z versions, got '$v'"
-              exit 1
-            fi
-          done
-          npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
-
-      # A second reader, still with no PAT in the environment: read the package
-      # with readVSIXPackage from the vsce just installed, the function (and
-      # yauzl) `vsce publish --packagePath` takes the publisher, name and
-      # version from, and fail unless its package.json and vsixmanifest say
-      # exactly what the Verify VSIX step bound. The module is found from the
-      # `vsce` on PATH, the binary the publish step runs.
-      - name: Cross-check VSIX with vsce's reader
-        env:
-          VSIX: ${{ steps.verify.outputs.vsix }}
-          VERSION: ${{ steps.verify.outputs.version }}
-          PUBLISHER: ${{ steps.verify.outputs.publisher }}
-          NAME: ${{ steps.verify.outputs.name }}
-        run: |
-          vsce_bin="$(command -v vsce)"
-          VSCE_ZIP="$(dirname "$(readlink -f "$vsce_bin")")/out/zip.js" node - <<'JS'
-          "use strict";
-          const { VSIX, VSCE_ZIP, PUBLISHER, NAME, VERSION } = process.env;
-          const expected = [PUBLISHER, NAME, VERSION];
-          let verified = false;
-          function fail(message) {
-            console.log(`::error::VSIX rejected: ${message}`);
-            process.exit(1);
-          }
-          process.on("uncaughtException", (e) => fail(`vsce's reader failed on ${VSIX}: ${e && e.message}`));
-          // A read that never settles would otherwise let node exit 0.
-          process.on("exit", (code) => {
-            if (code === 0 && !verified) {
-              console.log(`::error::VSIX rejected: vsce's reader did not finish reading ${VSIX}`);
-              process.exitCode = 1;
-            }
-          });
-          const { readVSIXPackage } = require(VSCE_ZIP);
-          readVSIXPackage(VSIX).then(({ manifest, xmlManifest }) => {
-            const identity = xmlManifest.PackageManifest.Metadata[0].Identity[0].$;
-            const seen = {
-              "extension/package.json": [manifest.publisher, manifest.name, manifest.version],
-              "extension.vsixmanifest": [identity.Publisher, identity.Id, identity.Version],
-            };
-            for (const [source, value] of Object.entries(seen)) {
-              if (value.some((v, i) => v !== expected[i])) {
-                fail(`vsce reads ${source} as ${JSON.stringify(value)}, but Verify VSIX read ${JSON.stringify(expected)}`);
-              }
-            }
-            verified = true;
-            console.log(`vsce reads ${VSIX} as ${PUBLISHER}.${NAME} ${VERSION}`);
-          }).catch((e) => fail(`vsce's reader failed on ${VSIX}: ${e && e.message}`));
-          JS
-
-      # The already-published checks are a rerun convenience, not a control:
-      # they parse the CLIs' JSON and skip only when the listing's own
-      # publisher and name are the verified identity and its versions include
-      # the verified version, compared exactly, where before they grepped the
-      # output for a version the build job supplied, interpreted as a regular
-      # expression. `vsce show` prints `undefined` for an unknown extension and
-      # `ovsx get` fails for one, so a first publish falls through to the
-      # publish command, as does a lookup failure or a listing for anything
-      # else; the CLIs themselves refuse a duplicate version.
-      - name: Publish to VS Code Marketplace
-        env:
-          VSIX: ${{ steps.verify.outputs.vsix }}
-          VERSION: ${{ steps.verify.outputs.version }}
-          PUBLISHER: ${{ steps.verify.outputs.publisher }}
-          NAME: ${{ steps.verify.outputs.name }}
-        run: |
-          listing="$RUNNER_TEMP/vsce-show.json"
-          if vsce show "$EXTENSION_ID" --json > "$listing" 2>/dev/null \
-             && jq -e --arg p "$PUBLISHER" --arg n "$NAME" --arg v "$VERSION" \
-                  '.publisher.publisherName == $p and .extensionName == $n and ((.versions // []) | map(.version) | index($v) != null)' \
-                  "$listing" > /dev/null 2>&1; then
-            echo "v${VERSION} already on VS Code Marketplace, skipping"
-          else
-            vsce publish --packagePath "$VSIX" --oidc
-          fi
-
-      - name: Publish to Open VSX
-        if: ${{ inputs.publish-openvsx }}
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
-          VSIX: ${{ steps.verify.outputs.vsix }}
-          VERSION: ${{ steps.verify.outputs.version }}
-          PUBLISHER: ${{ steps.verify.outputs.publisher }}
-          NAME: ${{ steps.verify.outputs.name }}
-        run: |
-          metadata="$RUNNER_TEMP/ovsx-metadata.json"
-          if ovsx get "$EXTENSION_ID" --metadata > "$metadata" 2>/dev/null \
-             && jq -e --arg p "$PUBLISHER" --arg n "$NAME" --arg v "$VERSION" \
-                  '.namespace == $p and .name == $n and (.version == $v or ((.allVersions // {}) | has($v)))' \
-                  "$metadata" > /dev/null 2>&1; then
-            echo "v${VERSION} already on Open VSX, skipping"
-          else
-            ovsx publish "$VSIX" --pat "$OVSX_PAT"
-          fi
-
-      # No checkout in this job, so `gh` cannot infer the repository from a git
-      # remote; GH_REPO tells it which repo owns the release.
-      - name: Upload VSIX to GitHub release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          VSIX: ${{ steps.verify.outputs.vsix }}
-        run: gh release upload "$TAG" "$VSIX" --clobber

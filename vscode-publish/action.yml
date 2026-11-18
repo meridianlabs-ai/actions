@@ -1,0 +1,562 @@
+name: Publish a VS Code extension release
+description: >-
+  Verify the .vsix the release-please-vscode.yml build job uploaded and publish
+  it to the VS Code Marketplace (Trusted Publishing), Open VSX and the GitHub
+  release. Runs in the CALLER's own publish job.
+
+# Why a composite action and not a job in release-please-vscode.yml: the
+# Marketplace's Trusted Publishing matches the OIDC token's job_workflow_ref,
+# which for a job inside a reusable workflow names that reusable workflow
+# (meridianlabs-ai/actions/...release-please-vscode.yml), never the caller. A
+# policy for the caller's repo and release.yml then never matches (401 "The
+# token could not be exchanged for the specified publisher"), and a policy for
+# this repo's workflow would trust any repository that calls it. Steps of a
+# composite action run inside the caller's job, so the token names the
+# caller's release.yml and its policy matches.
+#
+# The caller's publish job (see the example in release-please-vscode.yml):
+#   - needs the reusable workflow's job and runs only when its
+#     `release_created` output is 'true';
+#   - sets `environment:` (default name `marketplace`), whose required
+#     reviewers gate the publish and which holds OVSX_PAT as an environment
+#     secret;
+#   - has `permissions: contents: write` (release upload) and
+#     `id-token: write` (the Marketplace exchange), and nothing else;
+#   - checks out nothing and runs no repo code, and passes `tag` from the
+#     reusable workflow's `tag_name` output.
+# The caller's release.yml is repo-authored code: it was already inside the
+# trust boundary (see release-please-vscode.yml), and now also holds this job.
+# Environment reviewers should confirm the run's workflow file is the
+# expected one and unchanged before approving.
+#
+# Nothing the build job produced except the artifact is used: the identity
+# comes from `extension-id` and the version from `tag`; the Verify VSIX step
+# binds the downloaded package to both and is the only source of the VSIX
+# path and VERSION the later steps use. With id-token: write on the job,
+# every step can mint an OIDC token, including the Open VSX step (ovsx and
+# its dependencies); that token can be exchanged for the same short-lived
+# Marketplace credential.
+
+inputs:
+  extension-id:
+    description: "Marketplace extension id, e.g. ukaisi.inspect-ai"
+    required: true
+  tag:
+    description: "The release tag to publish: the reusable workflow's `tag_name` output."
+    required: true
+  node-version:
+    description: "Node.js for the CLIs. vsce 4 needs 22 or later."
+    default: "22"
+  publish-openvsx:
+    description: "Also publish to Open VSX ('true' or 'false')"
+    default: "true"
+  ovsx-pat:
+    description: "Open VSX token (an environment secret of the caller's publish environment). Required when publish-openvsx is 'true'."
+    default: ""
+  github-token:
+    description: "Token for the release upload; needs contents: write."
+    default: ${{ github.token }}
+  vsce-version:
+    description: "Pinned @vscode/vsce version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--oidc) needs 4.1.0 or later. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
+    default: "4.1.0"
+  ovsx-version:
+    description: "Pinned ovsx version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected."
+    default: "0.10.12"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Download VSIX artifact
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: vsix
+        path: vsix
+
+    # Bind the package to this release before any PAT is in the environment.
+    # The validator never extracts or executes anything. Before Python's
+    # zipfile reads the archive it checks the zip structure itself, since
+    # zipfile and vsce's reader (yauzl) do not find the central directory
+    # the same way: the end record must be the last 22 bytes (no comment),
+    # with no Zip64 fields, and no Zip64 end or locator signature or
+    # second end-record signature anywhere outside entry data (see the
+    # scan for why entry data is skipped); the central directory it names must end exactly at it
+    # and hold the number of entries it counts; zipfile must list those
+    # same entries; and the manifests' local headers must match their
+    # directory records. It then parses extension/package.json and
+    # extension.vsixmanifest strictly (no duplicate JSON keys, no DTD or
+    # entities, one Metadata/Identity), and rejects an archive whose
+    # entries could make two consumers read different manifests (repeated
+    # or case-variant names, unsafe paths, symlinks). The "Cross-check VSIX
+    # with vsce's reader" step then reads the package the way vsce publish
+    # does. Its `vsix`, `version`, `publisher` and `name` outputs are what
+    # the publish and upload steps use. Inline rather than fetched: see the
+    # header.
+    - name: Verify VSIX
+      id: verify
+      shell: bash
+      env:
+        VSIX_DIR: vsix
+        EXTENSION_ID: ${{ inputs.extension-id }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        python3 - <<'PY'
+        """Bind the downloaded .vsix to the extension identity and version this release authorizes.
+
+        Trusted inputs: EXTENSION_ID (a caller input) and TAG (the release-please
+        job's tag). Untrusted: everything under VSIX_DIR, which the build job
+        produced by running repo code. Prints ::error:: and exits 1 on any doubt.
+        """
+        import io
+        import json
+        import os
+        import re
+        import stat
+        import struct
+        import sys
+        import xml.etree.ElementTree as ET
+        import zipfile
+
+        NAME = r"[a-z0-9][a-z0-9-]*"  # vsce's rule for a publisher or extension name
+        NAME_RE = re.compile(NAME, re.IGNORECASE)
+        EXTENSION_ID_RE = re.compile(rf"({NAME})\.({NAME})", re.IGNORECASE)
+        SEMVER = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+        VERSION_RE = re.compile(SEMVER)
+        # The tag shapes release-please produces for the callers' configs:
+        # vX.Y.Z (default), X.Y.Z (include-v-in-tag: false), and either with a
+        # <component>- prefix (include-component-in-tag). Only the trailing
+        # X.Y.Z is used; the component is not checked against anything. No
+        # prerelease suffix: the Marketplace rejects those, so no intended
+        # release carries one.
+        TAG_RE = re.compile(rf"(?:[A-Za-z0-9][A-Za-z0-9._/-]*-)?v?({SEMVER})")
+        FILENAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.vsix")
+        PACKAGE_JSON = "extension/package.json"
+        VSIXMANIFEST = "extension.vsixmanifest"
+        VSX = "{http://schemas.microsoft.com/developer/vsx-schema/2011}"
+        MAX_MANIFEST = 1 << 20
+        END_SIG = b"PK\x05\x06"
+        ZIP64_END_SIG = b"PK\x06\x06"
+        ZIP64_LOCATOR_SIG = b"PK\x06\x07"
+        CENTRAL_SIG = b"PK\x01\x02"
+        LOCAL_SIG = b"PK\x03\x04"
+        DESCRIPTOR_SIG = b"PK\x07\x08"
+
+
+        class Rejected(Exception):
+            pass
+
+
+        def one_file(directory):
+            entries = sorted(os.listdir(directory))
+            if len(entries) != 1:
+                raise Rejected(f"expected exactly one file in {directory}/, found {entries}")
+            name = entries[0]
+            if not FILENAME_RE.fullmatch(name):
+                raise Rejected(f"artifact name {name!r} is not a plain <name>.vsix")
+            path = os.path.join(directory, name)
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                raise Rejected(f"{path} is not a regular file")
+            return path
+
+
+        def check_entry_name(name):
+            parts = name.split("/")
+            if parts and parts[-1] == "":
+                parts = parts[:-1]  # a directory entry
+            if (not parts or "\\" in name or "\x00" in name or name.startswith("/")
+                    or re.match(r"[A-Za-z]:", name) or any(p in ("", ".", "..") for p in parts)):
+                raise Rejected(f"unsafe archive entry name {name!r}")
+
+
+        def check_extra_fields(info):
+            # An Info-ZIP Unicode Path extra field (0x7075) carries a second
+            # name for an entry. Some readers apply it (yauzl, vsce's reader;
+            # Python's zipfile from 3.12) and others keep the header name
+            # (Java's ZipFile, older Python), so an entry could be one file to
+            # one consumer and the manifest to another. vsce's own packager
+            # writes no such field: reject any, naming both the header name
+            # (orig_filename, on every Python) and the field's, and reject
+            # extra data that does not parse as (id, length, data) records.
+            extra, offset = info.extra, 0
+            while offset < len(extra):
+                if offset + 4 > len(extra):
+                    raise Rejected(f"archive entry {info.orig_filename!r} has malformed extra-field data")
+                field_id = int.from_bytes(extra[offset:offset + 2], "little")
+                length = int.from_bytes(extra[offset + 2:offset + 4], "little")
+                if offset + 4 + length > len(extra):
+                    raise Rejected(f"archive entry {info.orig_filename!r} has malformed extra-field data")
+                if field_id == 0x7075:
+                    alias = extra[offset + 9:offset + 4 + length].decode("utf-8", "replace")
+                    raise Rejected(f"archive entry {info.orig_filename!r} carries a Unicode Path extra field naming it {alias!r}, which some readers apply")
+                offset += 4 + length
+
+
+        def check_structure(data):
+            # Python's zipfile and yauzl (vsce's reader) find the central
+            # directory differently. zipfile follows a Zip64 locator to the
+            # record just before it and reads the directory that ends there;
+            # yauzl follows the locator's offset field, or without a locator
+            # the end record's own fields. So an archive with Zip64 records,
+            # a comment, or a directory that does not end at the end record
+            # can list different entries to each. vsce's packager writes none
+            # of these, so refuse them all, before zipfile reads anything.
+            # Returns the central-directory records in order, as
+            # (name, crc, compressed size, size, local header offset).
+            if len(data) < 22 or data[-22:-18] != END_SIG:
+                raise Rejected("the archive's last 22 bytes are not an end-of-central-directory record (a zip comment or trailing data is not allowed)")
+            end = len(data) - 22
+            disk, cd_disk, disk_count, count, cd_size, cd_offset, comment = struct.unpack("<HHHHIIH", data[end + 4:])
+            if comment or disk or cd_disk or disk_count != count:
+                raise Rejected("the end-of-central-directory record has a comment or names more than one disk")
+            if count == 0xFFFF or 0xFFFFFFFF in (cd_size, cd_offset):
+                raise Rejected("the end-of-central-directory record defers to Zip64 records")
+            if cd_offset + cd_size != end:
+                raise Rejected(f"the central directory ({cd_size} bytes at offset {cd_offset}) does not end at the end-of-central-directory record (offset {end})")
+            records, pos = [], cd_offset
+            while pos < end:
+                if pos + 46 > end or data[pos:pos + 4] != CENTRAL_SIG:
+                    raise Rejected(f"malformed central-directory record at offset {pos}")
+                flags, crc, csize, size, n, m, k, first_disk, offset = struct.unpack("<8xH6xIIIHHHH6xI", data[pos:pos + 46])
+                name = data[pos + 46:pos + 46 + n]
+                pos += 46 + n + m + k
+                if pos > end:
+                    raise Rejected(f"central-directory record for {name!r} runs past the directory")
+                if first_disk or 0xFFFFFFFF in (csize, size, offset):
+                    raise Rejected(f"central-directory record for {name!r} defers to Zip64 fields")
+                records.append((name, flags, crc, csize, size, offset))
+            if len(records) != count:
+                raise Rejected(f"the end-of-central-directory record counts {count} entries but the central directory holds {len(records)}")
+            data_ranges = []
+            for name, flags, crc, csize, size, offset in records:
+                if offset + 30 > cd_offset or data[offset:offset + 4] != LOCAL_SIG:
+                    raise Rejected(f"archive entry {name!r} has no local header at offset {offset}")
+                lflags, lcrc, lcsize, lsize, n, m = struct.unpack("<6xH6xIIIHH", data[offset:offset + 30])
+                local_name = data[offset + 30:offset + 30 + n]
+                if local_name != name:
+                    raise Rejected(f"archive entry {name!r} is named {local_name!r} in its local header")
+                start = offset + 30 + n + m
+                if start + csize > cd_offset:
+                    raise Rejected(f"archive entry {name!r} runs into the central directory")
+                if name in (PACKAGE_JSON.encode(), VSIXMANIFEST.encode()):
+                    # With bit 3 set (vsce sets it for files it streams from
+                    # disk) the local header's CRC and sizes are zero and a
+                    # data descriptor after the data carries them.
+                    sizes = (crc, csize, size)
+                    if flags & 8 != lflags & 8:
+                        matches = False
+                    elif flags & 8:
+                        descriptor = start + csize
+                        matches = ((lcrc, lcsize, lsize) in ((0, 0, 0), sizes) and descriptor + 16 <= cd_offset
+                                   and data[descriptor:descriptor + 16] == DESCRIPTOR_SIG + struct.pack("<III", *sizes))
+                    else:
+                        matches = (lcrc, lcsize, lsize) == sizes
+                    if not matches:
+                        raise Rejected(f"{name.decode()}'s local header does not match its central-directory record")
+                data_ranges.append((offset, start, start + csize))
+            data_ranges.sort()
+            for (_, _, prev_end), (next_offset, _, _) in zip(data_ranges, data_ranges[1:]):
+                if next_offset < prev_end:
+                    raise Rejected(f"archive entries overlap at offset {next_offset}")
+            # Refuse these signatures anywhere except inside an entry's data
+            # (decision: Ransom, 2026-09-30). Compressed or stored data can
+            # hold those 4 bytes by chance, or legitimately in a bundled zip,
+            # and refusing it would fail honest releases. Skipping it is safe:
+            # both readers take the end record from the last 22 bytes and
+            # read a Zip64 locator only from the 20 bytes before it, which lie
+            # in the central directory since it ends there; that directory
+            # and every local header are outside the data ranges, which come
+            # from the checked directory and do not overlap each other or it.
+            for sig, what in ((ZIP64_END_SIG, "a Zip64 end-of-central-directory signature"),
+                              (ZIP64_LOCATOR_SIG, "a Zip64 end-of-central-directory locator signature"),
+                              (END_SIG, "a second end-of-central-directory signature")):
+                at = data.find(sig)
+                while at != -1:
+                    if at != end and not any(s <= at and at + 4 <= e for _, s, e in data_ranges):
+                        raise Rejected(f"the archive contains {what} at offset {at}")
+                    at = data.find(sig, at + 1)
+            return [(name, crc, csize, size, offset) for name, _, crc, csize, size, offset in records]
+
+
+        def read_manifests(path):
+            with open(path, "rb") as f:
+                data = f.read()
+            records = check_structure(data)
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(data))
+            except Exception as e:
+                raise Rejected(f"{path} is not a readable zip archive: {e}")
+            with zf:
+                listed = [(i.orig_filename.encode("utf-8" if i.flag_bits & 0x800 else "cp437"), i.CRC, i.compress_size, i.file_size, i.header_offset) for i in zf.infolist()]
+                if listed != records:
+                    raise Rejected("Python's zipfile lists different entries from the ones the central directory holds")
+                by_lower = {}
+                for info in zf.infolist():
+                    check_entry_name(info.filename)
+                    check_extra_fields(info)
+                    if stat.S_ISLNK(info.external_attr >> 16):
+                        raise Rejected(f"archive entry {info.filename!r} is a symlink")
+                    lower = info.filename.lower()
+                    if lower in by_lower:
+                        raise Rejected(f"ambiguous archive: entries {by_lower[lower]!r} and {info.filename!r} repeat or differ only in case")
+                    by_lower[lower] = info.filename
+                blobs = []
+                for wanted in (PACKAGE_JSON, VSIXMANIFEST):
+                    actual = by_lower.get(wanted)
+                    if actual is None:
+                        raise Rejected(f"{wanted} is missing from the archive")
+                    if actual != wanted:
+                        raise Rejected(f"{actual!r} would be read as {wanted} by vsce but not by every consumer")
+                    info = zf.getinfo(wanted)
+                    if info.file_size > MAX_MANIFEST:
+                        raise Rejected(f"{wanted} is larger than {MAX_MANIFEST} bytes")
+                    try:
+                        with zf.open(info) as f:
+                            data = f.read(MAX_MANIFEST + 1)
+                    except Exception as e:
+                        raise Rejected(f"{wanted} could not be read: {e}")
+                    if len(data) > MAX_MANIFEST:
+                        raise Rejected(f"{wanted} is larger than {MAX_MANIFEST} bytes")
+                    blobs.append(data)
+            return blobs
+
+
+        def identity(publisher, name, version, source):
+            for field, value, shape in (("publisher", publisher, NAME_RE), ("name", name, NAME_RE), ("version", version, VERSION_RE)):
+                if not isinstance(value, str) or not shape.fullmatch(value):
+                    raise Rejected(f"{source}: {field} {value!r} is missing or malformed")
+            return (publisher, name, version)
+
+
+        def parse_package_json(data):
+            def no_duplicates(pairs):
+                keys = [k for k, _ in pairs]
+                if len(set(keys)) != len(keys):
+                    raise ValueError("duplicate keys")
+                return dict(pairs)
+
+            def no_constants(token):
+                raise ValueError(f"{token} is not JSON")  # Python would accept NaN/Infinity; JSON.parse does not
+
+            try:
+                manifest = json.loads(data.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constants)
+            except (UnicodeDecodeError, ValueError) as e:
+                raise Rejected(f"{PACKAGE_JSON} is not strict JSON: {e}")
+            if not isinstance(manifest, dict):
+                raise Rejected(f"{PACKAGE_JSON} is not a JSON object")
+            return identity(manifest.get("publisher"), manifest.get("name"), manifest.get("version"), PACKAGE_JSON)
+
+
+        def parse_vsixmanifest(data):
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as e:
+                raise Rejected(f"{VSIXMANIFEST} is not UTF-8: {e}")
+            if re.search(r"<!(?:DOCTYPE|ENTITY)", text, re.IGNORECASE):
+                raise Rejected(f"{VSIXMANIFEST} declares a DTD or entities")
+            try:
+                root = ET.fromstring(text)
+            except ET.ParseError as e:
+                raise Rejected(f"{VSIXMANIFEST} is not well-formed XML: {e}")
+            if root.tag != VSX + "PackageManifest":
+                raise Rejected(f"{VSIXMANIFEST}: root element is {root.tag}, not PackageManifest")
+            # vsce's xml2js reader ignores namespaces and takes the first
+            # Metadata and the first Identity it meets, so an element of either
+            # name in any namespace, anywhere, is a competing identity: require
+            # exactly one of each in the whole document, in the vsx namespace,
+            # with Identity directly under Metadata directly under the root.
+            metadata = [e for e in root.iter() if e.tag.rsplit("}", 1)[-1] == "Metadata"]
+            if len(metadata) != 1 or metadata[0].tag != VSX + "Metadata" or metadata[0] not in list(root):
+                raise Rejected(f"{VSIXMANIFEST}: expected one Metadata element under the root, found {[e.tag for e in metadata]}")
+            identities = [e for e in root.iter() if e.tag.rsplit("}", 1)[-1] == "Identity"]
+            if len(identities) != 1 or identities[0].tag != VSX + "Identity" or identities[0] not in list(metadata[0]):
+                raise Rejected(f"{VSIXMANIFEST}: expected one Identity element under Metadata, found {[e.tag for e in identities]}")
+            a = identities[0].attrib
+            if any(k.startswith("{") for k in a):
+                raise Rejected(f"{VSIXMANIFEST}: Identity has namespaced attributes {sorted(k for k in a if k.startswith('{'))}")
+            return identity(a.get("Publisher"), a.get("Id"), a.get("Version"), VSIXMANIFEST)
+
+
+        def describe(ident):
+            return f"{ident[0]}.{ident[1]} {ident[2]}"
+
+
+        def verify(directory, extension_id, tag):
+            m = EXTENSION_ID_RE.fullmatch(extension_id)
+            if not m:
+                raise Rejected(f"extension-id {extension_id!r} is not <publisher>.<name>")
+            t = TAG_RE.fullmatch(tag)
+            if not t:
+                raise Rejected(f"release tag {tag!r} does not end in an X.Y.Z version")
+            expected = (m.group(1), m.group(2), t.group(1))
+            path = one_file(directory)
+            raw_json, raw_xml = read_manifests(path)
+            pkg = parse_package_json(raw_json)
+            xml = parse_vsixmanifest(raw_xml)
+            if pkg != xml:
+                raise Rejected(f"{PACKAGE_JSON} says {describe(pkg)} but {VSIXMANIFEST} says {describe(xml)}")
+            if pkg != expected:
+                raise Rejected(f"package is {describe(pkg)}; this release may only publish {describe(expected)} (extension-id {extension_id}, tag {tag})")
+            return path, expected[2]
+
+
+        def main():
+            directory, extension_id, tag = (os.environ.get(k, "") for k in ("VSIX_DIR", "EXTENSION_ID", "TAG"))
+            try:
+                path, version = verify(directory, extension_id, tag)
+            except Rejected as e:
+                print(f"::error::VSIX rejected: {e}")
+                return 1
+            print(f"Verified {path}: {extension_id} {version} (tag {tag})")
+            output = os.environ.get("GITHUB_OUTPUT")
+            if output:
+                publisher, name = extension_id.split(".")
+                with open(output, "a", encoding="utf-8") as f:
+                    for key, value in (("vsix", path), ("version", version), ("publisher", publisher), ("name", name)):
+                        f.write(f"{key}<<EOF\n{value}\nEOF\n")
+            return 0
+
+
+        if __name__ == "__main__":
+            sys.exit(main())
+        PY
+
+    # Install both CLIs in one step that holds no secrets, so the npm install
+    # (which resolves their transitive dependencies fresh from the registry —
+    # the pins cover only vsce/ovsx themselves) and any lifecycle scripts run
+    # without the PATs in the environment. --ignore-scripts skips those
+    # scripts altogether; the only native module in the tree is vsce's
+    # optional keytar, which vsce loads lazily and only when neither --pat
+    # nor --oidc is given, so publishing is unaffected.
+    #
+    # The version inputs are controlled by the caller workflow, and npm treats
+    # anything after `@` as a package spec, not just a version: an alias such
+    # as `npm:other-package` or a hosted-git spec like `github:user/repo`
+    # would install arbitrary code as the `vsce` / `ovsx` binaries that later
+    # run with the PATs. Require an exact x.y.z version so only the pinned
+    # registry package can be installed.
+    - name: Install marketplace CLIs
+      shell: bash
+      env:
+        VSCE_VERSION: ${{ inputs.vsce-version }}
+        OVSX_VERSION: ${{ inputs.ovsx-version }}
+      run: |
+        for v in "$VSCE_VERSION" "$OVSX_VERSION"; do
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::vsce-version / ovsx-version must be exact x.y.z versions, got '$v'"
+            exit 1
+          fi
+        done
+        npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
+
+    # A second reader, still with no PAT in the environment: read the package
+    # with readVSIXPackage from the vsce just installed, the function (and
+    # yauzl) `vsce publish --packagePath` takes the publisher, name and
+    # version from, and fail unless its package.json and vsixmanifest say
+    # exactly what the Verify VSIX step bound. The module is found from the
+    # `vsce` on PATH, the binary the publish step runs.
+    - name: Cross-check VSIX with vsce's reader
+      shell: bash
+      env:
+        VSIX: ${{ steps.verify.outputs.vsix }}
+        VERSION: ${{ steps.verify.outputs.version }}
+        PUBLISHER: ${{ steps.verify.outputs.publisher }}
+        NAME: ${{ steps.verify.outputs.name }}
+      run: |
+        vsce_bin="$(command -v vsce)"
+        VSCE_ZIP="$(dirname "$(readlink -f "$vsce_bin")")/out/zip.js" node - <<'JS'
+        "use strict";
+        const { VSIX, VSCE_ZIP, PUBLISHER, NAME, VERSION } = process.env;
+        const expected = [PUBLISHER, NAME, VERSION];
+        let verified = false;
+        function fail(message) {
+          console.log(`::error::VSIX rejected: ${message}`);
+          process.exit(1);
+        }
+        process.on("uncaughtException", (e) => fail(`vsce's reader failed on ${VSIX}: ${e && e.message}`));
+        // A read that never settles would otherwise let node exit 0.
+        process.on("exit", (code) => {
+          if (code === 0 && !verified) {
+            console.log(`::error::VSIX rejected: vsce's reader did not finish reading ${VSIX}`);
+            process.exitCode = 1;
+          }
+        });
+        const { readVSIXPackage } = require(VSCE_ZIP);
+        readVSIXPackage(VSIX).then(({ manifest, xmlManifest }) => {
+          const identity = xmlManifest.PackageManifest.Metadata[0].Identity[0].$;
+          const seen = {
+            "extension/package.json": [manifest.publisher, manifest.name, manifest.version],
+            "extension.vsixmanifest": [identity.Publisher, identity.Id, identity.Version],
+          };
+          for (const [source, value] of Object.entries(seen)) {
+            if (value.some((v, i) => v !== expected[i])) {
+              fail(`vsce reads ${source} as ${JSON.stringify(value)}, but Verify VSIX read ${JSON.stringify(expected)}`);
+            }
+          }
+          verified = true;
+          console.log(`vsce reads ${VSIX} as ${PUBLISHER}.${NAME} ${VERSION}`);
+        }).catch((e) => fail(`vsce's reader failed on ${VSIX}: ${e && e.message}`));
+        JS
+
+    # The already-published checks are a rerun convenience, not a control:
+    # they parse the CLIs' JSON and skip only when the listing's own
+    # publisher and name are the verified identity and its versions include
+    # the verified version, compared exactly, where before they grepped the
+    # output for a version the build job supplied, interpreted as a regular
+    # expression. `vsce show` prints `undefined` for an unknown extension and
+    # `ovsx get` fails for one, so a first publish falls through to the
+    # publish command, as does a lookup failure or a listing for anything
+    # else; the CLIs themselves refuse a duplicate version.
+    - name: Publish to VS Code Marketplace
+      shell: bash
+      env:
+        EXTENSION_ID: ${{ inputs.extension-id }}
+        VSIX: ${{ steps.verify.outputs.vsix }}
+        VERSION: ${{ steps.verify.outputs.version }}
+        PUBLISHER: ${{ steps.verify.outputs.publisher }}
+        NAME: ${{ steps.verify.outputs.name }}
+      run: |
+        listing="$RUNNER_TEMP/vsce-show.json"
+        if vsce show "$EXTENSION_ID" --json > "$listing" 2>/dev/null \
+           && jq -e --arg p "$PUBLISHER" --arg n "$NAME" --arg v "$VERSION" \
+                '.publisher.publisherName == $p and .extensionName == $n and ((.versions // []) | map(.version) | index($v) != null)' \
+                "$listing" > /dev/null 2>&1; then
+          echo "v${VERSION} already on VS Code Marketplace, skipping"
+        else
+          vsce publish --packagePath "$VSIX" --oidc
+        fi
+
+    - name: Publish to Open VSX
+      if: ${{ inputs.publish-openvsx == 'true' }}
+      shell: bash
+      env:
+        EXTENSION_ID: ${{ inputs.extension-id }}
+        OVSX_PAT: ${{ inputs.ovsx-pat }}
+        VSIX: ${{ steps.verify.outputs.vsix }}
+        VERSION: ${{ steps.verify.outputs.version }}
+        PUBLISHER: ${{ steps.verify.outputs.publisher }}
+        NAME: ${{ steps.verify.outputs.name }}
+      run: |
+        metadata="$RUNNER_TEMP/ovsx-metadata.json"
+        if ovsx get "$EXTENSION_ID" --metadata > "$metadata" 2>/dev/null \
+           && jq -e --arg p "$PUBLISHER" --arg n "$NAME" --arg v "$VERSION" \
+                '.namespace == $p and .name == $n and (.version == $v or ((.allVersions // {}) | has($v)))' \
+                "$metadata" > /dev/null 2>&1; then
+          echo "v${VERSION} already on Open VSX, skipping"
+        else
+          ovsx publish "$VSIX" --pat "$OVSX_PAT"
+        fi
+
+    # No checkout in this job, so `gh` cannot infer the repository from a git
+    # remote; GH_REPO tells it which repo owns the release.
+    - name: Upload VSIX to GitHub release
+      shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+        VSIX: ${{ steps.verify.outputs.vsix }}
+      run: gh release upload "$TAG" "$VSIX" --clobber
