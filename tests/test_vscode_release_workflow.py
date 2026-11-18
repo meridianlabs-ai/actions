@@ -808,11 +808,10 @@ def vsce_view(publisher=PUBLISHER, name=NAME, version=VERSION, *, xml: dict | No
     return {"manifest": {"publisher": publisher, "name": name, "version": version}, "xmlManifest": {"PackageManifest": {"Metadata": [{"Identity": [{"$": identity}]}]}}}
 
 
-# The default caller publishes to the Marketplace with Trusted Publishing and passes no VSCE_PAT.
-SECRETS = {"VSCE_PAT": "", "OVSX_PAT": "fake-ovsx-pat", "GITHUB_TOKEN": "fake-github-token"}
+# The Marketplace is published to with Trusted Publishing (vsce --oidc); only Open VSX has a PAT.
+SECRETS = {"OVSX_PAT": "fake-ovsx-pat", "GITHUB_TOKEN": "fake-github-token"}
 EXPRESSIONS = {
     "${{ inputs.extension-id }}": EXTENSION_ID,
-    "${{ inputs.marketplace-auth }}": "oidc",
     "${{ inputs.vsce-version }}": "4.1.0",
     "${{ inputs.ovsx-version }}": "0.10.12",
     "${{ needs.release-please.outputs.tag_name }}": TAG,
@@ -831,13 +830,13 @@ class JobRun:
         return [c["argv"] for c in self.calls if c["tool"] == tool]
 
 
-def resolve(value, outputs: dict[str, str], expressions: dict[str, str] = EXPRESSIONS) -> str:
+def resolve(value, outputs: dict[str, str]) -> str:
     value = str(value)
     if m := re.fullmatch(r"\$\{\{ steps\.verify\.outputs\.(\w+) \}\}", value):
         return outputs[m.group(1)]
     if value.startswith("${{"):
-        assert value in expressions, f"expression not modelled: {value}"
-        return expressions[value]
+        assert value in EXPRESSIONS, f"expression not modelled: {value}"
+        return EXPRESSIONS[value]
     assert "${{" not in value, f"expression inside a value is not modelled: {value}"
     return value
 
@@ -850,9 +849,8 @@ def should_run(condition, job_ok: bool) -> bool:
     raise AssertionError(f"step condition not modelled: {condition}")
 
 
-def run_publish_job(tmp_path: Path, *, items=None, filename: str = FILENAME, vsce_show: str | None = None, ovsx_get: str | None = None, vsce_reads: dict | None = vsce_view(), auth: str = "oidc", vsce_pat: str = "") -> JobRun:
+def run_publish_job(tmp_path: Path, *, items=None, filename: str = FILENAME, vsce_show: str | None = None, ovsx_get: str | None = None, vsce_reads: dict | None = vsce_view()) -> JobRun:
     job = workflow()["jobs"]["publish"]
-    expressions = {**EXPRESSIONS, "${{ inputs.marketplace-auth }}": auth, "${{ secrets.VSCE_PAT }}": vsce_pat}
     store = tmp_path / "store"
     store.mkdir()
     if vsce_reads is not None:
@@ -876,7 +874,7 @@ def run_publish_job(tmp_path: Path, *, items=None, filename: str = FILENAME, vsc
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "FAKE_STORE": str(store),
         "RUNNER_TEMP": str(runner_temp),
-        **{k: resolve(v, {}, expressions) for k, v in job["env"].items()},
+        **{k: resolve(v, {}) for k, v in job["env"].items()},
     }
     run = JobRun()
     outputs: dict[str, str] = {}
@@ -896,7 +894,7 @@ def run_publish_job(tmp_path: Path, *, items=None, filename: str = FILENAME, vsc
             continue
         output = tmp_path / f"output-{len(run.outcomes)}"
         output.touch()
-        env = {**job_env, **{k: resolve(v, outputs, expressions) for k, v in s.get("env", {}).items()}, "GITHUB_OUTPUT": str(output)}
+        env = {**job_env, **{k: resolve(v, outputs) for k, v in s.get("env", {}).items()}, "GITHUB_OUTPUT": str(output)}
         result = run_bash(s["run"], cwd=workspace, env=env)
         run.logs[name] = result
         if s.get("id") == "verify":
@@ -1008,51 +1006,27 @@ def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
     assert not any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"])
 
 
-# --- Marketplace auth: Trusted Publishing by default, the PAT as a fallback ----------------------
+# --- Marketplace auth: Trusted Publishing only -----------------------------------------------------
 
 
 def test_publish_job_may_request_an_oidc_token_and_nothing_else_does():
     # vsce --oidc reads ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN, which the runner sets only for a job
-    # granted id-token: write. Job permissions cannot depend on an input, so it is granted in both modes.
+    # granted id-token: write.
     jobs = workflow()["jobs"]
     assert jobs["publish"]["permissions"] == {"contents": "write", "id-token": "write"}
     for name, job in jobs.items():
         if name != "publish":
             assert "id-token" not in job.get("permissions", {}), name
+
+
+def test_no_marketplace_pat_is_declared_or_used():
+    # A caller that still passes VSCE_PAT then fails at startup instead of after the release is tagged.
     doc = workflow()
     call = doc.get("on", doc.get(True))["workflow_call"]
-    assert call["inputs"]["marketplace-auth"]["default"] == "oidc"
-    assert call["secrets"]["VSCE_PAT"]["required"] is False
-
-
-def test_pat_fallback_publishes_with_the_pat(tmp_path):
-    run = run_publish_job(tmp_path, auth="pat", vsce_pat="fake-vsce-pat")
-    assert run.outcomes[MARKETPLACE] == "success"
-    assert run.argv("vsce")[-1] == ["publish", "--packagePath", f"vsix/{FILENAME}", "--pat", "fake-vsce-pat"]
-
-
-def test_pat_fallback_without_a_pat_fails_before_publishing(tmp_path):
-    run = run_publish_job(tmp_path, auth="pat")
-    assert run.outcomes[MARKETPLACE] == "failure"
-    assert "::error::marketplace-auth is pat but VSCE_PAT is empty" in run.logs[MARKETPLACE].stdout
-    assert [a for a in run.argv("vsce") if a[0] == "publish"] == []
-    assert run.outcomes[OPENVSX] == run.outcomes[UPLOAD] == "skipped"
-
-
-def test_oidc_with_a_pat_passed_fails_so_the_pat_is_retired(tmp_path):
-    run = run_publish_job(tmp_path, vsce_pat="fake-vsce-pat")
-    assert run.outcomes[MARKETPLACE] == "failure"
-    assert "::error::marketplace-auth is oidc but a VSCE_PAT was passed" in run.logs[MARKETPLACE].stdout
-    assert [a for a in run.argv("vsce") if a[0] == "publish"] == []
-
-
-@pytest.mark.parametrize("auth", ["", "OIDC", "token", "oidc pat", "pat; true"])
-def test_unknown_marketplace_auth_fails_before_anything_is_installed(tmp_path, auth):
-    run = run_publish_job(tmp_path, auth=auth, vsce_pat="fake-vsce-pat")
-    assert run.outcomes[INSTALL] == "failure"
-    assert f"::error::marketplace-auth must be oidc or pat, got '{auth}'" in run.logs[INSTALL].stdout
-    assert run.argv("npm") == [] and run.argv("vsce") == []
-    assert run.outcomes[MARKETPLACE] == run.outcomes[OPENVSX] == "skipped"
+    assert "VSCE_PAT" not in call["secrets"]
+    assert "marketplace-auth" not in call["inputs"]
+    assert "--pat" not in step(MARKETPLACE)["run"]
+    assert "secrets." not in yaml.safe_dump(step(MARKETPLACE).get("env", {}))
 
 
 def test_build_job_restores_and_saves_no_actions_cache_and_persists_no_credential():
