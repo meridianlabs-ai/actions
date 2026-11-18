@@ -264,12 +264,9 @@ def test_every_tool_runs_through_uv_run_no_sync(job):
         assert re.match(rf"uv run --no-sync ({tools})\b", call), (job, call)
 
 
-MOVE_STEP = "Move inspect-ai to inspect_ai main"
-
-
 def test_the_nightly_installs_what_inspect_swe_pr_ci_installs():
-    # inspect_swe's .github/actions/uv-sync: uv.lock, with inspect-ai moved
-    # to inspect_ai main's newest commit; here with no Actions cache.
+    # inspect_swe's PR CI: exactly uv.lock (`uv sync --locked`), inspect-ai
+    # included; here with no Actions cache.
     ss = steps(NIGHTLY, "nightly-tests")
     setups = [s for s in ss if str(s.get("uses", "")).startswith("meridianlabs-ai/actions/setup-uv@")]
     installs = [s for s in ss if str(s.get("uses", "")).startswith(INSTALL)]
@@ -279,15 +276,12 @@ def test_the_nightly_installs_what_inspect_swe_pr_ci_installs():
     assert setups[0]["with"] == {"python-version": "3.11", "actions-cache": "none"}
     assert installs[0]["with"] == {"versions": "locked", "python-version": "3.11", "extras": "dev", "actions-cache": "none"}
     names = [s.get("name") for s in ss]
-    assert names.index(MOVE_STEP) < names.index("Install from uv.lock")
-    assert [s["run"] for s in ss if s.get("name") == MOVE_STEP] == ["uv lock --check\nuv lock --upgrade-package inspect-ai\n"]
+    assert names.index("Set up uv") + 1 == names.index("Install from uv.lock")
     assert not any(str(s.get("uses", "")).startswith("actions/setup-python@") for s in ss)
 
 
-def test_no_other_nightly_step_resolves_upgrades_or_relocks():
+def test_no_nightly_step_resolves_upgrades_or_relocks():
     for s in steps(NIGHTLY, "nightly-tests"):
-        if s.get("name") == MOVE_STEP:
-            continue
         run = s.get("run") or ""
         for word in ("pip install", "uv pip", "uv lock", "--upgrade"):
             assert word not in run, (s.get("name"), word)
