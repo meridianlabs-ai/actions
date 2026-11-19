@@ -61,7 +61,7 @@ inputs:
     description: "Pinned @vscode/vsce version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--oidc) needs 4.1.0 or later. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
     default: "4.1.0"
   ovsx-version:
-    description: "Pinned ovsx version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--trusted-publishing) needs 1.2.0 or later, and ovsx 1.x needs Node.js 22 or later."
+    description: "Pinned ovsx version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--trusted-publishing) needs 1.2.0 or later, which also needs Node.js 22 or later."
     default: "1.4.0"
 
 runs:
@@ -429,9 +429,10 @@ runs:
     # transitive dependencies fresh from the registry (the pins cover only
     # vsce/ovsx themselves), and this step, like every step here, can mint an
     # OIDC token (see the header), so --ignore-scripts skips their lifecycle
-    # scripts altogether; the only native module in the tree is vsce's
-    # optional keytar, which vsce loads lazily and only when neither --pat
-    # nor --oidc is given, so publishing is unaffected.
+    # scripts altogether. The native modules in the tree (ovsx's crc32 and
+    # keyring, vsce's optional keytar) ship prebuilt binaries and need no
+    # install script; keyring and keytar load only on the stored-token path,
+    # which neither publish command takes.
     #
     # The version inputs are controlled by the caller workflow, and npm treats
     # anything after `@` as a package spec, not just a version: an alias such
@@ -539,6 +540,9 @@ runs:
         VERSION: ${{ steps.verify.outputs.version }}
         PUBLISHER: ${{ steps.verify.outputs.publisher }}
         NAME: ${{ steps.verify.outputs.name }}
+        # ovsx publishes with OVSX_PAT whenever it is set, even with
+        # --trusted-publishing, so clear one a caller sets at job level.
+        OVSX_PAT: ""
       run: |
         metadata="$RUNNER_TEMP/ovsx-metadata.json"
         if ovsx get "$EXTENSION_ID" --metadata > "$metadata" 2>/dev/null \

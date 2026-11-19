@@ -1036,10 +1036,11 @@ def test_marketplace_is_published_with_oidc_only():
 
 
 def test_openvsx_is_published_with_trusted_publishing_only():
-    # --trusted-publishing fails instead of falling back to a token; ovsx takes a token from --pat or OVSX_PAT.
+    # --trusted-publishing fails when no OIDC token is available, but a token from --pat or OVSX_PAT
+    # takes precedence over it, so the step clears any OVSX_PAT the caller's job sets.
     assert "ovsx publish \"$VSIX\" --trusted-publishing" in step(OPENVSX)["run"]
     assert "--pat" not in step(OPENVSX)["run"]
-    assert "OVSX_PAT" not in ACTION.read_text()
+    assert step(OPENVSX)["env"]["OVSX_PAT"] == ""
     assert not any("pat" in name for name in action()["inputs"])
     # ovsx added --trusted-publishing in 1.2.0.
     pinned = tuple(int(n) for n in action()["inputs"]["ovsx-version"]["default"].split("."))

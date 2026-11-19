@@ -41,8 +41,8 @@ name: Release Please — VS Code extension (reusable)
 # `environment` (e.g. `marketplace`) to gate who can ship, name that
 # environment in both registries' trusted publishers, and restrict its
 # deployment branches to the release branch: the caller's release.yml is
-# repo-authored code, and the Marketplace's policy matches the workflow file
-# and environment, not the branch it runs from. The caller workflow file
+# repo-authored code, and the Marketplace's policy names the workflow file and
+# environment but no branch. The caller workflow file
 # itself therefore stays inside the trust boundary —
 # before approving, reviewers should confirm the run's workflow file is the
 # expected one and unchanged.

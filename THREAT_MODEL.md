@@ -144,22 +144,24 @@ guarantee, and what is by design. To report a vulnerability, see
   and vsce and ovsx publish to whatever publisher, name and version the
   package's own manifests declare. Separating build from publish confines
   where that code runs; it does not bind the Marketplace credential, which
-  covers the whole publisher, to one extension. The "Verify VSIX" step of `vscode-publish`, which runs in the
-  caller's own `publish` job, does that (see the
-  guarantees below); what it cannot do is stop a compromised release commit
+  covers the whole publisher, to one extension. The "Verify VSIX" step of
+  `vscode-publish`, which runs in the caller's own `publish` job, does that
+  (see the guarantees below); what it cannot do is stop a compromised release commit
   from becoming the content of the one extension version it authorizes,
   which is what building is.
   Neither registry is published to with a PAT. `vsce publish --oidc`
   exchanges the job's GitHub OIDC token for a 15-minute credential requested
   for the one publisher, and `ovsx publish --trusted-publishing` for a
-  short-lived token requested for the one extension; each registry issues it
-  only under a trusted publisher registered for the caller's repository,
-  workflow file and environment. The Marketplace matches the token's
+  short-lived token requested for the one extension. Each registry issues it
+  only to a trusted publisher registered for the caller's repository and
+  workflow file; the environment is checked when the registration names it,
+  which the caller setup asks for. The Marketplace matches the token's
   `job_workflow_ref`, so the publish job is the caller's own (a job inside
   the reusable workflow names this repo's file and the exchange is refused),
   which puts that job's definition in the caller's `release.yml`, already
-  inside the trust boundary. The Marketplace's policy does not check the
-  branch, so the caller's environment should allow only the release branch.
+  inside the trust boundary. The Marketplace's policy names a repository,
+  workflow file and environment but no branch, so the caller's environment
+  should allow only the release branch.
   The publish job holds `id-token: write` for these exchanges, so every step
   in it, vsce, ovsx and their dependencies included, can mint a token for
   either registry. `publish-tag` lets a
