@@ -11,7 +11,7 @@
 
 **Summary:**
 - PR CI and the slow and nightly tests install exactly the versions in `uv.lock`.
-- The in-house packages (`inspect-*`, `petri*`) come from PyPI, as all other dependencies do. A repository must not install an in-house package from git. inspect_swarm still has a git source on `main`. Remove this sentence when it has none.
+- The in-house packages (`inspect-*`, `petri*`) come from PyPI, as all other dependencies do. A repository must not install an in-house package from git.
 - A release gets into `uv.lock` after it has been on PyPI for 7 days. This time is the cooldown. A compromised release is usually found and removed in less than 7 days.
 - The in-house packages have no cooldown. Some provider SDKs and sandbox providers have a 6-hour cooldown. An emergency entry lets one release in before its cooldown ends.
 - By design, the canaries install the newest release of each dependency. They ignore the lock file and the cooldown. The canary jobs hold no secrets, so a bad release has nothing to steal there.
