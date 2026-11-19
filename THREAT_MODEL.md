@@ -329,7 +329,7 @@ guarantee, and what is by design. To report a vulnerability, see
   used afterwards: the verified path, identity and version feed the publish
   commands, the already-published checks (exact JSON comparison of the
   listing's publisher, name and versions, a rerun convenience rather than a
-  control) and the release upload. The checks do not defend against parser
+  control). The checks do not defend against parser
   differentials beyond those they reject by name, and the marketplaces
   parse the uploaded package with their own readers.
 - Both agent jobs run under harden-runner's egress allow-list (Anthropic,

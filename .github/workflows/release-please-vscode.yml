@@ -18,12 +18,14 @@ name: Release Please — VS Code extension (reusable)
 #             persists no checkout credential.
 #   publish — the CALLER's job, gated by its `environment`. Runs
 #             vscode-publish, which downloads the .vsix artifact, verifies
-#             that it names the extension and version this release authorizes,
-#             publishes it to the VS Code Marketplace + Open VSX, then attaches
-#             it to the GitHub release. It never checks out the repo or runs
-#             pnpm install, so no code from the consuming repo (package.json
-#             scripts, dependency install hooks, vscode:prepublish) executes
-#             there.
+#             that it names the extension and version this release authorizes
+#             and publishes it to the VS Code Marketplace + Open VSX. It does
+#             not attach the .vsix to the GitHub release: callers turn on
+#             immutable releases, which lock a release once published (the CI
+#             artifact and the marketplaces hold the build). It never checks
+#             out the repo or runs pnpm install, so no code from the consuming
+#             repo (package.json scripts, dependency install hooks,
+#             vscode:prepublish) executes there.
 #
 # The split exists so that code authored in the consuming repo — or in any of
 # its dependencies — never runs in a job that holds the publish credentials
@@ -89,7 +91,7 @@ name: Release Please — VS Code extension (reusable)
 #       runs-on: ubuntu-latest
 #       environment: marketplace
 #       permissions:
-#         contents: write # attach the .vsix to the GitHub release
+#         contents: read
 #         id-token: write # Marketplace Trusted Publishing
 #       steps:
 #         - uses: meridianlabs-ai/actions/vscode-publish@<same commit SHA> # main
