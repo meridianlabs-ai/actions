@@ -68,7 +68,6 @@ INSTALL = "Install marketplace CLIs"
 CROSSCHECK = "Cross-check VSIX with vsce's reader"
 MARKETPLACE = "Publish to VS Code Marketplace"
 OPENVSX = "Publish to Open VSX"
-UPLOAD = "Upload VSIX to GitHub release"
 
 
 def workflow() -> dict:
@@ -815,7 +814,7 @@ def vsce_view(publisher=PUBLISHER, name=NAME, version=VERSION, *, xml: dict | No
 
 
 # The Marketplace is published to with Trusted Publishing (vsce --oidc); only Open VSX has a PAT.
-SECRETS = {"OVSX_PAT": "fake-ovsx-pat", "GITHUB_TOKEN": "fake-github-token"}
+SECRETS = {"OVSX_PAT": "fake-ovsx-pat"}
 EXPRESSIONS = {
     "${{ inputs.extension-id }}": EXTENSION_ID,
     "${{ inputs.tag }}": TAG,
@@ -823,7 +822,6 @@ EXPRESSIONS = {
     "${{ inputs.vsce-version }}": "4.1.0",
     "${{ inputs.ovsx-version }}": "0.10.12",
     "${{ inputs.ovsx-pat }}": "fake-ovsx-pat",
-    "${{ inputs.github-token }}": "fake-github-token",
     "${{ needs.release-please.outputs.tag_name }}": TAG,
     "${{ github.repository }}": "meridianlabs-ai/inspect_vscode",
     **{f"${{{{ secrets.{k} }}}}": v for k, v in SECRETS.items()},
@@ -914,16 +912,16 @@ def run_publish_job(tmp_path: Path, *, items=None, filename: str = FILENAME, vsc
     return run
 
 
-def test_intended_release_is_verified_then_published_and_uploaded(tmp_path):
+def test_intended_release_is_verified_then_published(tmp_path):
     run = run_publish_job(tmp_path)
-    assert run.outcomes == {"Setup Node.js": "success", "Download VSIX artifact": "success", VERIFY: "success", INSTALL: "success", CROSSCHECK: "success", MARKETPLACE: "success", OPENVSX: "success", UPLOAD: "success"}
+    assert run.outcomes == {"Setup Node.js": "success", "Download VSIX artifact": "success", VERIFY: "success", INSTALL: "success", CROSSCHECK: "success", MARKETPLACE: "success", OPENVSX: "success"}
     vsix = f"vsix/{FILENAME}"
     assert run.argv("npm") == [["install", "-g", "--ignore-scripts", "@vscode/vsce@4.1.0", "ovsx@0.10.12"]]
     assert run.argv("readVSIXPackage") == [[vsix]]
     assert f"vsce reads {vsix} as {EXTENSION_ID} {VERSION}" in run.logs[CROSSCHECK].stdout
     assert run.argv("vsce") == [["show", EXTENSION_ID, "--json"], ["publish", "--packagePath", vsix, "--oidc"]]
     assert run.argv("ovsx") == [["get", EXTENSION_ID, "--metadata"], ["publish", vsix, "--pat", "fake-ovsx-pat"]]
-    assert run.argv("gh") == [["release", "upload", TAG, vsix, "--clobber"]]
+    assert run.argv("gh") == []
 
 
 @pytest.mark.parametrize(
@@ -947,7 +945,7 @@ def test_hostile_package_fails_verify_and_no_publisher_or_installer_runs(tmp_pat
     run = run_publish_job(tmp_path, items=items)
     assert run.outcomes[VERIFY] == "failure"
     assert "::error::VSIX rejected" in run.logs[VERIFY].stdout
-    assert {n: o for n, o in run.outcomes.items() if n in (INSTALL, CROSSCHECK, MARKETPLACE, OPENVSX, UPLOAD)} == {INSTALL: "skipped", CROSSCHECK: "skipped", MARKETPLACE: "skipped", OPENVSX: "skipped", UPLOAD: "skipped"}
+    assert {n: o for n, o in run.outcomes.items() if n in (INSTALL, CROSSCHECK, MARKETPLACE, OPENVSX)} == {INSTALL: "skipped", CROSSCHECK: "skipped", MARKETPLACE: "skipped", OPENVSX: "skipped"}
     assert run.calls == []
 
 
@@ -969,7 +967,7 @@ def test_vsce_reader_disagreeing_with_verify_fails_the_job_before_any_pat(tmp_pa
     run = run_publish_job(tmp_path, vsce_reads=vsce_reads)
     assert run.outcomes[VERIFY] == "success" and run.outcomes[CROSSCHECK] == "failure"
     assert f"::error::VSIX rejected: {reason}" in run.logs[CROSSCHECK].stdout
-    assert {n: run.outcomes[n] for n in (MARKETPLACE, OPENVSX, UPLOAD)} == {MARKETPLACE: "skipped", OPENVSX: "skipped", UPLOAD: "skipped"}
+    assert {n: run.outcomes[n] for n in (MARKETPLACE, OPENVSX)} == {MARKETPLACE: "skipped", OPENVSX: "skipped"}
     assert [c["tool"] for c in run.calls] == ["npm", "readVSIXPackage"]  # installed and read; nothing published
 
 
@@ -992,19 +990,19 @@ def test_verify_runs_after_download_and_before_any_step_that_holds_a_secret_or_i
     names = [s.get("name") or s["uses"] for s in publish_steps()]
     verify = names.index(VERIFY)
     assert names.index("Download VSIX artifact") < verify < names.index(INSTALL) < names.index(CROSSCHECK) < names.index(MARKETPLACE)
-    credentials = ("secrets.", "inputs.ovsx-pat", "inputs.github-token")
+    credentials = ("secrets.", "inputs.ovsx-pat")
     for s in publish_steps()[: verify + 1]:
         assert not any(c in yaml.safe_dump(s) for c in credentials), f"{s.get('name')} holds a credential before the package is verified"
     for s in publish_steps():
         if any(c in yaml.safe_dump(s.get("env", {})) for c in credentials):
-            assert s["name"] in (OPENVSX, UPLOAD)
+            assert s["name"] == OPENVSX
 
 
 def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
     steps = publish_steps()
     assert "needs." not in yaml.safe_dump(action())
     assert "version" not in workflow()["jobs"]["build"]["outputs"]
-    for name in (CROSSCHECK, MARKETPLACE, OPENVSX, UPLOAD):
+    for name in (CROSSCHECK, MARKETPLACE, OPENVSX):
         assert step(name)["env"]["VSIX"] == "${{ steps.verify.outputs.vsix }}"
     for name in (CROSSCHECK, MARKETPLACE, OPENVSX):
         assert step(name)["env"]["VERSION"] == "${{ steps.verify.outputs.version }}"
@@ -1012,8 +1010,7 @@ def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
         assert step(name)["env"]["NAME"] == "${{ steps.verify.outputs.name }}"
     for name in (VERIFY, MARKETPLACE, OPENVSX):
         assert step(name)["env"]["EXTENSION_ID"] == "${{ inputs.extension-id }}"
-    for name in (VERIFY, UPLOAD):
-        assert step(name)["env"]["TAG"] == "${{ inputs.tag }}"
+    assert step(VERIFY)["env"]["TAG"] == "${{ inputs.tag }}"
     assert not any(s.get("uses", "").startswith("actions/checkout") for s in steps)
     assert all(s.get("shell") == "bash" for s in steps if "run" in s)
 
@@ -1043,6 +1040,14 @@ def test_marketplace_is_published_with_oidc_only():
     assert "vsce publish --packagePath \"$VSIX\" --oidc" in step(MARKETPLACE)["run"]
     assert "VSCE_PAT" not in ACTION.read_text()
     assert "secrets." not in yaml.safe_dump(action())
+
+
+def test_publish_action_never_writes_to_the_release():
+    # Callers turn on immutable releases, so nothing may attach to the release after
+    # it is published; the caller's publish job then needs only contents: read.
+    assert "github-token" not in action()["inputs"]
+    assert "gh release" not in ACTION.read_text()
+    assert "GITHUB_TOKEN" not in ACTION.read_text()
 
 
 def test_build_job_restores_and_saves_no_actions_cache_and_persists_no_credential():

@@ -1,8 +1,8 @@
 name: Publish a VS Code extension release
 description: >-
   Verify the .vsix the release-please-vscode.yml build job uploaded and publish
-  it to the VS Code Marketplace (Trusted Publishing), Open VSX and the GitHub
-  release. Runs in the CALLER's own publish job.
+  it to the VS Code Marketplace (Trusted Publishing) and Open VSX. Runs in the
+  CALLER's own publish job.
 
 # Why a composite action and not a job in release-please-vscode.yml: the
 # Marketplace's Trusted Publishing matches the OIDC token's job_workflow_ref,
@@ -20,8 +20,8 @@ description: >-
 #   - sets `environment:` (default name `marketplace`), whose required
 #     reviewers gate the publish and which holds OVSX_PAT as an environment
 #     secret;
-#   - has `permissions: contents: write` (release upload) and
-#     `id-token: write` (the Marketplace exchange), and nothing else;
+#   - has `permissions: contents: read` and `id-token: write` (the
+#     Marketplace exchange), and nothing else;
 #   - checks out nothing and runs no repo code, and passes `tag` from the
 #     reusable workflow's `tag_name` output.
 # The caller's release.yml is repo-authored code: it was already inside the
@@ -53,9 +53,6 @@ inputs:
   ovsx-pat:
     description: "Open VSX token (an environment secret of the caller's publish environment). Required when publish-openvsx is 'true'."
     default: ""
-  github-token:
-    description: "Token for the release upload; needs contents: write."
-    default: ${{ github.token }}
   vsce-version:
     description: "Pinned @vscode/vsce version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--oidc) needs 4.1.0 or later. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
     default: "4.1.0"
@@ -94,7 +91,7 @@ runs:
     # or case-variant names, unsafe paths, symlinks). The "Cross-check VSIX
     # with vsce's reader" step then reads the package the way vsce publish
     # does. Its `vsix`, `version`, `publisher` and `name` outputs are what
-    # the publish and upload steps use. Inline rather than fetched: see the
+    # the publish steps use. Inline rather than fetched: see the
     # header.
     - name: Verify VSIX
       id: verify
@@ -549,14 +546,3 @@ runs:
         else
           ovsx publish "$VSIX" --pat "$OVSX_PAT"
         fi
-
-    # No checkout in this job, so `gh` cannot infer the repository from a git
-    # remote; GH_REPO tells it which repo owns the release.
-    - name: Upload VSIX to GitHub release
-      shell: bash
-      env:
-        TAG: ${{ inputs.tag }}
-        GITHUB_TOKEN: ${{ inputs.github-token }}
-        GH_REPO: ${{ github.repository }}
-        VSIX: ${{ steps.verify.outputs.vsix }}
-      run: gh release upload "$TAG" "$VSIX" --clobber
