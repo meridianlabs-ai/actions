@@ -164,8 +164,11 @@ guarantee, and what is by design. To report a vulnerability, see
   mint such a token; that step previously held nothing for the
   Marketplace. The Open VSX token is still a PAT. `publish-tag` lets a
   workflow_dispatch rebuild and publish an existing release tag; it is
-  validated as a tag shape, must name a GitHub release, and goes through
-  the same environment approval.
+  validated as a tag shape, must name a published (non-draft) release the
+  Release Please App created, its commit must be in the history of the
+  run's release branch (a writer can create or move a tag, and create a
+  release, without touching the protected branch), and it goes through the
+  same environment approval.
 - **A built docs site is repo output.** In `publish-docs.yml` the `build`
   job runs the calling repo's code at the release tag (its install, Quarto's
   pre- and post-render scripts, any executed cells), and the `deploy` job

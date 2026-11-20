@@ -57,9 +57,10 @@ name: Release Please — VS Code extension (reusable)
 # `publish-tag` (from the caller's workflow_dispatch input): publish an
 # EXISTING release tag that never reached the marketplaces. The release-please
 # job then also outputs that tag as created (after checking that it names a
-# GitHub release and that this run created no other), and the build job checks
-# out the tag's commit instead of the triggering one. Leave it empty for
-# normal runs.
+# published GitHub release the Release Please App created, that its commit is
+# in the history of the run's release branch, and that this run created no
+# other), and the build job checks out the tag's commit instead of the
+# triggering one. Leave it empty for normal runs.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
@@ -285,15 +286,20 @@ jobs:
 
       # publish-tag: hand an existing release tag to the build and the caller's
       # publish job. The tag is a caller (workflow_dispatch) input, so it is
-      # validated against a tag shape before it becomes a ref, must name a
-      # GitHub release, and is refused if this run also created a release.
-      # The build checks out the commit the tag resolves to here.
+      # validated against a tag shape before it becomes a ref, and is refused
+      # if this run also created a release. A tag is a ref any writer can
+      # create or move, and anyone with write access can create a release, so
+      # it must name a published (non-draft) release that the Release Please
+      # App created, and the commit it resolves to must be in the history of
+      # the release branch. The build checks out that same commit.
       - name: Existing release tag
         id: existing
         if: ${{ inputs.publish-tag != '' }}
         env:
           PUBLISH_TAG: ${{ inputs.publish-tag }}
           RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          RELEASE_AUTHOR: ${{ steps.app-token.outputs.app-slug }}[bot]
+          RELEASE_BRANCH: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
@@ -305,13 +311,23 @@ jobs:
             echo "::error::this run created a release; publish it from this run, not with publish-tag"
             exit 1
           fi
-          if ! gh release view "$PUBLISH_TAG" --json tagName --jq .tagName > /dev/null; then
-            echo "::error::publish-tag '$PUBLISH_TAG' does not name a GitHub release"
+          if ! gh api "repos/$GH_REPO/releases/tags/$PUBLISH_TAG" \
+              | jq -e --arg tag "$PUBLISH_TAG" --arg author "$RELEASE_AUTHOR" \
+                '.tag_name == $tag and .draft == false and .author.login == $author' > /dev/null; then
+            echo "::error::publish-tag '$PUBLISH_TAG' does not name a published GitHub release created by $RELEASE_AUTHOR"
             exit 1
           fi
           sha="$(gh api "repos/$GH_REPO/commits/refs/tags/$PUBLISH_TAG" --jq .sha)"
           if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::could not resolve publish-tag '$PUBLISH_TAG' to a commit"
+            exit 1
+          fi
+          # Compare the tag's commit (base) with the branch head: `ahead` or
+          # `identical` means the branch's history contains it.
+          branch_sha="$(gh api "repos/$GH_REPO/commits/refs/heads/$RELEASE_BRANCH" --jq .sha)" || true
+          status="$(gh api "repos/$GH_REPO/compare/$sha...$branch_sha" --jq .status)" || true
+          if ! [[ "$branch_sha" =~ ^[0-9a-f]{40}$ && "$status" =~ ^(ahead|identical)$ ]]; then
+            echo "::error::publish-tag '$PUBLISH_TAG' points at $sha, which is not in the history of $RELEASE_BRANCH"
             exit 1
           fi
           {
