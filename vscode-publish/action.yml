@@ -1,8 +1,8 @@
 name: Publish a VS Code extension release
 description: >-
   Verify the .vsix the release-please-vscode.yml build job uploaded and publish
-  it to the VS Code Marketplace (Trusted Publishing) and Open VSX. Runs in the
-  CALLER's own publish job.
+  it to the VS Code Marketplace and Open VSX, both with Trusted Publishing.
+  Runs in the CALLER's own publish job.
 
 # Why a composite action and not a job in release-please-vscode.yml: the
 # Marketplace's Trusted Publishing matches the OIDC token's job_workflow_ref,
@@ -18,10 +18,9 @@ description: >-
 #   - needs the reusable workflow's job and runs only when its
 #     `release_created` output is 'true';
 #   - sets `environment:` (default name `marketplace`), whose required
-#     reviewers gate the publish and which holds OVSX_PAT as an environment
-#     secret;
-#   - has `permissions: contents: read` and `id-token: write` (the
-#     Marketplace exchange), and nothing else;
+#     reviewers gate the publish;
+#   - has `permissions: contents: read` and `id-token: write` (both
+#     registries' token exchanges), and nothing else;
 #   - checks out nothing and runs no repo code, and passes `tag` from the
 #     reusable workflow's `tag_name` output.
 # The caller's release.yml is repo-authored code: it was already inside the
@@ -33,9 +32,17 @@ description: >-
 # comes from `extension-id` and the version from `tag`; the Verify VSIX step
 # binds the downloaded package to both and is the only source of the VSIX
 # path and VERSION the later steps use. With id-token: write on the job,
-# every step can mint an OIDC token, including the Open VSX step (ovsx and
-# its dependencies); that token can be exchanged for the same short-lived
-# Marketplace credential.
+# every step can mint an OIDC token, the vsce and ovsx steps (and their
+# dependencies) included, and exchange it for either registry's short-lived
+# credential.
+#
+# Each registry needs a trusted publisher for the caller's repository,
+# workflow file (release.yml) and the publish job's environment: a Trusted
+# Publishing policy on the Marketplace publisher, and an entry under
+# open-vsx.org/user-settings/trusted-publishers by an owner of the Open VSX
+# namespace. A public repository needs no registration code. If an exchange
+# fails, the release is already tagged; fix the registration and publish the
+# tag again with `publish-tag` (see release-please-vscode.yml).
 
 inputs:
   extension-id:
@@ -50,15 +57,12 @@ inputs:
   publish-openvsx:
     description: "Also publish to Open VSX ('true' or 'false')"
     default: "true"
-  ovsx-pat:
-    description: "Open VSX token (an environment secret of the caller's publish environment). Required when publish-openvsx is 'true'."
-    default: ""
   vsce-version:
     description: "Pinned @vscode/vsce version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--oidc) needs 4.1.0 or later. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
     default: "4.1.0"
   ovsx-version:
-    description: "Pinned ovsx version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected."
-    default: "0.10.12"
+    description: "Pinned ovsx version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--trusted-publishing) needs 1.2.0 or later, which also needs Node.js 22 or later."
+    default: "1.4.0"
 
 runs:
   using: composite
@@ -74,7 +78,7 @@ runs:
         name: vsix
         path: vsix
 
-    # Bind the package to this release before any PAT is in the environment.
+    # Bind the package to this release before either CLI is installed.
     # The validator never extracts or executes anything. Before Python's
     # zipfile reads the archive it checks the zip structure itself, since
     # zipfile and vsce's reader (yauzl) do not find the central directory
@@ -421,19 +425,20 @@ runs:
             sys.exit(main())
         PY
 
-    # Install both CLIs in one step that holds no secrets, so the npm install
-    # (which resolves their transitive dependencies fresh from the registry —
-    # the pins cover only vsce/ovsx themselves) and any lifecycle scripts run
-    # without the PATs in the environment. --ignore-scripts skips those
-    # scripts altogether; the only native module in the tree is vsce's
-    # optional keytar, which vsce loads lazily and only when neither --pat
-    # nor --oidc is given, so publishing is unaffected.
+    # Install both CLIs in one step. The npm install resolves their
+    # transitive dependencies fresh from the registry (the pins cover only
+    # vsce/ovsx themselves), and this step, like every step here, can mint an
+    # OIDC token (see the header), so --ignore-scripts skips their lifecycle
+    # scripts altogether. The native modules in the tree (ovsx's crc32 and
+    # keyring, vsce's optional keytar) ship prebuilt binaries and need no
+    # install script; keyring and keytar load only on the stored-token path,
+    # which neither publish command takes.
     #
     # The version inputs are controlled by the caller workflow, and npm treats
     # anything after `@` as a package spec, not just a version: an alias such
     # as `npm:other-package` or a hosted-git spec like `github:user/repo`
     # would install arbitrary code as the `vsce` / `ovsx` binaries that later
-    # run with the PATs. Require an exact x.y.z version so only the pinned
+    # publish. Require an exact x.y.z version so only the pinned
     # registry package can be installed.
     - name: Install marketplace CLIs
       shell: bash
@@ -449,7 +454,7 @@ runs:
         done
         npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
 
-    # A second reader, still with no PAT in the environment: read the package
+    # A second reader, still before either publish command: read the package
     # with readVSIXPackage from the vsce just installed, the function (and
     # yauzl) `vsce publish --packagePath` takes the publisher, name and
     # version from, and fail unless its package.json and vsixmanifest say
@@ -531,11 +536,13 @@ runs:
       shell: bash
       env:
         EXTENSION_ID: ${{ inputs.extension-id }}
-        OVSX_PAT: ${{ inputs.ovsx-pat }}
         VSIX: ${{ steps.verify.outputs.vsix }}
         VERSION: ${{ steps.verify.outputs.version }}
         PUBLISHER: ${{ steps.verify.outputs.publisher }}
         NAME: ${{ steps.verify.outputs.name }}
+        # ovsx publishes with OVSX_PAT whenever it is set, even with
+        # --trusted-publishing, so clear one a caller sets at job level.
+        OVSX_PAT: ""
       run: |
         metadata="$RUNNER_TEMP/ovsx-metadata.json"
         if ovsx get "$EXTENSION_ID" --metadata > "$metadata" 2>/dev/null \
@@ -544,5 +551,5 @@ runs:
                 "$metadata" > /dev/null 2>&1; then
           echo "v${VERSION} already on Open VSX, skipping"
         else
-          ovsx publish "$VSIX" --pat "$OVSX_PAT"
+          ovsx publish "$VSIX" --trusted-publishing
         fi

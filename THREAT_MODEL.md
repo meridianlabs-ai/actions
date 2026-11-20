@@ -143,26 +143,28 @@ guarantee, and what is by design. To report a vulnerability, see
   uploads, that file's name and any version it reports are repo-controlled,
   and vsce and ovsx publish to whatever publisher, name and version the
   package's own manifests declare. Separating build from publish confines
-  where that code runs; it does not bind the publisher-wide PATs to one
-  extension. The "Verify VSIX" step of `vscode-publish`, which runs in the
-  caller's own `publish` job, does that (see the
-  guarantees below); what it cannot do is stop a compromised release commit
+  where that code runs; it does not bind the Marketplace credential, which
+  covers the whole publisher, to one extension. The "Verify VSIX" step of
+  `vscode-publish`, which runs in the caller's own `publish` job, does that
+  (see the guarantees below); what it cannot do is stop a compromised release commit
   from becoming the content of the one extension version it authorizes,
-  which is what building is. A Marketplace PAT covers every extension of
-  every publisher its account manages and an Open VSX token every namespace
-  of its account; tokens scoped to the one publisher, where a marketplace
-  allows it, are an administrative defence separate from this check.
-  The Marketplace side has no PAT: `vsce publish --oidc` exchanges the job's GitHub OIDC token for a
-  15-minute credential requested for the one publisher, under a Trusted
-  Publishing policy bound to the caller's repository, workflow file and
-  environment. The Marketplace matches the token's `job_workflow_ref`, so
-  the publish job is the caller's own (a job inside the reusable workflow
-  names this repo's file and the exchange is refused), which puts that job's
-  definition in the caller's `release.yml`, already inside the trust
-  boundary. The publish job holds `id-token: write` for this, so every
-  step in it, the Open VSX step (ovsx and its dependencies) included, can
-  mint such a token; that step previously held nothing for the
-  Marketplace. The Open VSX token is still a PAT. `publish-tag` lets a
+  which is what building is.
+  Neither registry is published to with a PAT. `vsce publish --oidc`
+  exchanges the job's GitHub OIDC token for a 15-minute credential requested
+  for the one publisher, and `ovsx publish --trusted-publishing` for a
+  short-lived token requested for the one extension. Each registry issues it
+  only to a trusted publisher registered for the caller's repository and
+  workflow file; the environment is checked when the registration names it,
+  which the caller setup asks for. The Marketplace matches the token's
+  `job_workflow_ref`, so the publish job is the caller's own (a job inside
+  the reusable workflow names this repo's file and the exchange is refused),
+  which puts that job's definition in the caller's `release.yml`, already
+  inside the trust boundary. The Marketplace's policy names a repository,
+  workflow file and environment but no branch, so the caller's environment
+  should allow only the release branch.
+  The publish job holds `id-token: write` for these exchanges, so every step
+  in it, vsce, ovsx and their dependencies included, can mint a token for
+  either registry. `publish-tag` lets a
   workflow_dispatch rebuild and publish an existing release tag; it is
   validated as a tag shape, must name a GitHub release, and goes through
   the same environment approval.
@@ -294,7 +296,7 @@ guarantee, and what is by design. To report a vulnerability, see
   no step asks for a cache), so no cache entry from an earlier run decides
   what it installs and packages, and it can plant none for a later run.
 - The VS Code publish job (`vscode-publish`) publishes only a package it has bound to the
-  release: before any step holds a PAT, its inline validator opens the
+  release: before either CLI is installed, its inline validator opens the
   downloaded `.vsix` without executing anything in it and fails the job
   unless `extension/package.json` and `extension.vsixmanifest` agree and
   name exactly the caller's `extension-id` at the version in the
@@ -322,7 +324,7 @@ guarantee, and what is by design. To report a vulnerability, see
   Zip64 locator is read from (the 20 bytes before it) lies in the central
   directory, and the directory and every local header lie outside the data
   ranges, which come from the checked directory and may not overlap. A
-  later step, still before any PAT, reads the package
+  later step, still before either publish command, reads the package
   with `readVSIXPackage` from the pinned vsce (the function and yauzl that
   `vsce publish --packagePath` uses) and fails unless both manifests there
   name the same identity and version. Nothing the build job output is

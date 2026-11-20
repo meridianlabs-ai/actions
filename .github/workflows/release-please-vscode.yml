@@ -28,31 +28,33 @@ name: Release Please — VS Code extension (reusable)
 #             vscode:prepublish) executes there.
 #
 # The split exists so that code authored in the consuming repo — or in any of
-# its dependencies — never runs in a job that holds the publish credentials
-# (the Marketplace's OIDC exchange, the publisher-wide OVSX_PAT). The
-# environment reviewer gate controls who can START a publish; it cannot stop a
-# compromised release commit from reading secrets in the job that runs it, so
-# the job that runs it must not hold them. vscode-publish pins vsce and ovsx
+# its dependencies — never runs in a job that can obtain the publish
+# credentials (both registries' OIDC token exchanges). The environment
+# reviewer gate controls who can START a publish; it cannot stop a compromised
+# release commit from minting those tokens in the job that runs it, so the job
+# that runs it must not be able to. vscode-publish pins vsce and ovsx
 # and verifies the package before publishing; see its action.yml.
 #
 # The consuming repo must provide these pnpm scripts: lint, build,
 # build:production, test, vsce:package. `vsce:package` must produce exactly one
 # .vsix in the repo root. Add required reviewers to the publish job's
-# `environment` (e.g. `marketplace`) to gate who can ship, and store OVSX_PAT as
-# an ENVIRONMENT secret on that environment, not as a repository or
-# organisation secret: the caller's release.yml is repo-authored code on the
-# release branch, and environment-scoped secrets are only exposed to jobs that
-# reference the environment, which puts the reviewer gate in the path. The
-# caller workflow file itself therefore stays inside the trust boundary —
+# `environment` (e.g. `marketplace`) to gate who can ship, name that
+# environment in both registries' trusted publishers, and restrict its
+# deployment branches to the release branch: the caller's release.yml is
+# repo-authored code, and the Marketplace's policy names the workflow file and
+# environment but no branch. The caller workflow file
+# itself therefore stays inside the trust boundary —
 # before approving, reviewers should confirm the run's workflow file is the
 # expected one and unchanged.
 #
-# Marketplace: Trusted Publishing only (`vsce publish --oidc`; Azure DevOps
-# retires the global PATs the Marketplace needs on 2026-12-01). Create the
-# publisher's Trusted Publishing policy for the caller's repository, its
-# workflow file (release.yml) and the publish job's environment. If the token
-# exchange fails, the release is already tagged; fix the policy and publish
-# the tag again with `publish-tag` (below) from a workflow_dispatch.
+# Both registries: Trusted Publishing only, with no stored token
+# (`vsce publish --oidc`, `ovsx publish --trusted-publishing`). Register the
+# caller's repository, its workflow file (release.yml) and the publish job's
+# environment as a trusted publisher on each: the Marketplace publisher's
+# Trusted Publishing policy, and open-vsx.org/user-settings/trusted-publishers
+# for the Open VSX namespace. If a token exchange fails, the release is already
+# tagged; fix the registration and publish the tag again with `publish-tag`
+# (below) from a workflow_dispatch.
 #
 # `publish-tag` (from the caller's workflow_dispatch input): publish an
 # EXISTING release tag that never reached the marketplaces. The release-please
@@ -92,13 +94,12 @@ name: Release Please — VS Code extension (reusable)
 #       environment: marketplace
 #       permissions:
 #         contents: read
-#         id-token: write # Marketplace Trusted Publishing
+#         id-token: write # Trusted Publishing (Marketplace and Open VSX)
 #       steps:
 #         - uses: meridianlabs-ai/actions/vscode-publish@<same commit SHA> # main
 #           with:
 #             extension-id: ukaisi.inspect-ai
 #             tag: ${{ needs.release.outputs.tag_name }}
-#             ovsx-pat: ${{ secrets.OVSX_PAT }}
 
 on:
   workflow_call:

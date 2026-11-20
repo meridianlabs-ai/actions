@@ -3,16 +3,16 @@
 The build job runs the consuming repo's code (install hooks, scripts, tests,
 vsce:package), so everything it produces, the .vsix, its file name and its
 version output, is repo-controlled. vsce and ovsx publish to whatever
-publisher, name and version the package's own manifests declare, with PATs
-that reach every extension the account manages. The publish job's Verify VSIX
-step is therefore the control: before any step holds a PAT it must open the
-downloaded package without executing anything in it and fail unless
+publisher, name and version the package's own manifests declare, and the
+Marketplace credential reaches every extension of the publisher. The publish
+job's Verify VSIX step is therefore the control: before either CLI is
+installed it must open the downloaded package without executing anything in it and fail unless
 extension/package.json and extension.vsixmanifest agree and name exactly the
 caller's `extension-id` at the version in the release-please tag. Python's
 zipfile and yauzl (the reader vsce publishes with) do not find a zip's central
 directory the same way, so the validator checks the zip structure itself
-before zipfile reads it, and a later step, still before any PAT, reads the
-package with vsce's own readVSIXPackage and fails unless it says the same.
+before zipfile reads it, and a later step, still before either publish
+command, reads the package with vsce's own readVSIXPackage and fails unless it says the same.
 
 The validator is inline in the workflow (a Python heredoc), so the tests lift
 it from the YAML and exercise the real code: in-process against fixture
@@ -22,7 +22,7 @@ disagreeing manifests, ambiguous or unsafe archives, archives with two
 central directories, malformed inputs), and end to end by running the publish
 job's `run:` steps in order under bash with stand-ins for npm, vsce (and its
 reader module), ovsx and gh on PATH that record what they were asked to do. No
-package is published and no real PAT exists here. Where the real vsce of the
+package is published and no real token exists here. Where the real vsce of the
 workflow's default `vsce-version` is on PATH (`.github/workflows/tests.yml`
 installs it), the vsce-reader tests also package an extension with it and run
 the cross-check step against its real reader; elsewhere they skip, and on a
@@ -297,7 +297,7 @@ def test_file_name_is_not_evidence_but_must_be_plain(tmp_path):
     "publisher, name, version",
     [
         (PUBLISHER, "other-extension", VERSION),  # another extension of the same publisher
-        ("other-publisher", NAME, VERSION),  # another publisher the PAT may reach
+        ("other-publisher", NAME, VERSION),  # another publisher a publish credential may reach
         ("other-publisher", "other-extension", VERSION),
         (PUBLISHER, NAME, "0.9.20"),  # a version the tag does not authorize
         (PUBLISHER, NAME, "0.9.1"),  # a prefix of the released version
@@ -813,18 +813,15 @@ def vsce_view(publisher=PUBLISHER, name=NAME, version=VERSION, *, xml: dict | No
     return {"manifest": {"publisher": publisher, "name": name, "version": version}, "xmlManifest": {"PackageManifest": {"Metadata": [{"Identity": [{"$": identity}]}]}}}
 
 
-# The Marketplace is published to with Trusted Publishing (vsce --oidc); only Open VSX has a PAT.
-SECRETS = {"OVSX_PAT": "fake-ovsx-pat"}
+# Both registries are published to with Trusted Publishing, so the action takes no secret.
 EXPRESSIONS = {
     "${{ inputs.extension-id }}": EXTENSION_ID,
     "${{ inputs.tag }}": TAG,
     "${{ inputs.node-version }}": "22",
     "${{ inputs.vsce-version }}": "4.1.0",
-    "${{ inputs.ovsx-version }}": "0.10.12",
-    "${{ inputs.ovsx-pat }}": "fake-ovsx-pat",
+    "${{ inputs.ovsx-version }}": "1.4.0",
     "${{ needs.release-please.outputs.tag_name }}": TAG,
     "${{ github.repository }}": "meridianlabs-ai/inspect_vscode",
-    **{f"${{{{ secrets.{k} }}}}": v for k, v in SECRETS.items()},
 }
 
 
@@ -916,11 +913,11 @@ def test_intended_release_is_verified_then_published(tmp_path):
     run = run_publish_job(tmp_path)
     assert run.outcomes == {"Setup Node.js": "success", "Download VSIX artifact": "success", VERIFY: "success", INSTALL: "success", CROSSCHECK: "success", MARKETPLACE: "success", OPENVSX: "success"}
     vsix = f"vsix/{FILENAME}"
-    assert run.argv("npm") == [["install", "-g", "--ignore-scripts", "@vscode/vsce@4.1.0", "ovsx@0.10.12"]]
+    assert run.argv("npm") == [["install", "-g", "--ignore-scripts", "@vscode/vsce@4.1.0", "ovsx@1.4.0"]]
     assert run.argv("readVSIXPackage") == [[vsix]]
     assert f"vsce reads {vsix} as {EXTENSION_ID} {VERSION}" in run.logs[CROSSCHECK].stdout
     assert run.argv("vsce") == [["show", EXTENSION_ID, "--json"], ["publish", "--packagePath", vsix, "--oidc"]]
-    assert run.argv("ovsx") == [["get", EXTENSION_ID, "--metadata"], ["publish", vsix, "--pat", "fake-ovsx-pat"]]
+    assert run.argv("ovsx") == [["get", EXTENSION_ID, "--metadata"], ["publish", vsix, "--trusted-publishing"]]
     assert run.argv("gh") == []
 
 
@@ -990,12 +987,8 @@ def test_verify_runs_after_download_and_before_any_step_that_holds_a_secret_or_i
     names = [s.get("name") or s["uses"] for s in publish_steps()]
     verify = names.index(VERIFY)
     assert names.index("Download VSIX artifact") < verify < names.index(INSTALL) < names.index(CROSSCHECK) < names.index(MARKETPLACE)
-    credentials = ("secrets.", "inputs.ovsx-pat")
-    for s in publish_steps()[: verify + 1]:
-        assert not any(c in yaml.safe_dump(s) for c in credentials), f"{s.get('name')} holds a credential before the package is verified"
     for s in publish_steps():
-        if any(c in yaml.safe_dump(s.get("env", {})) for c in credentials):
-            assert s["name"] == OPENVSX
+        assert "secrets." not in yaml.safe_dump(s), f"{s.get('name')} holds a secret"
 
 
 def test_publish_job_uses_nothing_the_build_job_produced_except_the_artifact():
@@ -1040,6 +1033,18 @@ def test_marketplace_is_published_with_oidc_only():
     assert "vsce publish --packagePath \"$VSIX\" --oidc" in step(MARKETPLACE)["run"]
     assert "VSCE_PAT" not in ACTION.read_text()
     assert "secrets." not in yaml.safe_dump(action())
+
+
+def test_openvsx_is_published_with_trusted_publishing_only():
+    # --trusted-publishing fails when no OIDC token is available, but a token from --pat or OVSX_PAT
+    # takes precedence over it, so the step clears any OVSX_PAT the caller's job sets.
+    assert "ovsx publish \"$VSIX\" --trusted-publishing" in step(OPENVSX)["run"]
+    assert "--pat" not in step(OPENVSX)["run"]
+    assert step(OPENVSX)["env"]["OVSX_PAT"] == ""
+    assert not any("pat" in name for name in action()["inputs"])
+    # ovsx added --trusted-publishing in 1.2.0.
+    pinned = tuple(int(n) for n in action()["inputs"]["ovsx-version"]["default"].split("."))
+    assert pinned >= (1, 2, 0)
 
 
 def test_publish_action_never_writes_to_the_release():
@@ -1124,7 +1129,7 @@ def test_marketplace_skip_check_compares_the_exact_identity_and_version_from_the
 def test_openvsx_skip_check_compares_the_exact_identity_and_version_from_the_metadata(tmp_path, ovsx_get, published):
     run = run_publish_job(tmp_path, ovsx_get=ovsx_get)
     assert run.outcomes[OPENVSX] == "success"
-    assert (["publish", f"vsix/{FILENAME}", "--pat", "fake-ovsx-pat"] in run.argv("ovsx")) is published
+    assert (["publish", f"vsix/{FILENAME}", "--trusted-publishing"] in run.argv("ovsx")) is published
     assert ("already on Open VSX" in run.logs[OPENVSX].stdout) is not published
 
 
