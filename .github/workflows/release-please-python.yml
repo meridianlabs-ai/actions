@@ -248,13 +248,14 @@ jobs:
           # The map is this workflow's own commit (the fetch step above), so a
           # change on actions main reaches a caller only when its pin moves; any
           # other checkout means no mentions. Only Slack member IDs become
-          # mentions, so a map value can't add other Slack markup.
+          # mentions, so a map value can't add other Slack markup; jq checks the
+          # whole JSON string, before $(...) strips trailing newlines.
           mentions=""
           map=_meridian_actions/slack-ids.json
           if [ -f "$map" ] && [ -n "$APPROVERS" ] && [ "$(git -C _meridian_actions rev-parse HEAD 2>/dev/null)" = "$MAP_SHA" ]; then
             for login in $(echo "$APPROVERS" | tr ',' ' '); do
-              id=$(jq -r --arg l "$login" '.[$l] // empty' "$map")
-              if [[ "$id" =~ ^[UW][[:upper:][:digit:]]+$ ]]; then
+              id=$(jq -r --arg l "$login" '.[$l] | select(type == "string" and test("\\A[UW][A-Z0-9]+\\z"))' "$map")
+              if [ -n "$id" ]; then
                 mentions="$mentions <@$id>"
               fi
             done

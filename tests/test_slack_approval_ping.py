@@ -48,7 +48,7 @@ with open(os.environ["FAKE_CURL_LOG"], "w") as log:
 
 # Map values that are not Slack member IDs. Each would otherwise be wrapped in
 # <@...> and could add a channel-wide mention or a labelled link to the ping.
-NOT_IDS = ["TODO", "", "!channel", "U012AB3CD> <!channel", "U012AB3CD|Review", "<https://example.com|Review>", "u012ab3cd", "U012AB3CD\nx", 42, {"id": SLACK_ID}]
+NOT_IDS = ["TODO", "", "!channel", "U012AB3CD> <!channel", "U012AB3CD|Review", "<https://example.com|Review>", "u012ab3cd", "U012AB3CD\nx", "U012AB3CD\n", 42, {"id": SLACK_ID}]
 
 
 def release_please_step(kind: str, name: str) -> dict:
