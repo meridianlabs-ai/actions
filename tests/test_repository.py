@@ -30,7 +30,7 @@ from pathlib import Path
 import yaml
 
 GITHUB = Path(__file__).resolve().parents[1] / ".github"
-RETIRED_SECRETS = ("CI_PERF_ANTHROPIC_API_KEY", "TRIAGE_ANTHROPIC_API_KEY")
+RETIRED_SECRETS = ("CI_PERF_ANTHROPIC_API_KEY", "TRIAGE_ANTHROPIC_API_KEY", "MARVIN_TOKEN")
 APP_TOKEN = "actions/create-github-app-token@"
 RELEASE_WORKFLOWS = (
     ".github/workflows/release-please-python.yml",
@@ -38,7 +38,7 @@ RELEASE_WORKFLOWS = (
 )
 
 
-def test_no_workflow_or_action_names_a_retired_anthropic_key():
+def test_no_workflow_or_action_names_a_retired_secret():
     files = [p for p in GITHUB.rglob("*") if p.is_file()]
     assert any(p.parent.name == "workflows" for p in files)  # the walk found the workflows
     named = [

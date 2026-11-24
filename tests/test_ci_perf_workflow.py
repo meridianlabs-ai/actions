@@ -183,15 +183,13 @@ class JobRun:
     publisher_calls: list[dict] = field(default_factory=list)
 
 
-def should_run(condition: str | None, outcomes: dict[str, str], job_ok: bool, job_env: dict[str, str]) -> bool:
+def should_run(condition: str | None, outcomes: dict[str, str], job_ok: bool) -> bool:
     if condition is None:
         return job_ok  # the default success() gate
     if condition == "always()":
         return True
     if m := re.fullmatch(r"always\(\) && steps\.(\w+)\.outcome == '(\w+)'", condition):
         return outcomes[m.group(1)] == m.group(2)
-    if m := re.fullmatch(r"env\.(\w+) == '(\w+)'", condition):
-        return job_env[m.group(1)] == m.group(2)
     raise AssertionError(f"step condition not modelled: {condition}")
 
 
@@ -258,7 +256,7 @@ def run_publish_job(
     job_ok = True
     for s in publish_steps():
         k = key(s)
-        if not should_run(s.get("if"), run.outcomes, job_ok, job_env):
+        if not should_run(s.get("if"), run.outcomes, job_ok):
             run.outcomes[k] = "skipped"
             continue
         if "uses" in s:

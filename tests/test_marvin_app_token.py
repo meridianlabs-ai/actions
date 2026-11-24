@@ -10,7 +10,8 @@ place these facts live, so this file asserts them: the app secrets and the
 minted token appear in the trusted job only; the mint step is scoped to the
 fork with issues and organization-projects write and always runs; every read
 of the identity is the minted token, after the mint step, never inside a
-`run:` script; and the retired MARVIN_TOKEN PAT is named nowhere.
+`run:` script. tests/test_repository.py checks that no workflow names the
+retired MARVIN_TOKEN PAT.
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
@@ -97,12 +98,9 @@ def test_every_read_of_the_identity_is_the_minted_token_after_the_mint_step(work
             assert i > mint, f"{s.get('name')} reads the token before the mint step"
             reads += 1
     assert reads >= 1
-    # The app secrets themselves are read by the mint step and the job env only.
+    # The app secrets themselves are read by the mint step only: not by the
+    # job env, which every step (the upstream publisher among them) inherits.
+    assert MARVIN.search(yaml.safe_dump(job.get("env") or {})) is None
     for i, s in enumerate(steps):
         if i != mint:
             assert "MARVIN_APP_" not in yaml.safe_dump(s), s.get("name")
-
-
-@pytest.mark.parametrize("workflow, trusted", CASES)
-def test_the_retired_pat_is_named_nowhere(workflow, trusted):
-    assert "MARVIN_TOKEN" not in workflow.read_text()

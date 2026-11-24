@@ -237,8 +237,10 @@ guarantee, and what is by design. To report a vulnerability, see
 - The two agent workflows perform their GitHub and Atlas writes in separate
   jobs on fresh runners, from artifacts those jobs validate first, under a
   GitHub App token minted for that job and scoped to the `inspect_ai` fork
-  with only the permissions the job uses. That token is the job's only
-  marvin credential. Triage's `land` job checks
+  with only the permissions the job uses. The job's later steps read that
+  token and no other marvin credential; the App's private key, which can
+  mint for any repository the App is installed on, is read by the mint
+  step alone. Triage's `land` job checks
   out nothing and posts its Slack reply with a separate Slack token held
   only there, to the destination the `context` job resolved; it reads no
   output of the agent job. ci-perf's `publish` job checks out upstream

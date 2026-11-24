@@ -1203,10 +1203,10 @@ jobs:
       # token of the meridian-marvin GitHub App (Phase 2 of the credential
       # separation), minted for the one repository the job writes to and
       # only the permissions it uses, revoked by the action's post step at
-      # job end. It is the job's only marvin credential: a run without the
-      # app secrets fails here rather than writing as anyone else. Only this
-      # job may mint: the private key and the minted token never reach a job
-      # that runs the agent.
+      # job end. Later steps read no other marvin credential, and a run
+      # without the app secrets fails here. Only this job may mint: the
+      # private key and the minted token never reach a job that runs the
+      # agent.
       # The action's `app-id` input takes the App ID or the Client ID; v2 has
       # no `client-id` input.
       - name: Mint a fork-scoped marvin token
