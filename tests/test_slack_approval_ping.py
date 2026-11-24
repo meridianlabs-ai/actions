@@ -48,7 +48,7 @@ with open(os.environ["FAKE_CURL_LOG"], "w") as log:
 
 # Map values that are not Slack member IDs. Each would otherwise be wrapped in
 # <@...> and could add a channel-wide mention or a labelled link to the ping.
-NOT_IDS = ["TODO", "", "!channel", "U012AB3CD> <!channel", "U012AB3CD|Review", "<https://example.com|Review>", "u012ab3cd", "U012AB3CD\nx", "U012AB3CD\n", 42, {"id": SLACK_ID}]
+NOT_IDS = ["TODO", "", "!channel", "<!channel> U012AB3CD", "U012AB3CD> <!channel", "U012AB3CD|Review", "<https://example.com|Review>", "u012ab3cd", "U012AB3CD\nx", "U012AB3CD\n", 42, {"id": SLACK_ID}]
 
 
 def release_please_step(kind: str, name: str) -> dict:
@@ -103,11 +103,10 @@ def ping_workflow(kind: str, tmp_path: Path, ids: dict, approvers: str, *, map_s
 
 
 def ping_action(tmp_path: Path, ids: dict, approvers: str) -> str:
+    # The composite reads the map next to itself and runs no git.
     action_path = tmp_path / "actions" / "slack-approval-ping"
-    action_path.parent.mkdir()
-    write_map(action_path.parent / "map", ids)
-    (action_path.parent / "map" / "slack-ids.json").rename(action_path.parent / "slack-ids.json")
-    action_path.mkdir()
+    action_path.mkdir(parents=True)
+    (action_path.parent / "slack-ids.json").write_text(json.dumps(ids))
     [step] = yaml.safe_load(ACTION.read_text())["runs"]["steps"]
     env = {"WEBHOOK": "https://hooks.example/x", "APPROVERS": approvers, "MESSAGE": ":rocket: release", "RUN_URL": "https://github.com/run", "ACTION_PATH": str(action_path)}
     result, text = run_script(step["run"], tmp_path, env)

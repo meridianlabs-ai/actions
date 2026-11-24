@@ -1,5 +1,5 @@
 {
-  "_comment": "GitHub login -> Slack member ID (e.g. U012ABC). Used by the release-please reusable workflows to @-mention release approvers in the approvals channel. Find an ID in Slack: profile -> ... -> Copy member ID. Entries left as TODO are skipped (no mention).",
+  "_comment": "GitHub login -> Slack member ID (e.g. U012ABC). Used by the release-please reusable workflows to @-mention release approvers in the approvals channel. Find an ID in Slack: profile -> ... -> Copy member ID. A value that isn't a Slack member ID (U or W, then capital letters and digits) is skipped. Callers read this file at the commit they pin, so a change reaches a caller only when its pin moves.",
   "dragonstyle": "U08L7H4NBQT",
   "jjallaire": "U07V6G0G0GN",
   "epatey": "U0862T8T1CH",
