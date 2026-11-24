@@ -1207,22 +1207,39 @@ def test_extension_packaged_by_real_vsce_passes_verify_and_the_cross_check(tmp_p
 
 EXISTING = "Existing release tag"
 TAG_SHA = "a" * 40
+HEAD_SHA = "b" * 40
+BRANCH = "main"
 
 FAKE_GH = f'''#!{sys.executable}
-"""Stand-in for gh in the Existing release tag step: a release exists for tags listed in $FAKE_RELEASES."""
+"""Stand-in for gh in the Existing release tag step. It answers the four API reads the step makes,
+already filtered as the step's --jq asks: published releases are the tags in $FAKE_RELEASES (answered
+as $FAKE_RELEASE_TAG when set), drafts those in $FAKE_DRAFTS; tags resolve to $FAKE_TAG_SHA, the branch to $FAKE_HEAD_SHA, and the
+compare status is $FAKE_COMPARE. Each call is logged to $FAKE_GH_LOG."""
 import os, sys
 
 args = sys.argv[1:]
-releases = os.environ.get("FAKE_RELEASES", "").split()
-if args[:2] == ["release", "view"]:
-    if args[2] in releases:
-        print(args[2])
-        sys.exit(0)
-    sys.exit("release not found")
-if args[:1] == ["api"] and args[1].endswith("/commits/refs/tags/" + args[1].rsplit("/", 1)[-1]):
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(" ".join(args) + "\\n")
+repo = "repos/" + os.environ["GH_REPO"] + "/"
+if args[:1] != ["api"] or not args[1].startswith(repo):
+    sys.exit("unexpected gh call: " + " ".join(args))
+path = args[1][len(repo):]
+if path.startswith("releases/tags/"):
+    tag = path[len("releases/tags/"):]
+    if tag in os.environ.get("FAKE_RELEASES", "").split():
+        print(os.environ.get("FAKE_RELEASE_TAG") or tag, "false")
+    elif tag in os.environ.get("FAKE_DRAFTS", "").split():
+        print(tag, "true")  # the real endpoint 404s on drafts; the step must refuse either way
+    else:
+        sys.exit("gh: Not Found (HTTP 404)")
+elif path.startswith("commits/refs/tags/"):
     print(os.environ.get("FAKE_TAG_SHA", ""))
-    sys.exit(0)
-sys.exit("unexpected gh call: " + " ".join(args))
+elif path == "commits/refs/heads/" + os.environ["RELEASE_BRANCH"]:
+    print(os.environ.get("FAKE_HEAD_SHA", ""))
+elif path == "compare/" + os.environ.get("FAKE_TAG_SHA", "") + "..." + os.environ.get("FAKE_HEAD_SHA", ""):
+    print(os.environ.get("FAKE_COMPARE", ""))
+else:
+    sys.exit("unexpected gh call: " + " ".join(args))
 '''
 
 
@@ -1233,16 +1250,47 @@ def release_please_step(name: str) -> dict:
     raise KeyError(name)
 
 
-def run_existing(tmp_path: Path, publish_tag: str, *, releases: str = TAG, sha: str = TAG_SHA, release_created: str = "") -> tuple[subprocess.CompletedProcess, dict]:
+@dataclass
+class ExistingRun:
+    result: subprocess.CompletedProcess
+    outputs: dict[str, str]
+    summary: str
+    gh_calls: list[str]
+
+
+def run_existing(tmp_path: Path, publish_tag: str, *, releases: str = TAG, drafts: str = "", release_tag: str = "", sha: str = TAG_SHA, head: str = HEAD_SHA, compare: str = "ahead", release_created: str = "") -> ExistingRun:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "gh").write_text(FAKE_GH)
     (bin_dir / "gh").chmod(0o755)
-    output = tmp_path / "output"
-    output.touch()
-    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "PUBLISH_TAG": publish_tag, "RELEASE_CREATED": release_created, "GH_REPO": "meridianlabs-ai/inspect_vscode", "GITHUB_OUTPUT": str(output), "FAKE_RELEASES": releases, "FAKE_TAG_SHA": sha}
+    output, summary, log = tmp_path / "output", tmp_path / "summary", tmp_path / "gh.log"
+    for f in (output, summary, log):
+        f.touch()
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PUBLISH_TAG": publish_tag,
+        "RELEASE_CREATED": release_created,
+        "RELEASE_BRANCH": BRANCH,
+        "GH_REPO": "meridianlabs-ai/inspect_vscode",
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "FAKE_GH_LOG": str(log),
+        "FAKE_RELEASES": releases,
+        "FAKE_DRAFTS": drafts,
+        "FAKE_RELEASE_TAG": release_tag,
+        "FAKE_TAG_SHA": sha,
+        "FAKE_HEAD_SHA": head,
+        "FAKE_COMPARE": compare,
+    }
     result = run_bash(release_please_step(EXISTING)["run"], cwd=tmp_path, env=env)
-    return result, read_outputs(output)
+    return ExistingRun(result, read_outputs(output), summary.read_text(), log.read_text().splitlines())
+
+
+def refused(run: ExistingRun, error: str) -> None:
+    assert run.result.returncode == 1, run.result.stdout + run.result.stderr
+    assert f"::error::{error}" in run.result.stdout
+    assert run.outputs == {}
+    assert run.summary == ""
 
 
 def test_existing_tag_step_runs_only_for_publish_tag_and_feeds_the_outputs():
@@ -1258,38 +1306,75 @@ def test_existing_tag_step_runs_only_for_publish_tag_and_feeds_the_outputs():
     assert checkout["with"]["ref"] == "${{ needs.release-please.outputs.sha }}"
 
 
+def test_existing_tag_must_be_on_the_branch_release_please_manages():
+    release = next(s for s in workflow()["jobs"]["release-please"]["steps"] if s.get("id") == "release")
+    assert release_please_step(EXISTING)["env"]["RELEASE_BRANCH"] == release["with"]["target-branch"]
+
+
 @pytest.mark.parametrize("tag", [TAG, VERSION, f"inspect-ai-{TAG}"])
-def test_existing_release_tag_is_output_with_its_commit(tmp_path, tag):
-    result, outputs = run_existing(tmp_path, tag, releases=tag)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert outputs == {"release_created": "true", "tag_name": tag, "sha": TAG_SHA}
+@pytest.mark.parametrize("compare", ["ahead", "identical"])
+def test_existing_release_tag_on_the_branch_is_output_with_its_commit(tmp_path, tag, compare):
+    run = run_existing(tmp_path, tag, releases=tag, compare=compare)
+    assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+    assert run.outputs == {"release_created": "true", "tag_name": tag, "sha": TAG_SHA}
+    assert f"`{tag}` at `{TAG_SHA}`, on `{BRANCH}`" in run.summary
 
 
-@pytest.mark.parametrize("tag", ["main", "v0.10", "v0.10.2;id", "v0.10.2\nsha=evil", "refs/tags/v0.10.2", "../v0.10.2", " v0.10.2"])
+@pytest.mark.parametrize("tag", ["main", "v0.10", "v0.10.2;id", "v0.10.2\nsha=evil", "refs/tags/v0.10.2", "../v0.10.2", " v0.10.2", f"-R-{TAG}", f"--repo=x-{TAG}", f".hidden-{TAG}", f"_x-{TAG}", f"a/b-{TAG}"])
 def test_publish_tag_that_is_not_a_release_tag_is_refused(tmp_path, tag):
-    result, outputs = run_existing(tmp_path, tag, releases=tag)
-    assert result.returncode == 1
-    assert "::error::publish-tag must be a release tag" in result.stdout
-    assert outputs == {}
+    run = run_existing(tmp_path, tag, releases=tag)
+    refused(run, "publish-tag must be a release tag")
+    assert run.gh_calls == []
+
+
+def test_tag_reaches_gh_only_inside_an_api_path(tmp_path):
+    run = run_existing(tmp_path, TAG)
+    assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+    assert len(run.gh_calls) == 4
+    for call in run.gh_calls:
+        argv = call.split()
+        assert argv[0] == "api" and argv[1].startswith("repos/meridianlabs-ai/inspect_vscode/")
+        assert all(TAG not in arg for arg in argv[2:])
 
 
 def test_publish_tag_without_a_github_release_is_refused(tmp_path):
-    result, outputs = run_existing(tmp_path, TAG, releases="v0.9.18")
-    assert result.returncode == 1
-    assert f"::error::publish-tag '{TAG}' does not name a GitHub release" in result.stdout
-    assert outputs == {}
+    refused(run_existing(tmp_path, TAG, releases="v0.9.18"), f"publish-tag '{TAG}' does not name a published GitHub release")
+
+
+def test_publish_tag_with_only_a_draft_release_is_refused(tmp_path):
+    refused(run_existing(tmp_path, TAG, releases="", drafts=TAG), f"publish-tag '{TAG}' does not name a published GitHub release")
+
+
+def test_publish_tag_whose_release_names_another_tag_is_refused(tmp_path):
+    # A lookup that answers with a different release must not pass: the old `gh release view` with an
+    # option-like argument fell back to the latest release.
+    refused(run_existing(tmp_path, TAG, release_tag="v0.9.18"), f"publish-tag '{TAG}' does not name a published GitHub release")
+
+
+@pytest.mark.parametrize("compare", ["behind", "diverged", ""])
+def test_publish_tag_on_a_commit_off_the_release_branch_is_refused(tmp_path, compare):
+    refused(run_existing(tmp_path, TAG, compare=compare), f"publish-tag '{TAG}' points at {TAG_SHA}, which is not on {BRANCH}")
 
 
 def test_publish_tag_is_refused_when_this_run_created_a_release(tmp_path):
-    result, outputs = run_existing(tmp_path, TAG, release_created="true")
-    assert result.returncode == 1
-    assert "::error::this run created a release" in result.stdout
-    assert outputs == {}
+    refused(run_existing(tmp_path, TAG, release_created="true"), "this run created a release")
 
 
 @pytest.mark.parametrize("sha", ["", "not-a-sha", "A" * 40, "a" * 39])
 def test_publish_tag_that_does_not_resolve_to_a_commit_is_refused(tmp_path, sha):
-    result, outputs = run_existing(tmp_path, TAG, sha=sha)
-    assert result.returncode == 1
-    assert "::error::could not resolve publish-tag" in result.stdout
-    assert outputs == {}
+    refused(run_existing(tmp_path, TAG, sha=sha), "could not resolve publish-tag")
+
+
+@pytest.mark.parametrize("head", ["", "not-a-sha"])
+def test_release_branch_that_does_not_resolve_to_a_commit_is_refused(tmp_path, head):
+    refused(run_existing(tmp_path, TAG, head=head), f"could not resolve the release branch '{BRANCH}'")
+
+
+def test_approval_ping_runs_for_publish_tag_and_names_the_tag_and_commit():
+    fetch = release_please_step("Fetch Slack ID map")
+    notify = release_please_step("Notify Slack — release awaiting publish approval")
+    for s in (fetch, notify):
+        assert s["if"] == "${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}"
+    assert notify["env"]["TAG"] == "${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}"
+    assert notify["env"]["SHA"] == "${{ steps.existing.outputs.sha || github.sha }}"
+    assert "(commit ${SHA:0:12})" in notify["run"]

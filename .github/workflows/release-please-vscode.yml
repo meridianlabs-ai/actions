@@ -59,9 +59,9 @@ name: Release Please — VS Code extension (reusable)
 # `publish-tag` (from the caller's workflow_dispatch input): publish an
 # EXISTING release tag that never reached the marketplaces. The release-please
 # job then also outputs that tag as created (after checking that it names a
-# GitHub release and that this run created no other), and the build job checks
-# out the tag's commit instead of the triggering one. Leave it empty for
-# normal runs.
+# published GitHub release, that its commit is on the release branch and that
+# this run created no other), and the build job checks out the tag's commit
+# instead of the triggering one. Leave it empty for normal runs.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
@@ -285,20 +285,26 @@ jobs:
           PY
 
       # publish-tag: hand an existing release tag to the build and the caller's
-      # publish job. The tag is a caller (workflow_dispatch) input, so it is
-      # validated against a tag shape before it becomes a ref, must name a
-      # GitHub release, and is refused if this run also created a release.
-      # The build checks out the commit the tag resolves to here.
+      # publish job. Anyone with contents: write can create or move a tag and
+      # draft a release, so neither proves a release. The step therefore
+      # requires a published (non-draft) release whose tag is exactly the
+      # input, and a tagged commit reachable from the branch Release Please
+      # manages in this run, so the build only gets a commit that went through
+      # that branch. The tag is a caller (workflow_dispatch) input: it is
+      # validated against a tag shape that starts with a letter or digit, and
+      # reaches gh only inside an API path. The build checks out the commit
+      # checked here, and the job summary names the tag and the commit.
       - name: Existing release tag
         id: existing
         if: ${{ inputs.publish-tag != '' }}
         env:
           PUBLISH_TAG: ${{ inputs.publish-tag }}
           RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          RELEASE_BRANCH: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if ! [[ "$PUBLISH_TAG" =~ ^([A-Za-z0-9._-]+-)?v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$PUBLISH_TAG" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*-)?v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::publish-tag must be a release tag such as v1.2.3, got '$PUBLISH_TAG'"
             exit 1
           fi
@@ -306,13 +312,26 @@ jobs:
             echo "::error::this run created a release; publish it from this run, not with publish-tag"
             exit 1
           fi
-          if ! gh release view "$PUBLISH_TAG" --json tagName --jq .tagName > /dev/null; then
-            echo "::error::publish-tag '$PUBLISH_TAG' does not name a GitHub release"
+          # This endpoint returns published releases only; the jq re-checks both.
+          if ! release="$(gh api "repos/$GH_REPO/releases/tags/$PUBLISH_TAG" --jq '"\(.tag_name) \(.draft)"')" \
+            || [ "$release" != "$PUBLISH_TAG false" ]; then
+            echo "::error::publish-tag '$PUBLISH_TAG' does not name a published GitHub release"
             exit 1
           fi
           sha="$(gh api "repos/$GH_REPO/commits/refs/tags/$PUBLISH_TAG" --jq .sha)"
           if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::could not resolve publish-tag '$PUBLISH_TAG' to a commit"
+            exit 1
+          fi
+          head="$(gh api "repos/$GH_REPO/commits/refs/heads/$RELEASE_BRANCH" --jq .sha)"
+          if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve the release branch '$RELEASE_BRANCH' to a commit"
+            exit 1
+          fi
+          # "identical" or "ahead": the branch head is the tagged commit or descends from it.
+          status="$(gh api "repos/$GH_REPO/compare/$sha...$head" --jq .status)"
+          if [ "$status" != "identical" ] && [ "$status" != "ahead" ]; then
+            echo "::error::publish-tag '$PUBLISH_TAG' points at $sha, which is not on $RELEASE_BRANCH"
             exit 1
           fi
           {
@@ -321,11 +340,12 @@ jobs:
             echo "sha<<EOF"; echo "$sha"; echo "EOF"
           } >> "$GITHUB_OUTPUT"
           echo "Publishing existing release $PUBLISH_TAG at $sha"
+          echo "Publishing existing release \`$PUBLISH_TAG\` at \`$sha\`, on \`$RELEASE_BRANCH\`." >> "$GITHUB_STEP_SUMMARY"
 
       # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
       # @-mention the right people.
       - name: Fetch Slack ID map
-        if: ${{ steps.release.outputs.release_created == 'true' }}
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: meridianlabs-ai/actions
@@ -334,17 +354,19 @@ jobs:
           sparse-checkout-cone-mode: false
           path: _meridian_actions
 
-      # Ping the approvals channel when a release is cut, @-mentioning the
-      # approvers, so the publish awaiting approval is noticed (GitHub's own
-      # deployment-review notifications are unreliable — e.g. suppressed for the
-      # actor who triggered the run). No-ops if the webhook secret is unset.
+      # Ping the approvals channel when a release is cut or publish-tag names
+      # one, @-mentioning the approvers, so the publish awaiting approval is
+      # noticed (GitHub's own deployment-review notifications are unreliable —
+      # e.g. suppressed for the actor who triggered the run). The message names
+      # the commit the build checks out. No-ops if the webhook secret is unset.
       - name: Notify Slack — release awaiting publish approval
-        if: ${{ steps.release.outputs.release_created == 'true' }}
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
         env:
           SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
           APPROVERS: ${{ inputs.approvers }}
           REPO: ${{ github.repository }}
-          TAG: ${{ steps.release.outputs.tag_name }}
+          TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
+          SHA: ${{ steps.existing.outputs.sha || github.sha }}
           # This run contains the gated publish job, so deep-link straight to it.
           ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -362,7 +384,7 @@ jobs:
               fi
             done
           fi
-          text=":rocket: *${REPO}* ${TAG} release created — Marketplace publish is *awaiting approval*.${mentions} Review: ${ACTIONS_URL}"
+          text=":rocket: *${REPO}* ${TAG} release (commit ${SHA:0:12}) — Marketplace publish is *awaiting approval*.${mentions} Review: ${ACTIONS_URL}"
           curl -sf -X POST -H 'Content-type: application/json' \
             --data "$(jq -n --arg t "$text" '{text: $t}')" \
             "$SLACK_APPROVALS_WEBHOOK_URL"
