@@ -11,9 +11,10 @@ name: Publish docs (reusable)
 # Jobs:
 # - build: first refuses any ref that is not the tag of a published release
 #   (`tag` when given, else the run's ref), so docs for unreleased code never
-#   reach the site. Then it checks out that tag (the run's own commit when no
-#   `tag` is given), installs the project from uv.lock and runs `quarto
-#   render`. It runs the repo's code, so
+#   reach the site. With `tag`, it resolves the tag to a commit once, which
+#   must be the run's commit or an ancestor of it, and checks out that commit;
+#   without, the run's own commit. It installs the project from uv.lock and
+#   runs `quarto render`. It runs the repo's code, so
 #   it holds only the read-only job token, persists no checkout credential and
 #   uses no Actions cache.
 # - deploy: deploys the build's Pages artifact with actions/deploy-pages. It
@@ -92,6 +93,7 @@ jobs:
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
           TAG: ${{ inputs.tag }}
+          RUN_SHA: ${{ github.sha }}
         run: |
           if [ -n "$TAG" ]; then
             REF="refs/tags/$TAG"
@@ -100,17 +102,33 @@ jobs:
             refs/tags/*)
               tag="${REF#refs/tags/}"
               encoded="$(jq -rn --arg t "$tag" '$t | @uri')"
-              if gh api "repos/$REPO/releases/tags/$encoded" \
+              if ! gh api "repos/$REPO/releases/tags/$encoded" \
                   | jq -e --arg t "$tag" '.tag_name == $t and .draft == false' > /dev/null; then
-                # Without `tag`, the checkout's default keeps the run's own
-                # commit, which a later move of the tag can't change.
-                if [ -n "$TAG" ]; then
-                  { echo "ref<<EOF"; echo "$REF"; echo "EOF"; } >> "$GITHUB_OUTPUT"
-                fi
+                echo "::error::Refusing to publish docs from $REF: no published release has this tag."
+                exit 1
+              fi
+              # Without `tag`, the checkout's default keeps the run's own
+              # commit, which a later move of the tag can't change.
+              if [ -z "$TAG" ]; then
                 exit 0
               fi
-              echo "::error::Refusing to publish docs from $REF: no published release has this tag."
-              exit 1
+              # With `tag`, resolve it to a commit once and check out that
+              # commit: a tag can be moved after this check, or before a
+              # re-run of this job. The commit must be the run's commit or an
+              # ancestor of it, since the github-pages environment admits the
+              # run's branch, not the tag.
+              sha="$(gh api "repos/$REPO/commits/refs/tags/$encoded" | jq -r .sha)" || true
+              if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error::Refusing to publish docs: could not resolve the tag $tag to a commit."
+                exit 1
+              fi
+              status="$(gh api "repos/$REPO/compare/$sha...$RUN_SHA" | jq -r .status)" || true
+              if [ "$status" != identical ] && [ "$status" != ahead ]; then
+                echo "::error::Refusing to publish docs from $REF: its commit $sha is not in this run's history ($RUN_SHA)."
+                exit 1
+              fi
+              { echo "ref<<EOF"; echo "$sha"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+              exit 0
               ;;
           esac
           echo "::error::Refusing to publish docs from $REF: run this from a release tag."

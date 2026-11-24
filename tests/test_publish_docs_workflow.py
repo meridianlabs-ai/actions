@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-docs.yml"
 TESTS_WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
 REPO = "meridianlabs-ai/inspect_swe"
+RUN_SHA = "a" * 40
+TAG_SHA = "b" * 40
 
 
 def workflow() -> dict:
@@ -48,16 +50,31 @@ class CheckResult(NamedTuple):
 
 
 def run_check_ref(
-    tmp_path: Path, ref: str, releases: dict[str, dict], gh_exit: int = 0, tag: str = ""
+    tmp_path: Path,
+    ref: str,
+    releases: dict[str, dict],
+    gh_exit: int = 0,
+    tag: str = "",
+    commits: dict[str, str] | None = None,
+    compare: str | None = "identical",
 ) -> CheckResult:
     """Run the ref check for `ref` with a gh stand-in that serves `releases` (tag -> release JSON) and 404s anything else.
 
-    `tag` is the workflow's `tag` input. With `gh_exit`, gh prints the release
-    and then fails, as a lookup cut off midway does. `output` is what the step
-    wrote to $GITHUB_OUTPUT.
+    `tag` is the workflow's `tag` input. With `gh_exit`, gh prints what it
+    serves and then fails, as a lookup cut off midway does. `commits` maps a
+    URL-encoded tag to the commit it points at (default: every release's tag
+    at TAG_SHA), and `compare` is the status GitHub reports comparing TAG_SHA
+    with the run's commit RUN_SHA (None: the comparison 404s). `output` is
+    what the step wrote to $GITHUB_OUTPUT.
     """
+    if commits is None:
+        commits = {t: TAG_SHA for t in releases}
+    paths: dict[str, dict] = {f"repos/{REPO}/releases/tags/{t}": body for t, body in releases.items()}
+    paths.update({f"repos/{REPO}/commits/refs/tags/{t}": {"sha": sha} for t, sha in commits.items()})
+    if compare is not None:
+        paths[f"repos/{REPO}/compare/{TAG_SHA}...{RUN_SHA}"] = {"status": compare}
     served = tmp_path / "releases.json"
-    served.write_text(json.dumps({f"repos/{REPO}/releases/tags/{tag}": body for tag, body in releases.items()}))
+    served.write_text(json.dumps(paths))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gh = bin_dir / "gh"
@@ -81,6 +98,7 @@ def run_check_ref(
             "REPO": REPO,
             "REF": ref,
             "TAG": tag,
+            "RUN_SHA": RUN_SHA,
             "GITHUB_OUTPUT": str(output),
         },
         text=True,
@@ -138,12 +156,43 @@ def test_a_failed_lookup_is_refused_even_if_it_printed_a_release(tmp_path):
 # --- A release workflow on main passes the tag it released --------------------------
 
 
-def test_the_tag_input_of_a_published_release_passes_on_a_branch_run(tmp_path):
+@pytest.mark.parametrize("compare", ["identical", "ahead"])
+def test_the_tag_input_of_a_published_release_passes_as_its_commit(tmp_path, compare):
+    # The checkout gets the commit the check resolved, not the tag name, so a
+    # tag moved after the check (or before a re-run) changes nothing.
     result = run_check_ref(
-        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72"
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", compare=compare
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    assert result.output == "ref<<EOF\nrefs/tags/0.2.72\nEOF\n"
+    assert result.output == f"ref<<EOF\n{TAG_SHA}\nEOF\n"
+
+
+@pytest.mark.parametrize("compare", ["behind", "diverged", None])
+def test_a_tag_input_whose_commit_is_not_in_the_runs_history_is_refused(tmp_path, compare):
+    # The github-pages environment admits the run's branch, so only commits
+    # that branch already holds may be rendered.
+    result = run_check_ref(
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", compare=compare
+    )
+    assert result.returncode == 1
+    assert f"its commit {TAG_SHA} is not in this run's history ({RUN_SHA})" in result.stdout
+    assert result.output == ""
+
+
+@pytest.mark.parametrize("commits", [{}, {"0.2.72": "main"}, {"0.2.72": "B" * 40}, {"0.2.72": "b" * 39}], ids=["missing", "name", "upper", "short"])
+def test_a_tag_input_that_does_not_resolve_to_a_commit_is_refused(tmp_path, commits):
+    result = run_check_ref(
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", commits=commits
+    )
+    assert result.returncode == 1
+    assert "could not resolve the tag 0.2.72 to a commit" in result.stdout
+    assert result.output == ""
+
+
+def test_a_tag_input_is_url_encoded_in_the_commit_lookup(tmp_path):
+    result = run_check_ref(tmp_path, "refs/heads/main", {"a%2Fb": {"tag_name": "a/b", "draft": False}}, tag="a/b")
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.output == f"ref<<EOF\n{TAG_SHA}\nEOF\n"
 
 
 def test_the_tag_input_wins_over_the_runs_tag(tmp_path):
@@ -170,6 +219,7 @@ def test_the_checkout_renders_the_ref_the_check_passed():
     steps = job("build")["steps"]
     assert ref_check()["id"] == "ref"
     assert ref_check()["env"]["TAG"] == "${{ inputs.tag }}"
+    assert ref_check()["env"]["RUN_SHA"] == "${{ github.sha }}"
     assert steps[1]["with"]["ref"] == "${{ steps.ref.outputs.ref }}"
     assert workflow()["on"]["workflow_call"]["inputs"]["tag"]["default"] == ""
 
