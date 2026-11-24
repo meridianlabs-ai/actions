@@ -783,8 +783,7 @@ def test_land_refuses_a_manifest_crafted_past_the_composer(validator, tmp_path, 
     # manifest forged past it could open or adopt a PR for a branch already
     # on origin (`triage-fixture` carries the prefix), label it `auto` — a
     # label the loop gates accept from the machine account — and post the
-    # live `@review`. refuse-bundle does not close this (no push is needed),
-    # and the PAT fallback reaches this repository's pull requests.
+    # live `@review`. refuse-bundle does not close this (no push is needed).
     ({"branch": "triage-fixture", "pr": {"open": True, "title": "Fixture", "body_file": "body.md", "labels": ["auto"]},
       "handback": True},
      ["refuses pull-request fields (--refuse-pr) but the manifest carries `pr`",
@@ -808,9 +807,9 @@ def test_land_refuses_pull_request_fields_forged_into_a_triage_manifest(validato
     # Under this workflow's boundary a compromise of the agent job's runner
     # can upload any manifest after the composer ran. Generic comments on
     # this repository (review round 1 of the WIF design: #17 and #18 passed
-    # under `comment-numbers: *`) would land as the machine account, which
-    # the MARVIN_TOKEN fallback lets write here. `event` with no event
-    # number refuses every one.
+    # under `comment-numbers: *`) would land as the machine account if its
+    # token reached this repository. `event` with no event number refuses
+    # every one.
     ({"comments": [{"number": 17, "body_file": "body.md"}, {"number": 18, "body_file": "body.md"}]},
      ["comments[0]: number 17 is not this run's issue or PR (none; --comment-numbers event)",
       "comments[1]: number 18 is not this run's issue or PR (none; --comment-numbers event)"]),
@@ -1049,7 +1048,7 @@ def test_agent_job_holds_no_secret_but_the_job_token():
     # mint one (already excluded above), not a minted token.
     assert "steps.mint" not in agent and "create-github-app-token" not in agent
     land = yaml.safe_dump(wf["jobs"]["land"])
-    assert "MARVIN_TOKEN" in land and "SLACK_BOT_TOKEN" in land
+    assert "SLACK_BOT_TOKEN" in land
     assert "MARVIN_APP_CLIENT_ID" in land and "MARVIN_APP_PRIVATE_KEY" in land
     assert "checkout" not in land
 

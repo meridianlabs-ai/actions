@@ -122,9 +122,8 @@ guarantee, and what is by design. To report a vulnerability, see
   manifest contract (schema and known keys, body and text file references,
   the allowed issue repository, no bundle under `refuse-bundle`, and no
   `pr` or `handback` field under `refuse-pr`: a `pr.open` needs no push,
-  it adopts or opens a PR for a branch already on origin and labels it,
-  and the `MARVIN_TOKEN` fallback reaches this repository's pull requests
-  where the minted token does not; the Slack destination is a `land`
+  it adopts or opens a PR for a branch already on origin and labels it;
+  the Slack destination is a `land`
   input, not a manifest field), so a manifest forged past the composing
   step after a separate compromise of the agent runner (a shim on
   `$GITHUB_PATH`, a line in `$GITHUB_ENV`) is refused whole rather than
@@ -238,8 +237,8 @@ guarantee, and what is by design. To report a vulnerability, see
 - The two agent workflows perform their GitHub and Atlas writes in separate
   jobs on fresh runners, from artifacts those jobs validate first, under a
   GitHub App token minted for that job and scoped to the `inspect_ai` fork
-  with only the permissions the job uses (a PAT fallback stays in the
-  expression while the app secrets roll out). Triage's `land` job checks
+  with only the permissions the job uses. That token is the job's only
+  marvin credential. Triage's `land` job checks
   out nothing and posts its Slack reply with a separate Slack token held
   only there, to the destination the `context` job resolved; it reads no
   output of the agent job. ci-perf's `publish` job checks out upstream

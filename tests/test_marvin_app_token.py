@@ -5,13 +5,12 @@ trusted job on a fresh runner (publish, land) that is the only one to write
 as marvin: fork issues and comments, assignees, and Atlas items, all on
 meridianlabs-ai/inspect_ai. Phase 2 of the credential separation has the
 trusted job mint a one-hour installation token of the meridian-marvin GitHub
-App for exactly that repository and those permissions, falling back to the
-MARVIN_TOKEN PAT while the app secrets roll out. The YAML is the only place
-these facts live, so this file asserts them: the app secrets, the minted
-token and the PAT appear in the trusted job only; the mint step is scoped to
-the fork with issues and organization-projects write and runs only when both
-secrets are configured; and every read of the identity is the one fallback
-expression, after the mint step, never inside a `run:` script.
+App for exactly that repository and those permissions. The YAML is the only
+place these facts live, so this file asserts them: the app secrets and the
+minted token appear in the trusted job only; the mint step is scoped to the
+fork with issues and organization-projects write and always runs; every read
+of the identity is the minted token, after the mint step, never inside a
+`run:` script; and the retired MARVIN_TOKEN PAT is named nowhere.
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 `.github/workflows/tests.yml` does the same in CI).
@@ -31,8 +30,7 @@ TRIAGE = ROOT / ".github" / "workflows" / "triage-test-failures.yml"
 
 # Anything that is, or yields, a marvin identity.
 MARVIN = re.compile(r"secrets\.MARVIN_[A-Z_]+|steps\.mint\b|create-github-app-token")
-TOKEN = "${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}"
-CONFIGURED = "${{ secrets.MARVIN_APP_CLIENT_ID != '' && secrets.MARVIN_APP_PRIVATE_KEY != '' }}"
+TOKEN = "${{ steps.mint.outputs.token }}"
 
 CASES = [
     pytest.param(CI_PERF, "publish", id="ci-perf"),
@@ -57,7 +55,7 @@ def test_the_marvin_identity_appears_in_the_trusted_job_only(workflow, trusted):
     for name, job in wf["jobs"].items():
         hits = MARVIN.findall(yaml.safe_dump(job))
         if name == trusted:
-            assert set(hits) >= {"secrets.MARVIN_TOKEN", "secrets.MARVIN_APP_CLIENT_ID", "secrets.MARVIN_APP_PRIVATE_KEY", "steps.mint", "create-github-app-token"}, hits
+            assert set(hits) >= {"secrets.MARVIN_APP_CLIENT_ID", "secrets.MARVIN_APP_PRIVATE_KEY", "steps.mint", "create-github-app-token"}, hits
         else:
             assert hits == [], f"{workflow.name} {name}: {hits}"
 
@@ -76,16 +74,14 @@ def test_the_mint_step_is_scoped_to_fork_issues_and_atlas(workflow, trusted):
         "permission-issues": "write",
         "permission-organization-projects": "write",
     }
-    # Mint only when both app secrets are configured, else the PAT fallback
-    # below carries the run; a step-level `if` cannot read secrets, so the
-    # job's env answers the question.
-    assert mint["if"] == "env.MARVIN_APP_CONFIGURED == 'true'"
-    assert job["env"]["MARVIN_APP_CONFIGURED"] == CONFIGURED
+    # Always mint: with no other credential to fall back to, a run without
+    # the app secrets must fail at this step.
+    assert "if" not in mint
     assert "skip-token-revoke" not in mint["with"]
 
 
 @pytest.mark.parametrize("workflow, trusted", CASES)
-def test_every_read_of_the_identity_is_the_fallback_expression_after_the_mint_step(workflow, trusted):
+def test_every_read_of_the_identity_is_the_minted_token_after_the_mint_step(workflow, trusted):
     job = load(workflow)["jobs"][trusted]
     steps = job["steps"]
     mint = mint_index(steps)
@@ -105,3 +101,8 @@ def test_every_read_of_the_identity_is_the_fallback_expression_after_the_mint_st
     for i, s in enumerate(steps):
         if i != mint:
             assert "MARVIN_APP_" not in yaml.safe_dump(s), s.get("name")
+
+
+@pytest.mark.parametrize("workflow, trusted", CASES)
+def test_the_retired_pat_is_named_nowhere(workflow, trusted):
+    assert "MARVIN_TOKEN" not in workflow.read_text()

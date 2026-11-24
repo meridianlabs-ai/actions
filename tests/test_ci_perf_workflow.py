@@ -228,7 +228,6 @@ def run_publish_job(
         "CI_PERF_RUN_URL": RUN_URL,
         "GITHUB_STEP_SUMMARY": str(summary),
         "PYTHONDONTWRITEBYTECODE": "1",
-        "MARVIN_APP_CONFIGURED": "false",  # the PAT fallback
     }
     sha = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in INPUTS.items()}
     needs = {
@@ -242,7 +241,7 @@ def run_publish_job(
     def render(text: str) -> str:
         def value(m: re.Match) -> str:
             expression = m.group(1).strip()
-            if expression == "steps.mint.outputs.token || secrets.MARVIN_TOKEN":
+            if expression == "steps.mint.outputs.token":
                 return "fake-marvin-token"
             if expression == "env.CI_PERF_OUTPUT_DIR":
                 return str(out)

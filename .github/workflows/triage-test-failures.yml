@@ -24,8 +24,8 @@
 # scoped to `workspace:inference` in the triage workspace (spend-capped,
 # separate from the one the test suites' ANTHROPIC_API_KEY bills), living at
 # most 600 s. The agent may read and leak it; what limits it is the cap, the
-# scope and the lifetime. No MARVIN_TOKEN, no Slack token and no long-lived
-# Anthropic key are in the job.
+# scope and the lifetime. No marvin credential, no Slack token and no
+# long-lived Anthropic key are in the job.
 #
 # The Claude process runs through meridianlabs-ai/agents' launcher, as the
 # agents repository's own jobs run it: Claude Code root-owned at the version
@@ -69,8 +69,7 @@
 # uploading), land posts its own fixed "did not complete" reply to that
 # same destination and fails the run. The marvin identity
 # (the app secrets MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY, the token
-# they mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
-# `land` only.
+# they mint) and the SLACK_* secrets appear in `land` only.
 #
 # The manifest's `slack` field, `issues[].assignees` / `issues[].reopen`,
 # land's `slack-*` inputs and the Atlas Todo status came to the landing pair
@@ -538,7 +537,7 @@ jobs:
         with:
           grant: none
 
-      # No MARVIN_TOKEN, no Slack env, no Anthropic key: the agent needs only
+      # No marvin credential, no Slack env, no Anthropic key: the agent needs only
       # reads — fork issues (public) and this run's own data via the job
       # token — file writes under the landing directory, and the model, which
       # it reaches with the WIF token the action mints. The four WIF inputs
@@ -1199,24 +1198,19 @@ jobs:
     permissions:
       contents: read
       actions: read           # artifact download
-    env:
-      # A step-level `if` cannot read secrets; this carries the one fact the
-      # mint step needs: whether both app secrets are configured.
-      MARVIN_APP_CONFIGURED: ${{ secrets.MARVIN_APP_CLIENT_ID != '' && secrets.MARVIN_APP_PRIVATE_KEY != '' }}
     steps:
       # The marvin identity for this job's writes: a one-hour installation
       # token of the meridian-marvin GitHub App (Phase 2 of the credential
       # separation), minted for the one repository the job writes to and
       # only the permissions it uses, revoked by the action's post step at
-      # job end. Falls back to the MARVIN_TOKEN PAT until the app secrets
-      # reach every caller; the PAT read goes with the retirement item. Only
-      # this job may mint: the private key and the minted token never reach
-      # a job that runs the agent.
+      # job end. It is the job's only marvin credential: a run without the
+      # app secrets fails here rather than writing as anyone else. Only this
+      # job may mint: the private key and the minted token never reach a job
+      # that runs the agent.
       # The action's `app-id` input takes the App ID or the Client ID; v2 has
       # no `client-id` input.
       - name: Mint a fork-scoped marvin token
         id: mint
-        if: env.MARVIN_APP_CONFIGURED == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -1235,16 +1229,16 @@ jobs:
           # refuse-bundle nothing is pushed and no PR is touched, so the
           # token needs neither contents nor pull-requests. The only job
           # that names it.
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token }}
           refuse-bundle: "true"
           # No PR either: a manifest carrying `pr` (open or adopt a PR for
           # a branch that already exists on origin and label it — `auto`
           # opts a PR into the autonomous loops, whose gates accept the
           # machine account as the labeler) or `handback` (the live
           # `@review`) is refused whole. refuse-bundle alone does not close
-          # this: `pr.open` needs no push, and while the minted token
-          # reaches only the fork's issues, the MARVIN_TOKEN fallback above
-          # reaches this repository's pull requests (review round 1, B1).
+          # this: `pr.open` needs no push (review round 1, B1). The minted
+          # token reaches only the fork's issues today; this keeps the
+          # refusal if its permissions ever widen.
           refuse-pr: "true"
           # The one repo the manifest's issues[] may name; the validator
           # refuses every other.
@@ -1264,8 +1258,8 @@ jobs:
           # writes one, but this job assumes the agent job's runner may be
           # compromised (design/agent-jobs-workload-identity.md → triage
           # after the change): under the default `*` a manifest uploaded after
-          # the composer ran could post comments on any issue or PR of this
-          # repository, which the MARVIN_TOKEN fallback reaches. The one fork
+          # the composer ran could post comments on any issue or PR the
+          # token reaches. The one fork
           # issue action triage may take travels in `issues[]`, under the
           # policies above.
           comment-numbers: event
