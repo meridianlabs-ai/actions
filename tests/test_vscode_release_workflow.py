@@ -1259,7 +1259,7 @@ APP = "meridian-release-bot[bot]"
 REPO = "meridianlabs-ai/inspect_vscode"
 
 FAKE_GH = f'''#!{sys.executable}
-"""Stand-in for gh in the Existing release tag step. It serves the JSON of the four API reads from
+"""Stand-in for gh in the Existing release tag and Release commit steps. It serves the JSON of their API reads from
 $FAKE_API (a JSON object keyed by path under repos/$GH_REPO/) and applies the step's --jq filter with
 jq. On a path it doesn't hold it fails like gh: the error JSON on stdout and a non-zero exit. Each call is logged to $FAKE_GH_LOG."""
 import json, os, subprocess, sys
@@ -1450,7 +1450,8 @@ def run_release_commit(tmp_path: Path, sha: str, tag: str = TAG, paths: dict | N
         "GH_REPO": REPO,
         "GITHUB_OUTPUT": str(output),
         "FAKE_GH_LOG": str(log),
-        "FAKE_API": json.dumps({f"commits/refs/tags/{tag}": {"sha": sha}} if paths is None else paths),
+        "RUN_SHA": HEAD_SHA,
+        "FAKE_API": json.dumps({f"commits/refs/tags/{tag}": {"sha": sha}, f"compare/{sha}...{HEAD_SHA}": {"status": "ahead"}} if paths is None else paths),
     }
     result = run_bash(release_please_step(COMMIT)["run"], cwd=tmp_path, env=env)
     return ExistingRun(result, read_outputs(output), "", [json.loads(line) for line in log.read_text().splitlines()])
@@ -1465,13 +1466,42 @@ def test_build_checks_out_the_commit_release_please_tagged_not_the_triggering_co
     s = release_please_step(COMMIT)
     assert s["id"] == "commit"
     assert s["if"] == "${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}"
-    assert s["env"]["SHA"] == "${{ steps.existing.outputs.sha || steps.release.outputs.sha }}"
-    assert s["env"]["TAG"] == "${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}"
-    assert s["env"]["GH_REPO"] == "${{ github.repository }}"
+    assert s["env"] == {
+        "SHA": "${{ steps.existing.outputs.sha || steps.release.outputs.sha }}",
+        "TAG": "${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}",
+        "GH_TOKEN": "${{ github.token }}",
+        "GH_REPO": "${{ github.repository }}",
+        "RUN_SHA": "${{ github.sha }}",
+    }
     # With an empty sha output the build's checkout would fall back to the triggering commit.
     assert "continue-on-error" not in s
     assert names.index(EXISTING) < names.index(COMMIT) < names.index(NOTIFY)
-    assert "github.sha" not in yaml.safe_dump(workflow()["jobs"]["release-please"])
+    job = workflow()["jobs"]["release-please"]
+    assert job["outputs"]["sha"] == "${{ steps.commit.outputs.sha }}"
+    assert release_please_step(NOTIFY)["env"]["SHA"] == "${{ steps.commit.outputs.sha }}"
+    # github.sha is only the bound the commit must sit under, never the commit itself.
+    assert [k for st in job["steps"] for k, v in st.get("env", {}).items() if "github.sha" in str(v)] == ["RUN_SHA"]
+
+
+def test_build_refuses_to_check_out_without_a_release_commit():
+    # An empty ref makes actions/checkout fetch the triggering commit.
+    steps = workflow()["jobs"]["build"]["steps"]
+    guard, checkout = steps[0], steps[1]
+    assert guard["env"]["SHA"] == "${{ needs.release-please.outputs.sha }}"
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"]["ref"] == "${{ needs.release-please.outputs.sha }}"
+
+
+@pytest.mark.parametrize("sha", ["", "main", "c" * 39])
+def test_build_guard_fails_without_a_full_commit_sha(tmp_path, sha):
+    result = run_bash(workflow()["jobs"]["build"]["steps"][0]["run"], cwd=tmp_path, env={"SHA": sha})
+    assert result.returncode == 1
+    assert "::error::no release commit to build" in result.stdout
+
+
+def test_build_guard_passes_a_full_commit_sha(tmp_path):
+    result = run_bash(workflow()["jobs"]["build"]["steps"][0]["run"], cwd=tmp_path, env={"SHA": RELEASE_SHA})
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("tag", [TAG, VERSION, f"inspect-ai-{TAG}"])
@@ -1480,7 +1510,7 @@ def test_release_commit_outputs_the_tags_commit(tmp_path, sha, tag):
     run = run_release_commit(tmp_path, sha, tag)
     assert run.result.returncode == 0, run.result.stdout + run.result.stderr
     assert run.outputs == {"sha": sha}
-    assert run.gh_calls == [["api", f"repos/{REPO}/commits/refs/tags/{tag}", "--jq", ".sha"]]
+    assert run.gh_calls == [["api", f"repos/{REPO}/commits/refs/tags/{tag}", "--jq", ".sha"], ["api", f"repos/{REPO}/compare/{sha}...{HEAD_SHA}", "--jq", ".status"]]
 
 
 @pytest.mark.parametrize("sha", ["", "main", "A" * 40, "c" * 39, f"{RELEASE_SHA}\nsha=evil"])
@@ -1500,8 +1530,25 @@ def test_release_commit_fails_on_a_tag_that_is_not_a_release_tag(tmp_path, tag):
 def test_release_commit_fails_when_the_tag_points_elsewhere(tmp_path):
     # GitHub keeps a tag that already exists when a release is created for it, while Release Please
     # still reports the release's target_commitish, so the two can differ.
-    run = run_release_commit(tmp_path, RELEASE_SHA, paths={f"commits/refs/tags/{TAG}": {"sha": TAG_SHA}})
+    run = run_release_commit(tmp_path, RELEASE_SHA, paths={f"commits/refs/tags/{TAG}": {"sha": TAG_SHA}, f"compare/{RELEASE_SHA}...{HEAD_SHA}": {"status": "ahead"}})
     refused(run, f"release tag '{TAG}' points at {TAG_SHA}, not {RELEASE_SHA}")
+
+
+@pytest.mark.parametrize("compare", ["identical", "ahead"])
+def test_release_commit_in_the_runs_history_passes(tmp_path, compare):
+    run = run_release_commit(tmp_path, RELEASE_SHA, paths={f"commits/refs/tags/{TAG}": {"sha": RELEASE_SHA}, f"compare/{RELEASE_SHA}...{HEAD_SHA}": {"status": compare}})
+    assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+    assert run.outputs == {"sha": RELEASE_SHA}
+
+
+@pytest.mark.parametrize("compare", ["behind", "diverged", None])
+def test_release_commit_outside_the_runs_history_is_refused(tmp_path, compare):
+    # With a target-branch override, Release Please can release a commit from a branch other than
+    # the run's, which is the branch the publish environment's rule checks.
+    paths: dict = {f"commits/refs/tags/{TAG}": {"sha": RELEASE_SHA}}
+    if compare is not None:
+        paths[f"compare/{RELEASE_SHA}...{HEAD_SHA}"] = {"status": compare}
+    refused(run_release_commit(tmp_path, RELEASE_SHA, paths=paths), f"release commit {RELEASE_SHA} is not in this run's history ({HEAD_SHA})")
 
 
 def test_release_commit_fails_when_the_tag_does_not_resolve(tmp_path):

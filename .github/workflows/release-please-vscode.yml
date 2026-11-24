@@ -366,8 +366,11 @@ jobs:
       # branch that has moved on, runs at a later commit, and building it would
       # publish code the tag doesn't contain. GitHub keeps a tag that already
       # exists when a release is created for it, so the step also requires the
-      # tag to point at that commit. No continue-on-error: an empty `sha`
-      # output would make the build check out the triggering commit.
+      # tag to point at that commit. The commit must also be the run's commit
+      # or an ancestor of it: the publish environment's branch rule checks the
+      # run's branch, and a target-branch override could otherwise release
+      # another branch's code. No continue-on-error: an empty `sha` output
+      # would make the build check out the triggering commit.
       - name: Release commit
         id: commit
         if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
@@ -376,6 +379,7 @@ jobs:
           TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RUN_SHA: ${{ github.sha }}
         run: |
           if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::could not determine the commit this release tagged"
@@ -392,6 +396,11 @@ jobs:
           fi
           if [ "$tagged" != "$SHA" ]; then
             echo "::error::release tag '$TAG' points at $tagged, not $SHA"
+            exit 1
+          fi
+          status="$(gh api "repos/$GH_REPO/compare/$SHA...$RUN_SHA" --jq .status)" || true
+          if [ "$status" != identical ] && [ "$status" != ahead ]; then
+            echo "::error::release commit $SHA is not in this run's history ($RUN_SHA)"
             exit 1
           fi
           { echo "sha<<EOF"; echo "$SHA"; echo "EOF"; } >> "$GITHUB_OUTPUT"
@@ -465,6 +474,16 @@ jobs:
     outputs:
       vsix: ${{ steps.package.outputs.vsix }}
     steps:
+      # An empty ref would make actions/checkout fetch the triggering commit.
+      - name: Require the release commit
+        env:
+          SHA: ${{ needs.release-please.outputs.sha }}
+        run: |
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::no release commit to build"
+            exit 1
+          fi
+
       # The release commit: the one Release Please tagged, or the publish-tag's.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
