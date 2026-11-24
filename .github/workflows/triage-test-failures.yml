@@ -1288,9 +1288,12 @@ jobs:
       # context that failed gets no reply here either, as the compose step
       # decides for that case, and a workflow cancelled while Land ran gets
       # none (`!cancelled()`). The step always fails the run.
+      # A failed mint (the app secrets missing or refused) skips Land, so
+      # this step also runs then and posts its own reply for that case.
       - name: Report a triage that landed no manifest
-        if: always() && !cancelled() && needs.context.result == 'success' && steps.land.outcome == 'failure'
+        if: always() && !cancelled() && needs.context.result == 'success' && (steps.mint.outcome == 'failure' || steps.land.outcome == 'failure')
         env:
+          MINT_OUTCOME: ${{ steps.mint.outcome }}
           # Where the `land` composite's download step puts the artifact
           # (tests/test_triage_workflow.py checks it against agents@main).
           MANIFEST: ${{ runner.temp }}/landing/manifest.json
@@ -1300,11 +1303,16 @@ jobs:
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
-          if [ -f "$MANIFEST" ]; then
+          if [ "$MINT_OUTCOME" = "failure" ]; then
+            echo "::error::land: the marvin token could not be minted; nothing was landed."
+            text="⚠️ Triage did not complete: the land job could not mint its GitHub token. See the run log: $RUN_URL"
+          elif [ -f "$MANIFEST" ]; then
             echo "land: the landing manifest arrived; the Land step reported its own failure."
             exit 0
+          else
+            echo "::error::land: no landing manifest reached this job (the agent job uploaded none, or the download failed)."
+            text="⚠️ Triage did not complete: no landing manifest reached the land job. See the run log: $RUN_URL"
           fi
-          echo "::error::land: no landing manifest reached this job (the agent job uploaded none, or the download failed)."
           # The same channel shapes Land accepts: SLACK_CHANNEL_ID may name a
           # D conversation.
           if [ -z "${SLACK_TOKEN:-}" ] || ! [[ "$SLACK_CHANNEL" =~ ^[CGD][A-Z0-9]{8,}$ ]]; then
@@ -1316,7 +1324,7 @@ jobs:
             exit 1
           fi
           body=$(jq -n --arg c "$SLACK_CHANNEL" --arg t "$SLACK_THREAD_TS" \
-                   --arg text "⚠️ Triage did not complete: no landing manifest reached the land job. See the run log: $RUN_URL" \
+                   --arg text "$text" \
                    '{channel: $c, text: $text} + (if $t != "" then {thread_ts: $t} else {} end)')
           # The token reaches curl through a file (process substitution),
           # never an argument: arguments show in `ps`. One attempt, bounded,

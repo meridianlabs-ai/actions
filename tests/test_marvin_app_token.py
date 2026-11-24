@@ -92,7 +92,9 @@ def test_every_read_of_the_identity_is_the_minted_token_after_the_mint_step(work
             continue
         assert "${{ secrets." not in (s.get("run") or "") and "steps.mint" not in (s.get("run") or ""), s.get("name")
         for expression in re.findall(r"\$\{\{[^}]*\}\}", yaml.safe_dump(s)):
-            if MARVIN.search(expression) is None:
+            # The mint step's outcome (triage's failure reply reads it) is not
+            # a credential.
+            if MARVIN.search(expression) is None or expression == "${{ steps.mint.outcome }}":
                 continue
             assert expression == TOKEN, f"{workflow.name} {trusted} / {s.get('name')}: {expression}"
             assert i > mint, f"{s.get('name')} reads the token before the mint step"

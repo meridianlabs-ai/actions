@@ -1724,11 +1724,13 @@ sys.stdout.write(os.environ.get("FAKE_SLACK_RESPONSE", '{"ok": true}'))
 NO_MANIFEST_STEP = "Report a triage that landed no manifest"
 NO_MANIFEST_TEXT = ("⚠️ Triage did not complete: no landing manifest reached the land job. "
                     "See the run log: https://example.test/run")
+MINT_FAILED_TEXT = ("⚠️ Triage did not complete: the land job could not mint its GitHub token. "
+                    "See the run log: https://example.test/run")
 
 
 def report_no_manifest(tmp_path: Path, *, manifest: bool = False, channel: str = "C0123ABCDEF",
                        thread_ts: str = "1726000000.123456", response: str = '{"ok": true}',
-                       curl_exit: str = "") -> tuple[subprocess.CompletedProcess, list[dict]]:
+                       curl_exit: str = "", mint: str = "success") -> tuple[subprocess.CompletedProcess, list[dict]]:
     landing = tmp_path / "landing"
     landing.mkdir()
     if manifest:
@@ -1740,7 +1742,8 @@ def report_no_manifest(tmp_path: Path, *, manifest: bool = False, channel: str =
     log = tmp_path / "curl.log"
     env = {"PATH": f"{curl.parent}:{os.environ['PATH']}", "FAKE_CURL_LOG": str(log), "FAKE_SLACK_RESPONSE": response,
            "MANIFEST": str(landing / "manifest.json"), "SLACK_TOKEN": "xoxb-secret", "SLACK_CHANNEL": channel,
-           "SLACK_THREAD_TS": thread_ts, "RUN_URL": "https://example.test/run", "FAKE_CURL_EXIT": curl_exit}
+           "SLACK_THREAD_TS": thread_ts, "RUN_URL": "https://example.test/run", "FAKE_CURL_EXIT": curl_exit,
+           "MINT_OUTCOME": mint}
     # The shell Actions uses for a `run:` step with no `shell:` on Linux.
     r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", job_step("land", NO_MANIFEST_STEP)["run"]],
                        cwd=tmp_path, env={**os.environ, **env}, text=True, capture_output=True, check=False)
@@ -1758,6 +1761,17 @@ def test_no_manifest_posts_one_fixed_reply_in_the_thread_and_fails(tmp_path):
     # The token is a header read from a file, never an argument.
     assert "Authorization: Bearer xoxb-secret" in calls[0]["headers"]
     assert not any("xoxb-secret" in a for a in calls[0]["args"])
+
+
+def test_a_failed_mint_posts_its_own_reply_and_fails(tmp_path):
+    # A failed mint skips Land, so no manifest was downloaded; the reply names
+    # the mint, not a lost manifest.
+    r, calls = report_no_manifest(tmp_path, mint="failure")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "::error::land: the marvin token could not be minted" in r.stdout
+    assert len(calls) == 1
+    assert json.loads(calls[0]["body"]) == {"channel": "C0123ABCDEF", "thread_ts": "1726000000.123456",
+                                            "text": MINT_FAILED_TEXT}
 
 
 def test_no_manifest_without_a_thread_replies_at_the_channel_root(tmp_path):
@@ -1807,7 +1821,9 @@ def test_no_manifest_reports_a_refused_post(tmp_path):
 def test_the_no_manifest_reply_goes_where_land_posts_and_only_after_land_failed():
     s = job_step("land", NO_MANIFEST_STEP)
     inputs = land_inputs()
-    assert s["if"] == "always() && !cancelled() && needs.context.result == 'success' && steps.land.outcome == 'failure'"
+    assert s["if"] == ("always() && !cancelled() && needs.context.result == 'success' && "
+                       "(steps.mint.outcome == 'failure' || steps.land.outcome == 'failure')")
+    assert s["env"]["MINT_OUTCOME"] == "${{ steps.mint.outcome }}"
     assert job_step("land", "land")["name"] == "Land"
     assert s["env"]["SLACK_TOKEN"] == inputs["slack-token"]
     assert s["env"]["SLACK_CHANNEL"] == inputs["slack-channel"]
@@ -1834,14 +1850,15 @@ def test_the_manifest_path_is_where_the_land_composite_downloads():
     assert "artifact-name" not in land_inputs()
 
 
-def evaluate(expr: str, *, agent: str, workflow_cancelled: bool, context: str = "success", land: str = "failure") -> bool:
+def evaluate(expr: str, *, agent: str, workflow_cancelled: bool, context: str = "success", land: str = "failure",
+             mint: str = "success") -> bool:
     """A Boolean model of the land job's and the fallback step's `if:`, over
     the few names they use. Not GitHub's evaluator: it shows which results
     the checked-in conditions admit, given `cancelled()` means a cancelled
     workflow (GitHub's docs)."""
     names = {"always()": "True", "!cancelled()": f"(not {workflow_cancelled})",
              "needs.agent.result": repr(agent), "needs.context.result": repr(context),
-             "steps.land.outcome": repr(land), "&&": " and ", "||": " or "}
+             "steps.land.outcome": repr(land), "steps.mint.outcome": repr(mint), "&&": " and ", "||": " or "}
     for name, value in names.items():
         expr = expr.replace(name, value)
     assert re.fullmatch(r"[\w\s'()=!]+", expr), expr
@@ -1868,3 +1885,6 @@ def test_the_no_manifest_reply_goes_out_unless_the_workflow_was_cancelled(agent,
     assert land_runs is (agent != "skipped" and not workflow_cancelled)
     # An arrived manifest (Land succeeded) never gets the extra reply.
     assert evaluate(step, agent=agent, workflow_cancelled=workflow_cancelled, context=context, land="success") is False
+    # A failed mint skips Land; the reply still goes out whenever it would for a lost manifest.
+    assert (land_runs and evaluate(step, agent=agent, workflow_cancelled=workflow_cancelled, context=context,
+                                   land="skipped", mint="failure")) is posts
