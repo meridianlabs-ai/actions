@@ -152,7 +152,7 @@ jobs:
     outputs:
       release_created: ${{ steps.existing.outputs.release_created || steps.release.outputs.release_created }}
       tag_name: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
-      sha: ${{ steps.existing.outputs.sha || github.sha }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
@@ -358,6 +358,24 @@ jobs:
           echo "Publishing existing release $PUBLISH_TAG at $sha"
           echo "Publishing existing release \`$PUBLISH_TAG\` at \`$sha\`, on \`$RELEASE_BRANCH\`." >> "$GITHUB_STEP_SUMMARY"
 
+      # The commit the build checks out and the ping names: the publish-tag's
+      # commit, or the one Release Please tagged in this run (its `sha` output,
+      # the release's target_commitish). Not github.sha: a push that carries the
+      # release PR's merge and later commits, or a dispatch from a branch that
+      # has moved on, runs at a later commit, and building it would publish
+      # code the tag doesn't contain.
+      - name: Release commit
+        id: commit
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
+        env:
+          SHA: ${{ steps.existing.outputs.sha || steps.release.outputs.sha }}
+        run: |
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not determine the commit this release tagged"
+            exit 1
+          fi
+          { echo "sha<<EOF"; echo "$SHA"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
       # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
       # @-mention the right people. Like the ping, it must not block a release.
       - name: Fetch Slack ID map
@@ -385,7 +403,7 @@ jobs:
           APPROVERS: ${{ inputs.approvers }}
           REPO: ${{ github.repository }}
           TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
-          SHA: ${{ steps.existing.outputs.sha || github.sha }}
+          SHA: ${{ steps.commit.outputs.sha }}
           # This run contains the gated publish job, so deep-link straight to it.
           ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -427,7 +445,7 @@ jobs:
     outputs:
       vsix: ${{ steps.package.outputs.vsix }}
     steps:
-      # The release commit: the triggering commit, or the publish-tag's commit.
+      # The release commit: the one Release Please tagged, or the publish-tag's.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -1349,7 +1349,7 @@ def test_existing_tag_step_runs_only_for_publish_tag_and_feeds_the_outputs():
     outputs = workflow()["jobs"]["release-please"]["outputs"]
     assert outputs["release_created"] == "${{ steps.existing.outputs.release_created || steps.release.outputs.release_created }}"
     assert outputs["tag_name"] == "${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}"
-    assert outputs["sha"] == "${{ steps.existing.outputs.sha || github.sha }}"
+    assert outputs["sha"] == "${{ steps.commit.outputs.sha }}"
     [checkout] = [s for s in workflow()["jobs"]["build"]["steps"] if s.get("uses", "").startswith("actions/checkout@")]
     assert checkout["with"]["ref"] == "${{ needs.release-please.outputs.sha }}"
 
@@ -1429,6 +1429,48 @@ def test_release_branch_that_is_not_a_protected_branch_is_refused(tmp_path, path
     refused(run_existing(tmp_path, TAG, paths), f"the release branch '{BRANCH}' must be a protected branch")
 
 
+# --- the commit the build checks out ---------------------------------------------------------------
+
+COMMIT = "Release commit"
+RELEASE_SHA = "c" * 40
+
+
+def run_release_commit(tmp_path: Path, sha: str) -> tuple[subprocess.CompletedProcess, dict[str, str]]:
+    output = tmp_path / "output"
+    output.touch()
+    result = run_bash(release_please_step(COMMIT)["run"], cwd=tmp_path, env={"SHA": sha, "GITHUB_OUTPUT": str(output)})
+    return result, read_outputs(output)
+
+
+def test_build_checks_out_the_commit_release_please_tagged_not_the_triggering_commit():
+    # A push that carries the release PR's merge and later commits, or a dispatch from a branch that
+    # moved on, runs at a later commit than the one Release Please tagged. Building github.sha would
+    # publish code the tag doesn't contain under the tag's version.
+    steps = workflow()["jobs"]["release-please"]["steps"]
+    names = [s.get("name") for s in steps]
+    s = release_please_step(COMMIT)
+    assert s["id"] == "commit"
+    assert s["if"] == "${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}"
+    assert s["env"]["SHA"] == "${{ steps.existing.outputs.sha || steps.release.outputs.sha }}"
+    assert names.index(EXISTING) < names.index(COMMIT) < names.index(NOTIFY)
+    assert "github.sha" not in yaml.safe_dump(workflow()["jobs"]["release-please"])
+
+
+@pytest.mark.parametrize("sha", [TAG_SHA, RELEASE_SHA])
+def test_release_commit_outputs_a_full_commit_sha(tmp_path, sha):
+    result, outputs = run_release_commit(tmp_path, sha)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert outputs == {"sha": sha}
+
+
+@pytest.mark.parametrize("sha", ["", "main", "A" * 40, "c" * 39, f"{RELEASE_SHA}\nsha=evil"])
+def test_release_commit_fails_without_a_full_commit_sha(tmp_path, sha):
+    result, outputs = run_release_commit(tmp_path, sha)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "::error::could not determine the commit this release tagged" in result.stdout
+    assert outputs == {}
+
+
 # --- the approval ping -----------------------------------------------------------------------------
 
 FAKE_CURL = f'''#!{sys.executable}
@@ -1450,7 +1492,7 @@ def test_approval_ping_runs_for_publish_tag_and_never_blocks_the_release():
         assert s["continue-on-error"] is True
     env = release_please_step(NOTIFY)["env"]
     assert env["TAG"] == "${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}"
-    assert env["SHA"] == "${{ steps.existing.outputs.sha || github.sha }}"
+    assert env["SHA"] == "${{ steps.commit.outputs.sha }}"
     assert "--max-time" in release_please_step(NOTIFY)["run"]
 
 
