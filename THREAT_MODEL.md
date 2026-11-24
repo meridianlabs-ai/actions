@@ -165,8 +165,9 @@ guarantee, and what is by design. To report a vulnerability, see
   in it, vsce, ovsx and their dependencies included, can mint a token for
   either registry. `publish-tag` lets a
   workflow_dispatch rebuild and publish an existing release tag; it is
-  validated as a tag shape, must name a GitHub release, and goes through
-  the same environment approval.
+  validated as a tag shape, must name a published release the Release Please
+  App created, must point at a commit on the run's release branch, which must
+  be protected, and goes through the same environment approval.
 - **A built docs site is repo output.** In `publish-docs.yml` the `build`
   job runs the calling repo's code at the release tag (its install, Quarto's
   pre- and post-render scripts, any executed cells), and the `deploy` job
