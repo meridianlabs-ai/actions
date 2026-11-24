@@ -424,14 +424,15 @@ runs:
     # ones included, by version and integrity hash. Like every step here,
     # their code can mint an OIDC token (see the header), so a new registry
     # release must not reach it unreviewed: npm ci installs exactly the lock
-    # file and fails if it disagrees with package.json, and Dependabot
-    # proposes updates after a 7-day cooldown. --ignore-scripts skips their
-    # lifecycle scripts. The native modules in the tree (ovsx's crc32 and
-    # keyring, vsce's optional keytar) ship prebuilt binaries and need no
-    # install script; keyring and keytar load only on the stored-token path,
-    # which neither publish command takes. The install goes to RUNNER_TEMP,
-    # which the runner empties after the job, not into the action's own
-    # directory.
+    # file and fails if it disagrees with package.json, and the tree changes
+    # only through a reviewed lock file diff (Dependabot, or by hand under
+    # .npmrc's 7-day min-release-age). --ignore-scripts skips lifecycle
+    # scripts. The native modules (@napi-rs/keyring, @node-rs/crc32) ship
+    # prebuilt binaries per platform. The one install script, @vscode/vsce-sign's
+    # postinstall, places a signing binary that vsce uses only for
+    # --sign-tool or signature files, which the publish command does not
+    # pass. The install goes to RUNNER_TEMP, which the runner empties after
+    # the job, not into the action's own directory.
     - name: Install marketplace CLIs
       shell: bash
       run: |

@@ -36,6 +36,7 @@ name: tests
       - "policy-text-check/**"
       - "policy/**"
       - "labels.json"
+      - ".github/dependabot.yml"
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
