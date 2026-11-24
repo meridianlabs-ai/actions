@@ -166,8 +166,11 @@ guarantee, and what is by design. To report a vulnerability, see
   either registry. `publish-tag` lets a
   workflow_dispatch rebuild and publish an existing release tag; it is
   validated as a tag shape, must name a published release the Release Please
-  App created, must point at a commit on the run's release branch, which must
-  be protected, and goes through the same environment approval.
+  App created at the tag's current commit, that commit must be on the run's
+  release branch, which must be protected, and it goes through the same
+  environment approval. The author check stops a release made by hand, not
+  one made by a workflow that reads the App key; the protected branch is the
+  bound on what gets built.
 - **A built docs site is repo output.** In `publish-docs.yml` the `build`
   job runs the calling repo's code at the release tag (its install, Quarto's
   pre- and post-render scripts, any executed cells), and the `deploy` job

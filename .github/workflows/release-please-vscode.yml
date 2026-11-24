@@ -59,10 +59,12 @@ name: Release Please — VS Code extension (reusable)
 # `publish-tag` (from the caller's workflow_dispatch input): publish an
 # EXISTING release tag that never reached the marketplaces. The release-please
 # job then also outputs that tag as created (after checking that it names a
-# published GitHub release the Release Please App created, that its commit is
-# on the run's release branch, which must be protected, and that this run
-# created no other), and the build job checks out the tag's commit instead of
-# the triggering one. Leave it empty for normal runs.
+# published GitHub release the Release Please App created at the tag's current
+# commit, that the commit is on the run's release branch, which must be
+# protected, and that this run created no other), and the build job checks out
+# the tag's commit instead of the triggering one. Leave it empty for normal
+# runs. A hotfix tag is retried from its hotfix branch, which must be
+# protected for the retry to pass.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
@@ -287,14 +289,20 @@ jobs:
 
       # publish-tag: hand an existing release tag to the build and the caller's
       # publish job. Anyone with contents: write can create or move a tag and
-      # create a release, so neither proves a release. The step requires a
-      # published (non-draft) release of exactly this tag, created by the
-      # Release Please App, and a tagged commit reachable from the branch
-      # Release Please manages in this run, which must be a protected branch.
+      # create a release, so neither proves a release. The step requires:
+      # - a published (non-draft) release of exactly this tag, authored by the
+      #   Release Please App, whose recorded commit (target_commitish, a SHA
+      #   for Release Please's releases) is the commit the tag points at now,
+      #   so a moved tag is refused. The author check rules out a release made
+      #   by hand; a workflow holding the App key could still make one, so the
+      #   branch check below is the one that bounds what gets built;
+      # - that commit reachable from the branch Release Please manages in this
+      #   run, which must be a protected branch.
       # The tag and the branch are caller inputs: each is validated against a
-      # shape that starts with a letter or digit and reaches gh only inside an
-      # API path. The build checks out the commit checked here, and the job
-      # summary and the approval ping name the tag, the commit and the branch.
+      # shape that starts with a letter or digit, and reaches gh only inside an
+      # API path. The build checks out the commit checked here. The job summary
+      # names the tag, the commit and the branch; the approval ping names the
+      # tag and the commit.
       - name: Existing release tag
         id: existing
         if: ${{ inputs.publish-tag != '' }}
@@ -310,7 +318,7 @@ jobs:
             echo "::error::publish-tag must be a release tag such as v1.2.3, got '$PUBLISH_TAG'"
             exit 1
           fi
-          if ! [[ "$RELEASE_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+          if ! [[ "$RELEASE_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$RELEASE_BRANCH" == *..* ]]; then
             echo "::error::the release branch must be a plain branch name, got '$RELEASE_BRANCH'"
             exit 1
           fi
@@ -318,16 +326,16 @@ jobs:
             echo "::error::this run created a release; publish it from this run, not with publish-tag"
             exit 1
           fi
-          # A failed lookup leaves its variable empty, so each check below
-          # reports it with an error annotation.
-          release="$(gh api "repos/$GH_REPO/releases/tags/$PUBLISH_TAG" --jq '"\(.tag_name) \(.draft) \(.author.login)"')" || true
-          if [ "$release" != "$PUBLISH_TAG false $RELEASE_AUTHOR" ]; then
-            echo "::error::publish-tag '$PUBLISH_TAG' does not name a published GitHub release created by $RELEASE_AUTHOR"
-            exit 1
-          fi
+          # A failed lookup prints gh's error, which fails the check after it,
+          # so each failure ends in that check's error annotation.
           sha="$(gh api "repos/$GH_REPO/commits/refs/tags/$PUBLISH_TAG" --jq .sha)" || true
           if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::could not resolve publish-tag '$PUBLISH_TAG' to a commit"
+            exit 1
+          fi
+          release="$(gh api "repos/$GH_REPO/releases/tags/$PUBLISH_TAG" --jq '"\(.tag_name) \(.draft) \(.author.login) \(.target_commitish)"')" || true
+          if [ "$release" != "$PUBLISH_TAG false $RELEASE_AUTHOR $sha" ]; then
+            echo "::error::publish-tag '$PUBLISH_TAG' does not name a published GitHub release created by $RELEASE_AUTHOR at $sha"
             exit 1
           fi
           branch="$(gh api "repos/$GH_REPO/branches/$RELEASE_BRANCH" --jq '"\(.protected) \(.commit.sha)"')" || true
@@ -367,8 +375,8 @@ jobs:
       # one, @-mentioning the approvers, so the publish awaiting approval is
       # noticed (GitHub's own deployment-review notifications are unreliable —
       # e.g. suppressed for the actor who triggered the run). The message names
-      # the commit the build checks out and its branch. No-ops if the webhook
-      # secret is unset. A failed ping must not block the release.
+      # the commit the build checks out. No-ops if the webhook secret is unset.
+      # A failed or stalled ping must not block the release.
       - name: Notify Slack — release awaiting publish approval
         continue-on-error: true
         if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
@@ -378,7 +386,6 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
           SHA: ${{ steps.existing.outputs.sha || github.sha }}
-          BRANCH: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
           # This run contains the gated publish job, so deep-link straight to it.
           ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -396,8 +403,8 @@ jobs:
               fi
             done
           fi
-          text=":rocket: *${REPO}* ${TAG} release (commit ${SHA:0:12} on ${BRANCH}) — Marketplace publish is *awaiting approval*.${mentions} Review: ${ACTIONS_URL}"
-          curl -sf -X POST -H 'Content-type: application/json' \
+          text=":rocket: *${REPO}* ${TAG} release (commit ${SHA:0:12}) — Marketplace publish is *awaiting approval*.${mentions} Review: ${ACTIONS_URL}"
+          curl -sf --max-time 30 -X POST -H 'Content-type: application/json' \
             --data "$(jq -n --arg t "$text" '{text: $t}')" \
             "$SLACK_APPROVALS_WEBHOOK_URL"
 
