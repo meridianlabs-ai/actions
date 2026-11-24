@@ -36,6 +36,7 @@ name: tests
       - "policy-text-check/**"
       - "policy/**"
       - "labels.json"
+      - ".github/dependabot.yml"
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -60,12 +61,16 @@ jobs:
           python-version: "3.12"
           project-install: skip
       # The VS Code release tests run the publish job's cross-check step against
-      # vsce's own reader: install the vsce release-please-vscode.yml pins, on
-      # the Node its publish job uses by default (vsce 4 needs Node 22 or later).
+      # vsce's own reader: install the CLIs vscode-publish locks, the way its
+      # install step does, on the Node its publish job uses by default (vsce 4
+      # needs Node 22 or later).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - run: npm install -g --ignore-scripts @vscode/vsce@4.1.0
+      - name: Install the locked marketplace CLIs
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --prefix vscode-publish
+          echo "$PWD/vscode-publish/node_modules/.bin" >> "$GITHUB_PATH"
       # The docs link check tests run lychee against a local server: install
       # the release docs-link-check.yml pins, checked against its digest.
       - name: Install lychee

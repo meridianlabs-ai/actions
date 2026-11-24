@@ -85,6 +85,14 @@ def test_the_tests_workflow_runs_on_every_pull_request():
     assert filters == set(), f"tests.yml pull_request has a {sorted(filters)} filter"
 
 
+def test_dependabot_updates_the_vscode_publish_lock_file_after_the_cooldown():
+    config = yaml.safe_load((GITHUB / "dependabot.yml").read_text())
+    [npm] = [u for u in config["updates"] if u["package-ecosystem"] == "npm"]
+    assert npm["directory"] == "/vscode-publish"
+    assert npm["cooldown"] == {"default-days": 7}
+    assert npm["commit-message"]["prefix"] == "ci"
+
+
 def test_dependabot_skips_self_pins_and_splits_out_setup_uv():
     config = yaml.safe_load((GITHUB / "dependabot.yml").read_text())
     (actions,) = [u for u in config["updates"] if u["package-ecosystem"] == "github-actions"]
