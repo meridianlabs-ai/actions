@@ -27,7 +27,7 @@ where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_release_notes_heading.py` the release workflows' heading rename,
 `tests/test_build_python_dist_workflow.py` the shared build job's permissions and steps, and
 `tests/test_repository.py` checks that no workflow names a retired
-Anthropic key, that every App token step names its permissions, and that
+secret, that every App token step names its permissions, and that
 `tests.yml` runs on every pull request).
 `.github/workflows/tests.yml` runs them in CI on every pull request, and on
 every push to `main` that touches a path in its `push.paths` list.

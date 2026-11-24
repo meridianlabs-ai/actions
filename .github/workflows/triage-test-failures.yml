@@ -24,8 +24,8 @@
 # scoped to `workspace:inference` in the triage workspace (spend-capped,
 # separate from the one the test suites' ANTHROPIC_API_KEY bills), living at
 # most 600 s. The agent may read and leak it; what limits it is the cap, the
-# scope and the lifetime. No MARVIN_TOKEN, no Slack token and no long-lived
-# Anthropic key are in the job.
+# scope and the lifetime. No marvin credential, no Slack token and no
+# long-lived Anthropic key are in the job.
 #
 # The Claude process runs through meridianlabs-ai/agents' launcher, as the
 # agents repository's own jobs run it: Claude Code root-owned at the version
@@ -66,11 +66,11 @@
 # past the composer, after a compromise of the agent's runner, can land only
 # the one fork issue action the issue policies allow. When no manifest
 # reaches land at all (the agent job's upload failed, or it ended before
-# uploading), land posts its own fixed "did not complete" reply to that
-# same destination and fails the run. The marvin identity
-# (the app secrets MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY, the token
-# they mint, and the MARVIN_TOKEN fallback) and the SLACK_* secrets appear in
-# `land` only.
+# uploading), or land cannot mint its token, land posts its own fixed "did
+# not complete" reply to that same destination and fails the run. The
+# marvin identity (the app secrets MARVIN_APP_CLIENT_ID /
+# MARVIN_APP_PRIVATE_KEY, the token they mint) and the SLACK_* secrets
+# appear in `land` only.
 #
 # The manifest's `slack` field, `issues[].assignees` / `issues[].reopen`,
 # land's `slack-*` inputs and the Atlas Todo status came to the landing pair
@@ -538,7 +538,7 @@ jobs:
         with:
           grant: none
 
-      # No MARVIN_TOKEN, no Slack env, no Anthropic key: the agent needs only
+      # No marvin credential, no Slack env, no Anthropic key: the agent needs only
       # reads — fork issues (public) and this run's own data via the job
       # token — file writes under the landing directory, and the model, which
       # it reaches with the WIF token the action mints. The four WIF inputs
@@ -1184,9 +1184,9 @@ jobs:
   # marvin (created and adopted issues go on Atlas at Todo by node ID; the
   # assignee is added only to an unowned issue), post the Slack message to the
   # destination the context job validated, report the manifest's error and
-  # fail the run when it says so. When no manifest arrives, the last step
-  # posts a fixed "did not complete" reply to that destination instead, so
-  # the thread is not left silent. Skipped when the agent job was skipped
+  # fail the run when it says so. When no manifest arrives or the mint
+  # fails, the last step posts a fixed "did not complete" reply to that
+  # destination instead, so the thread is not left silent. Skipped when the agent job was skipped
   # (trigger not met: no artifact) or when someone cancelled the workflow,
   # whatever the agent job's result: a cancelled run posts nothing. An agent
   # job that hits its timeout-minutes also ends `cancelled`, but
@@ -1199,24 +1199,19 @@ jobs:
     permissions:
       contents: read
       actions: read           # artifact download
-    env:
-      # A step-level `if` cannot read secrets; this carries the one fact the
-      # mint step needs: whether both app secrets are configured.
-      MARVIN_APP_CONFIGURED: ${{ secrets.MARVIN_APP_CLIENT_ID != '' && secrets.MARVIN_APP_PRIVATE_KEY != '' }}
     steps:
       # The marvin identity for this job's writes: a one-hour installation
       # token of the meridian-marvin GitHub App (Phase 2 of the credential
       # separation), minted for the one repository the job writes to and
       # only the permissions it uses, revoked by the action's post step at
-      # job end. Falls back to the MARVIN_TOKEN PAT until the app secrets
-      # reach every caller; the PAT read goes with the retirement item. Only
-      # this job may mint: the private key and the minted token never reach
-      # a job that runs the agent.
+      # job end. Later steps read no other marvin credential, and a run
+      # without the app secrets fails here. Only this job may mint: the
+      # private key and the minted token never reach a job that runs the
+      # agent.
       # The action's `app-id` input takes the App ID or the Client ID; v2 has
       # no `client-id` input.
       - name: Mint a fork-scoped marvin token
         id: mint
-        if: env.MARVIN_APP_CONFIGURED == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -1235,16 +1230,16 @@ jobs:
           # refuse-bundle nothing is pushed and no PR is touched, so the
           # token needs neither contents nor pull-requests. The only job
           # that names it.
-          token: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          token: ${{ steps.mint.outputs.token }}
           refuse-bundle: "true"
           # No PR either: a manifest carrying `pr` (open or adopt a PR for
           # a branch that already exists on origin and label it — `auto`
           # opts a PR into the autonomous loops, whose gates accept the
           # machine account as the labeler) or `handback` (the live
           # `@review`) is refused whole. refuse-bundle alone does not close
-          # this: `pr.open` needs no push, and while the minted token
-          # reaches only the fork's issues, the MARVIN_TOKEN fallback above
-          # reaches this repository's pull requests (review round 1, B1).
+          # this: `pr.open` needs no push (review round 1, B1). The minted
+          # token reaches only the fork's issues today; this keeps the
+          # refusal if its permissions ever widen.
           refuse-pr: "true"
           # The one repo the manifest's issues[] may name; the validator
           # refuses every other.
@@ -1264,8 +1259,8 @@ jobs:
           # writes one, but this job assumes the agent job's runner may be
           # compromised (design/agent-jobs-workload-identity.md → triage
           # after the change): under the default `*` a manifest uploaded after
-          # the composer ran could post comments on any issue or PR of this
-          # repository, which the MARVIN_TOKEN fallback reaches. The one fork
+          # the composer ran could post comments on any issue or PR the
+          # token reaches. The one fork
           # issue action triage may take travels in `issues[]`, under the
           # policies above.
           comment-numbers: event
@@ -1286,17 +1281,19 @@ jobs:
       # The manifest is what carries the agent job's own "did not complete"
       # text, so without this step the thread heard nothing (2026-11-02, run
       # 41462718732: harden-runner refused all egress, the upload failed with
-      # ECONNREFUSED and land failed on the download). It runs only when Land
-      # failed and the composite's download directory holds no manifest.json;
-      # a manifest that arrived, valid or not, is land's to report, as
-      # before. The text is this step's own, never the agent job's, and the
+      # ECONNREFUSED and land failed on the download). It replies when the
+      # mint failed (the app secrets missing or refused), which skips Land,
+      # or when Land failed and the composite's download directory holds no
+      # manifest.json; a manifest that arrived, valid or not, is land's to
+      # report, as before. The text is this step's own, never the agent job's, and the
       # destination is the one Land is given, from the context job. A
       # context that failed gets no reply here either, as the compose step
       # decides for that case, and a workflow cancelled while Land ran gets
       # none (`!cancelled()`). The step always fails the run.
       - name: Report a triage that landed no manifest
-        if: always() && !cancelled() && needs.context.result == 'success' && steps.land.outcome == 'failure'
+        if: always() && !cancelled() && needs.context.result == 'success' && (steps.mint.outcome == 'failure' || steps.land.outcome == 'failure')
         env:
+          MINT_OUTCOME: ${{ steps.mint.outcome }}
           # Where the `land` composite's download step puts the artifact
           # (tests/test_triage_workflow.py checks it against agents@main).
           MANIFEST: ${{ runner.temp }}/landing/manifest.json
@@ -1306,11 +1303,16 @@ jobs:
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
-          if [ -f "$MANIFEST" ]; then
+          if [ "$MINT_OUTCOME" = "failure" ]; then
+            echo "::error::land: the marvin token could not be minted; nothing was landed."
+            text="⚠️ Triage did not complete: the land job could not mint its GitHub token. See the run log: $RUN_URL"
+          elif [ -f "$MANIFEST" ]; then
             echo "land: the landing manifest arrived; the Land step reported its own failure."
             exit 0
+          else
+            echo "::error::land: no landing manifest reached this job (the agent job uploaded none, or the download failed)."
+            text="⚠️ Triage did not complete: no landing manifest reached the land job. See the run log: $RUN_URL"
           fi
-          echo "::error::land: no landing manifest reached this job (the agent job uploaded none, or the download failed)."
           # The same channel shapes Land accepts: SLACK_CHANNEL_ID may name a
           # D conversation.
           if [ -z "${SLACK_TOKEN:-}" ] || ! [[ "$SLACK_CHANNEL" =~ ^[CGD][A-Z0-9]{8,}$ ]]; then
@@ -1322,7 +1324,7 @@ jobs:
             exit 1
           fi
           body=$(jq -n --arg c "$SLACK_CHANNEL" --arg t "$SLACK_THREAD_TS" \
-                   --arg text "⚠️ Triage did not complete: no landing manifest reached the land job. See the run log: $RUN_URL" \
+                   --arg text "$text" \
                    '{channel: $c, text: $text} + (if $t != "" then {thread_ts: $t} else {} end)')
           # The token reaches curl through a file (process substitution),
           # never an argument: arguments show in `ps`. One attempt, bounded,

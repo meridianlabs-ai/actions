@@ -25,8 +25,8 @@
 # artifact, checks the collected data against the sha256 values recorded
 # before the agent ran, validates report.md and findings.json, and only then
 # writes fork issues and Atlas cards as marvin. The publisher never shares a
-# runner with the agent, and no marvin identity (MARVIN_TOKEN, the app
-# secrets, the minted token) may appear in analyze. Issue and Atlas writes
+# runner with the agent, and no marvin identity (the app secrets, the
+# minted token) may appear in analyze. Issue and Atlas writes
 # consume the validated report.md and findings.json plus the pinned summary.
 # Validation constrains the proposals' shape, not their factual correctness.
 #
@@ -61,8 +61,6 @@
 #   GitHub App, used only in publish, which mints a token scoped to the
 #   inspect_ai fork with issues and organization-projects write (its only
 #   writes: fork issues and comments, assignees, Atlas items).
-# - MARVIN_TOKEN: the PAT the publish job falls back to while the app
-#   secrets roll out; used only in publish.
 #
 # Egress: harden-runner runs in analyze with egress-policy block.
 # allowed-endpoints is the egress observed in audit mode on run
@@ -442,24 +440,20 @@ jobs:
       CI_PERF_RUN_ATTEMPT: ${{ github.run_attempt }}
       PYTHONDONTWRITEBYTECODE: "1"
       CI_PERF_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      # A step-level `if` cannot read secrets; this carries the one fact the
-      # mint step needs: whether both app secrets are configured.
-      MARVIN_APP_CONFIGURED: ${{ secrets.MARVIN_APP_CLIENT_ID != '' && secrets.MARVIN_APP_PRIVATE_KEY != '' }}
 
     steps:
       # The marvin identity for this job's writes: a one-hour installation
       # token of the meridian-marvin GitHub App (Phase 2 of the credential
       # separation), minted for the one repository the job writes to and
       # only the permissions it uses, revoked by the action's post step at
-      # job end. Falls back to the MARVIN_TOKEN PAT until the app secrets
-      # reach every caller; the PAT read goes with the retirement item. Only
-      # this job may mint: the private key and the minted token never reach
-      # a job that runs the agent.
+      # job end. Later steps read no other marvin credential, and a run
+      # without the app secrets fails here. Only this job may mint: the
+      # private key and the minted token never reach a job that runs the
+      # agent.
       # The action's `app-id` input takes the App ID or the Client ID; v2 has
       # no `client-id` input.
       - name: Mint a fork-scoped marvin token
         id: mint
-        if: env.MARVIN_APP_CONFIGURED == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.MARVIN_APP_CLIENT_ID }}
@@ -513,7 +507,7 @@ jobs:
       - name: Publish fork issues and trend summary
         id: publish
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
         run: |
           rm -rf -- "$CI_PERF_OUTPUT_DIR/published.json"
           python inspect_ai/.claude/skills/ci-perf/scripts/publish_ci_findings.py \
@@ -527,7 +521,7 @@ jobs:
       - name: Add published issues to Atlas and assign unowned ones to Eric
         id: atlas
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token || secrets.MARVIN_TOKEN }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
         run: |
           python - <<'PYTHON'
           import json
