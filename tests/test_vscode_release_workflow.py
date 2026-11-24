@@ -1435,11 +1435,25 @@ COMMIT = "Release commit"
 RELEASE_SHA = "c" * 40
 
 
-def run_release_commit(tmp_path: Path, sha: str) -> tuple[subprocess.CompletedProcess, dict[str, str]]:
-    output = tmp_path / "output"
-    output.touch()
-    result = run_bash(release_please_step(COMMIT)["run"], cwd=tmp_path, env={"SHA": sha, "GITHUB_OUTPUT": str(output)})
-    return result, read_outputs(output)
+def run_release_commit(tmp_path: Path, sha: str, tag: str = TAG, paths: dict | None = None) -> ExistingRun:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(FAKE_GH)
+    (bin_dir / "gh").chmod(0o755)
+    output, log = tmp_path / "output", tmp_path / "gh.log"
+    for f in (output, log):
+        f.touch()
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "SHA": sha,
+        "TAG": tag,
+        "GH_REPO": REPO,
+        "GITHUB_OUTPUT": str(output),
+        "FAKE_GH_LOG": str(log),
+        "FAKE_API": json.dumps({f"commits/refs/tags/{tag}": {"sha": sha}} if paths is None else paths),
+    }
+    result = run_bash(release_please_step(COMMIT)["run"], cwd=tmp_path, env=env)
+    return ExistingRun(result, read_outputs(output), "", [json.loads(line) for line in log.read_text().splitlines()])
 
 
 def test_build_checks_out_the_commit_release_please_tagged_not_the_triggering_commit():
@@ -1452,23 +1466,46 @@ def test_build_checks_out_the_commit_release_please_tagged_not_the_triggering_co
     assert s["id"] == "commit"
     assert s["if"] == "${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}"
     assert s["env"]["SHA"] == "${{ steps.existing.outputs.sha || steps.release.outputs.sha }}"
+    assert s["env"]["TAG"] == "${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}"
+    assert s["env"]["GH_REPO"] == "${{ github.repository }}"
+    # With an empty sha output the build's checkout would fall back to the triggering commit.
+    assert "continue-on-error" not in s
     assert names.index(EXISTING) < names.index(COMMIT) < names.index(NOTIFY)
     assert "github.sha" not in yaml.safe_dump(workflow()["jobs"]["release-please"])
 
 
+@pytest.mark.parametrize("tag", [TAG, VERSION, f"inspect-ai-{TAG}"])
 @pytest.mark.parametrize("sha", [TAG_SHA, RELEASE_SHA])
-def test_release_commit_outputs_a_full_commit_sha(tmp_path, sha):
-    result, outputs = run_release_commit(tmp_path, sha)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert outputs == {"sha": sha}
+def test_release_commit_outputs_the_tags_commit(tmp_path, sha, tag):
+    run = run_release_commit(tmp_path, sha, tag)
+    assert run.result.returncode == 0, run.result.stdout + run.result.stderr
+    assert run.outputs == {"sha": sha}
+    assert run.gh_calls == [["api", f"repos/{REPO}/commits/refs/tags/{tag}", "--jq", ".sha"]]
 
 
 @pytest.mark.parametrize("sha", ["", "main", "A" * 40, "c" * 39, f"{RELEASE_SHA}\nsha=evil"])
 def test_release_commit_fails_without_a_full_commit_sha(tmp_path, sha):
-    result, outputs = run_release_commit(tmp_path, sha)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "::error::could not determine the commit this release tagged" in result.stdout
-    assert outputs == {}
+    run = run_release_commit(tmp_path, sha, paths={})
+    refused(run, "could not determine the commit this release tagged")
+    assert run.gh_calls == []
+
+
+@pytest.mark.parametrize("tag", ["", "main", "v0.10", f"-R-{TAG}", f"a/b-{TAG}", f"{TAG}\nsha=evil"])
+def test_release_commit_fails_on_a_tag_that_is_not_a_release_tag(tmp_path, tag):
+    run = run_release_commit(tmp_path, RELEASE_SHA, tag, paths={})
+    refused(run, "the release tag must be a release tag")
+    assert run.gh_calls == []
+
+
+def test_release_commit_fails_when_the_tag_points_elsewhere(tmp_path):
+    # GitHub keeps a tag that already exists when a release is created for it, while Release Please
+    # still reports the release's target_commitish, so the two can differ.
+    run = run_release_commit(tmp_path, RELEASE_SHA, paths={f"commits/refs/tags/{TAG}": {"sha": TAG_SHA}})
+    refused(run, f"release tag '{TAG}' points at {TAG_SHA}, not {RELEASE_SHA}")
+
+
+def test_release_commit_fails_when_the_tag_does_not_resolve(tmp_path):
+    refused(run_release_commit(tmp_path, RELEASE_SHA, paths={}), f"could not resolve release tag '{TAG}' to a commit")
 
 
 # --- the approval ping -----------------------------------------------------------------------------

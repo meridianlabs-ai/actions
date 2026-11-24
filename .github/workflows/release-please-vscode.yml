@@ -62,9 +62,9 @@ name: Release Please — VS Code extension (reusable)
 # published GitHub release the Release Please App created at the tag's current
 # commit, that the commit is on the run's release branch, which must be
 # protected, and that this run created no other), and the build job checks out
-# the tag's commit instead of the triggering one. Leave it empty for normal
-# runs. A hotfix tag is retried from its hotfix branch, which must be
-# protected for the retry to pass.
+# the tag's commit, as it does for a release this run creates. Leave it empty
+# for normal runs. A hotfix tag is retried from its hotfix branch, which must
+# be protected for the retry to pass.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
@@ -176,9 +176,10 @@ jobs:
           manifest-file: ${{ inputs.manifest-file }}
           # Default to the branch the run was triggered from (github.ref_name):
           # push to main → main; a workflow_dispatch from a maintenance branch →
-          # that branch. This keeps the Release Please target and the build
-          # checkout on the SAME branch, so a hotfix is driven solely by the
-          # "Use workflow from" branch selector — no separate input to mismatch.
+          # that branch. This keeps the Release Please target on the run's
+          # branch, so a hotfix is driven solely by the "Use workflow from"
+          # branch selector — no separate input to mismatch. The build checks
+          # out the commit Release Please releases (the Release commit step).
           # The target-branch input remains an optional explicit override.
           target-branch: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
 
@@ -359,19 +360,38 @@ jobs:
           echo "Publishing existing release \`$PUBLISH_TAG\` at \`$sha\`, on \`$RELEASE_BRANCH\`." >> "$GITHUB_STEP_SUMMARY"
 
       # The commit the build checks out and the ping names: the publish-tag's
-      # commit, or the one Release Please tagged in this run (its `sha` output,
-      # the release's target_commitish). Not github.sha: a push that carries the
-      # release PR's merge and later commits, or a dispatch from a branch that
-      # has moved on, runs at a later commit, and building it would publish
-      # code the tag doesn't contain.
+      # commit, or the one Release Please released in this run (its `sha`
+      # output, the release's target_commitish). Not github.sha: a push that
+      # carries the release PR's merge and later commits, or a dispatch from a
+      # branch that has moved on, runs at a later commit, and building it would
+      # publish code the tag doesn't contain. GitHub keeps a tag that already
+      # exists when a release is created for it, so the step also requires the
+      # tag to point at that commit. No continue-on-error: an empty `sha`
+      # output would make the build check out the triggering commit.
       - name: Release commit
         id: commit
         if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
         env:
           SHA: ${{ steps.existing.outputs.sha || steps.release.outputs.sha }}
+          TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::could not determine the commit this release tagged"
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*-)?v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::the release tag must be a release tag such as v1.2.3, got '$TAG'"
+            exit 1
+          fi
+          tagged="$(gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha)" || true
+          if ! [[ "$tagged" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve release tag '$TAG' to a commit"
+            exit 1
+          fi
+          if [ "$tagged" != "$SHA" ]; then
+            echo "::error::release tag '$TAG' points at $tagged, not $SHA"
             exit 1
           fi
           { echo "sha<<EOF"; echo "$SHA"; echo "EOF"; } >> "$GITHUB_OUTPUT"
