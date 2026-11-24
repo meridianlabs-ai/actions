@@ -284,7 +284,11 @@ guarantee, and what is by design. To report a vulnerability, see
   ref before the checkout. When a caller passes `tag`, that step takes the
   commit the release recorded and refuses unless the tag still points at it
   and it is the run's commit or an ancestor of it; the checkout uses that
-  commit, so moving the tag later, or before a re-run, changes nothing. That job, which runs the calling repo's code, holds
+  commit, so moving the tag later, or before a re-run, changes nothing. A
+  writer who moves the tag and also edits the release's target_commitish to
+  match can still choose an older commit from the run's history; that needs
+  the same access as moving the tag. That job, which runs the calling repo's
+  code, holds
   only the read-only job token, persists no credential into its checkout and
   restores and saves no Actions cache. Only the `deploy` job holds
   `pages: write` and `id-token: write`, and it runs no step but

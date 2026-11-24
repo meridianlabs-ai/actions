@@ -172,7 +172,7 @@ def test_the_tag_input_of_a_published_release_passes_as_its_commit(tmp_path, com
     assert result.output == f"ref<<EOF\n{TAG_SHA}\nEOF\n"
 
 
-@pytest.mark.parametrize("compare", ["behind", "diverged", None])
+@pytest.mark.parametrize("compare", ["behind", "diverged"])
 def test_a_tag_input_whose_commit_is_not_in_the_runs_history_is_refused(tmp_path, compare):
     # The github-pages environment admits the run's branch, so only commits
     # that branch already holds may be rendered.
@@ -184,7 +184,7 @@ def test_a_tag_input_whose_commit_is_not_in_the_runs_history_is_refused(tmp_path
     assert result.output == ""
 
 
-@pytest.mark.parametrize("commits", [{}, {"0.2.72": "c" * 40}, {"0.2.72": "main"}, {"0.2.72": "B" * 40}], ids=["missing", "moved", "name", "upper"])
+@pytest.mark.parametrize("commits", [{"0.2.72": "c" * 40}, {"0.2.72": "main"}, {"0.2.72": "B" * 40}], ids=["moved", "name", "upper"])
 def test_a_tag_input_that_does_not_point_at_its_releases_commit_is_refused(tmp_path, commits):
     # The release records the commit it was cut from; a tag moved since, even
     # to another commit in the run's history, would render different docs from
@@ -207,13 +207,27 @@ def test_a_tag_input_whose_release_records_no_commit_is_refused(tmp_path, target
     assert result.output == ""
 
 
-@pytest.mark.parametrize("endpoint", ["releases/", "commits/", "compare/"])
-def test_a_failed_lookup_is_refused_even_if_it_printed_an_answer(tmp_path, endpoint):
+@pytest.mark.parametrize(
+    ("endpoint", "error"),
+    [
+        ("releases/", "no published release has this tag"),
+        ("commits/", "could not look up the commit of the tag 0.2.72"),
+        ("compare/", f"could not compare {TAG_SHA} with the run's commit {RUN_SHA}"),
+    ],
+)
+def test_a_failed_lookup_is_refused_even_if_it_printed_an_answer(tmp_path, endpoint, error):
     result = run_check_ref(
         tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", failing=(endpoint,)
     )
     assert result.returncode == 1
+    assert error in result.stdout
     assert result.output == ""
+
+
+def test_a_tag_input_whose_commit_lookup_404s_says_the_lookup_failed(tmp_path):
+    result = run_check_ref(tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", commits={})
+    assert result.returncode == 1
+    assert "could not look up the commit of the tag 0.2.72" in result.stdout
 
 
 def test_a_tag_input_is_url_encoded_in_the_commit_lookup(tmp_path):
