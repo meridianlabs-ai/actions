@@ -3,9 +3,9 @@
 The triage and ci-perf agent jobs mint their model credential through
 Anthropic workload identity federation, and the model broker that held their
 long-lived keys is gone (design/agent-jobs-workload-identity.md, step 5). The
-two org secrets are deleted after that, and a workflow that still named one
-would get an empty value rather than an error, so no workflow or action may
-name either.
+marvin writes mint a GitHub App token, and the MARVIN_TOKEN PAT they fell back
+to is retired. A workflow that still named a retired secret would get an empty
+value rather than an error, so no workflow or action may name one.
 
 An App installation token gets every permission the App holds unless the
 step that mints it names fewer, so every mint step names its permissions.

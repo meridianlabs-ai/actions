@@ -1818,7 +1818,7 @@ def test_no_manifest_reports_a_refused_post(tmp_path):
     assert "::error::land: the did-not-complete reply was not posted: channel_not_found" in r.stdout
 
 
-def test_the_no_manifest_reply_goes_where_land_posts_and_only_after_land_failed():
+def test_the_no_manifest_reply_goes_where_land_posts_and_only_after_land_or_the_mint_failed():
     s = job_step("land", NO_MANIFEST_STEP)
     inputs = land_inputs()
     assert s["if"] == ("always() && !cancelled() && needs.context.result == 'success' && "

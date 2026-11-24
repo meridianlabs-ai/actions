@@ -66,10 +66,11 @@
 # past the composer, after a compromise of the agent's runner, can land only
 # the one fork issue action the issue policies allow. When no manifest
 # reaches land at all (the agent job's upload failed, or it ended before
-# uploading), land posts its own fixed "did not complete" reply to that
-# same destination and fails the run. The marvin identity
-# (the app secrets MARVIN_APP_CLIENT_ID / MARVIN_APP_PRIVATE_KEY, the token
-# they mint) and the SLACK_* secrets appear in `land` only.
+# uploading), or land cannot mint its token, land posts its own fixed "did
+# not complete" reply to that same destination and fails the run. The
+# marvin identity (the app secrets MARVIN_APP_CLIENT_ID /
+# MARVIN_APP_PRIVATE_KEY, the token they mint) and the SLACK_* secrets
+# appear in `land` only.
 #
 # The manifest's `slack` field, `issues[].assignees` / `issues[].reopen`,
 # land's `slack-*` inputs and the Atlas Todo status came to the landing pair
@@ -1183,9 +1184,9 @@ jobs:
   # marvin (created and adopted issues go on Atlas at Todo by node ID; the
   # assignee is added only to an unowned issue), post the Slack message to the
   # destination the context job validated, report the manifest's error and
-  # fail the run when it says so. When no manifest arrives, the last step
-  # posts a fixed "did not complete" reply to that destination instead, so
-  # the thread is not left silent. Skipped when the agent job was skipped
+  # fail the run when it says so. When no manifest arrives or the mint
+  # fails, the last step posts a fixed "did not complete" reply to that
+  # destination instead, so the thread is not left silent. Skipped when the agent job was skipped
   # (trigger not met: no artifact) or when someone cancelled the workflow,
   # whatever the agent job's result: a cancelled run posts nothing. An agent
   # job that hits its timeout-minutes also ends `cancelled`, but
@@ -1280,16 +1281,15 @@ jobs:
       # The manifest is what carries the agent job's own "did not complete"
       # text, so without this step the thread heard nothing (2026-11-02, run
       # 41462718732: harden-runner refused all egress, the upload failed with
-      # ECONNREFUSED and land failed on the download). It runs only when Land
-      # failed and the composite's download directory holds no manifest.json;
-      # a manifest that arrived, valid or not, is land's to report, as
-      # before. The text is this step's own, never the agent job's, and the
+      # ECONNREFUSED and land failed on the download). It replies when the
+      # mint failed (the app secrets missing or refused), which skips Land,
+      # or when Land failed and the composite's download directory holds no
+      # manifest.json; a manifest that arrived, valid or not, is land's to
+      # report, as before. The text is this step's own, never the agent job's, and the
       # destination is the one Land is given, from the context job. A
       # context that failed gets no reply here either, as the compose step
       # decides for that case, and a workflow cancelled while Land ran gets
       # none (`!cancelled()`). The step always fails the run.
-      # A failed mint (the app secrets missing or refused) skips Land, so
-      # this step also runs then and posts its own reply for that case.
       - name: Report a triage that landed no manifest
         if: always() && !cancelled() && needs.context.result == 'success' && (steps.mint.outcome == 'failure' || steps.land.outcome == 'failure')
         env:
