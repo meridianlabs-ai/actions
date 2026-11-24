@@ -281,10 +281,10 @@ guarantee, and what is by design. To report a vulnerability, see
   its result.
 - The docs publish workflow deploys only from the tag of a published,
   non-draft release: the first step of its `build` job refuses any other
-  ref before the checkout. When a caller passes `tag`, that step resolves the
-  tag to a commit once and refuses unless the commit is the run's commit or
-  an ancestor of it; the checkout uses that commit, so moving the tag later,
-  or before a re-run, changes nothing. That job, which runs the calling repo's code, holds
+  ref before the checkout. When a caller passes `tag`, that step takes the
+  commit the release recorded and refuses unless the tag still points at it
+  and it is the run's commit or an ancestor of it; the checkout uses that
+  commit, so moving the tag later, or before a re-run, changes nothing. That job, which runs the calling repo's code, holds
   only the read-only job token, persists no credential into its checkout and
   restores and saves no Actions cache. Only the `deploy` job holds
   `pages: write` and `id-token: write`, and it runs no step but

@@ -11,9 +11,9 @@ name: Publish docs (reusable)
 # Jobs:
 # - build: first refuses any ref that is not the tag of a published release
 #   (`tag` when given, else the run's ref), so docs for unreleased code never
-#   reach the site. With `tag`, it resolves the tag to a commit once, which
-#   must be the run's commit or an ancestor of it, and checks out that commit;
-#   without, the run's own commit. It installs the project from uv.lock and
+#   reach the site. With `tag`, it checks out the commit the release recorded,
+#   which the tag must still point at and which must be the run's commit or an
+#   ancestor of it, and restores the tag there; without, the run's own commit. It installs the project from uv.lock and
 #   runs `quarto render`. It runs the repo's code, so
 #   it holds only the read-only job token, persists no checkout credential and
 #   uses no Actions cache.
@@ -102,8 +102,8 @@ jobs:
             refs/tags/*)
               tag="${REF#refs/tags/}"
               encoded="$(jq -rn --arg t "$tag" '$t | @uri')"
-              if ! gh api "repos/$REPO/releases/tags/$encoded" \
-                  | jq -e --arg t "$tag" '.tag_name == $t and .draft == false' > /dev/null; then
+              if ! release="$(gh api "repos/$REPO/releases/tags/$encoded")" \
+                  || ! jq -e --arg t "$tag" '.tag_name == $t and .draft == false' <<< "$release" > /dev/null; then
                 echo "::error::Refusing to publish docs from $REF: no published release has this tag."
                 exit 1
               fi
@@ -112,18 +112,23 @@ jobs:
               if [ -z "$TAG" ]; then
                 exit 0
               fi
-              # With `tag`, resolve it to a commit once and check out that
-              # commit: a tag can be moved after this check, or before a
-              # re-run of this job. The commit must be the run's commit or an
-              # ancestor of it, since the github-pages environment admits the
-              # run's branch, not the tag.
-              sha="$(gh api "repos/$REPO/commits/refs/tags/$encoded" | jq -r .sha)" || true
+              # With `tag`, check out the commit the release recorded
+              # (target_commitish, a SHA for Release Please's releases) and
+              # require the tag to still point at it, so a tag moved after
+              # this check, or before a re-run, changes nothing. The commit
+              # must also be the run's commit or an ancestor of it, since the
+              # github-pages environment admits the run's branch, not the tag.
+              sha="$(jq -r '.target_commitish // ""' <<< "$release")"
               if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-                echo "::error::Refusing to publish docs: could not resolve the tag $tag to a commit."
+                echo "::error::Refusing to publish docs: the release of $tag records no commit (target_commitish '$sha')."
                 exit 1
               fi
-              status="$(gh api "repos/$REPO/compare/$sha...$RUN_SHA" | jq -r .status)" || true
-              if [ "$status" != identical ] && [ "$status" != ahead ]; then
+              if ! tagged="$(gh api "repos/$REPO/commits/refs/tags/$encoded" | jq -r .sha)" || [ "$tagged" != "$sha" ]; then
+                echo "::error::Refusing to publish docs: the tag $tag does not point at its release's commit $sha."
+                exit 1
+              fi
+              if ! status="$(gh api "repos/$REPO/compare/$sha...$RUN_SHA" | jq -r .status)" \
+                  || { [ "$status" != identical ] && [ "$status" != ahead ]; }; then
                 echo "::error::Refusing to publish docs from $REF: its commit $sha is not in this run's history ($RUN_SHA)."
                 exit 1
               fi
@@ -138,6 +143,16 @@ jobs:
         with:
           ref: ${{ steps.ref.outputs.ref }}
           persist-credentials: false
+
+      # Checking out a SHA fetches no tags. A project versioned from git tags
+      # (hatch-vcs) needs the release tag on HEAD to install as the release
+      # rather than a dev version, so put back the tag the check verified.
+      - name: Restore the release tag
+        if: ${{ steps.ref.outputs.ref != '' }}
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ steps.ref.outputs.ref }}
+        run: git update-ref "refs/tags/$TAG" "$SHA"
 
       - uses: meridianlabs-ai/actions/install-python-dependencies@f4ae19412da5597fc283e3ef62db1a67384ae609 # self, re-pin after each change
         with:
