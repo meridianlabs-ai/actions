@@ -46,3 +46,19 @@ updates:
           - "*"
     commit-message:
       prefix: "ci"
+
+  # The marketplace CLIs vscode-publish installs with `npm ci` from its
+  # package-lock.json. They run in the caller's publish job, which can mint
+  # both registries' OIDC tokens, so updates wait out the same cooldown.
+  - package-ecosystem: "npm"
+    directory: "/vscode-publish"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      marketplace-clis:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"

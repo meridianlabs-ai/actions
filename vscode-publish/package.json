@@ -1,0 +1,9 @@
+{
+  "name": "vscode-publish-clis",
+  "private": true,
+  "description": "The marketplace CLIs vscode-publish/action.yml installs with npm ci. Exact versions; package-lock.json fixes the rest of the tree.",
+  "dependencies": {
+    "@vscode/vsce": "4.1.0",
+    "ovsx": "1.4.0"
+  }
+}

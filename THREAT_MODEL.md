@@ -163,7 +163,10 @@ guarantee, and what is by design. To report a vulnerability, see
   should allow only the release branch.
   The publish job holds `id-token: write` for these exchanges, so every step
   in it, vsce, ovsx and their dependencies included, can mint a token for
-  either registry. `publish-tag` lets a
+  either registry. That code is the tree in `vscode-publish/package-lock.json`,
+  which `npm ci` installs exactly, by version and integrity hash; a new
+  registry release reaches the job only through a reviewed Dependabot PR
+  after the 7-day cooldown. `publish-tag` lets a
   workflow_dispatch rebuild and publish an existing release tag; it is
   validated as a tag shape, must name a GitHub release, and goes through
   the same environment approval.

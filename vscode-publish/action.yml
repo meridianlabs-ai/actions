@@ -52,17 +52,11 @@ inputs:
     description: "The release tag to publish: the reusable workflow's `tag_name` output."
     required: true
   node-version:
-    description: "Node.js for the CLIs. vsce 4 needs 22 or later."
+    description: "Node.js for the CLIs. vsce 4 and ovsx 1.2 or later need 22 or later."
     default: "22"
   publish-openvsx:
     description: "Also publish to Open VSX ('true' or 'false')"
     default: "true"
-  vsce-version:
-    description: "Pinned @vscode/vsce version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--oidc) needs 4.1.0 or later. Keep at or above the vsce the consuming repo packages with: publish --packagePath re-validates the manifest."
-    default: "4.1.0"
-  ovsx-version:
-    description: "Pinned ovsx version (deliberately NOT taken from the repo's devDependencies). Must be an exact x.y.z version; ranges, tags and npm aliases are rejected. Trusted Publishing (--trusted-publishing) needs 1.2.0 or later, which also needs Node.js 22 or later."
-    default: "1.4.0"
 
 runs:
   using: composite
@@ -425,34 +419,27 @@ runs:
             sys.exit(main())
         PY
 
-    # Install both CLIs in one step. The npm install resolves their
-    # transitive dependencies fresh from the registry (the pins cover only
-    # vsce/ovsx themselves), and this step, like every step here, can mint an
-    # OIDC token (see the header), so --ignore-scripts skips their lifecycle
-    # scripts altogether. The native modules in the tree (ovsx's crc32 and
+    # Install both CLIs from package.json and package-lock.json next to this
+    # file, which fix every package in their trees, transitive and native
+    # ones included, by version and integrity hash. Like every step here,
+    # their code can mint an OIDC token (see the header), so a new registry
+    # release must not reach it unreviewed: npm ci installs exactly the lock
+    # file and fails if it disagrees with package.json, and Dependabot
+    # proposes updates after a 7-day cooldown. --ignore-scripts skips their
+    # lifecycle scripts. The native modules in the tree (ovsx's crc32 and
     # keyring, vsce's optional keytar) ship prebuilt binaries and need no
     # install script; keyring and keytar load only on the stored-token path,
-    # which neither publish command takes.
-    #
-    # The version inputs are controlled by the caller workflow, and npm treats
-    # anything after `@` as a package spec, not just a version: an alias such
-    # as `npm:other-package` or a hosted-git spec like `github:user/repo`
-    # would install arbitrary code as the `vsce` / `ovsx` binaries that later
-    # publish. Require an exact x.y.z version so only the pinned
-    # registry package can be installed.
+    # which neither publish command takes. The install goes to RUNNER_TEMP,
+    # which the runner empties after the job, not into the action's own
+    # directory.
     - name: Install marketplace CLIs
       shell: bash
-      env:
-        VSCE_VERSION: ${{ inputs.vsce-version }}
-        OVSX_VERSION: ${{ inputs.ovsx-version }}
       run: |
-        for v in "$VSCE_VERSION" "$OVSX_VERSION"; do
-          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::vsce-version / ovsx-version must be exact x.y.z versions, got '$v'"
-            exit 1
-          fi
-        done
-        npm install -g --ignore-scripts "@vscode/vsce@${VSCE_VERSION}" "ovsx@${OVSX_VERSION}"
+        clis="$RUNNER_TEMP/marketplace-clis"
+        mkdir -p "$clis"
+        cp "$GITHUB_ACTION_PATH/package.json" "$GITHUB_ACTION_PATH/package-lock.json" "$clis/"
+        npm ci --ignore-scripts --no-audit --no-fund --prefix "$clis"
+        echo "$clis/node_modules/.bin" >> "$GITHUB_PATH"
 
     # A second reader, still before either publish command: read the package
     # with readVSIXPackage from the vsce just installed, the function (and
