@@ -51,7 +51,9 @@ runs:
         if [ -f "$map" ] && [ -n "$APPROVERS" ]; then
           for login in $(echo "$APPROVERS" | tr ',' ' '); do
             id=$(jq -r --arg l "$login" '.[$l] // empty' "$map")
-            if [ -n "$id" ] && [ "$id" != "TODO" ]; then
+            # Only Slack member IDs become mentions, so a map value can't add
+            # other Slack markup.
+            if [[ "$id" =~ ^[UW][[:upper:][:digit:]]+$ ]]; then
               mentions="$mentions <@$id>"
             fi
           done

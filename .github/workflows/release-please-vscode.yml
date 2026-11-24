@@ -365,8 +365,9 @@ jobs:
         if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: meridianlabs-ai/actions
-          ref: main
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
           sparse-checkout: slack-ids.json
           sparse-checkout-cone-mode: false
           path: _meridian_actions
@@ -383,6 +384,7 @@ jobs:
         env:
           SLACK_APPROVALS_WEBHOOK_URL: ${{ secrets.SLACK_APPROVALS_WEBHOOK_URL }}
           APPROVERS: ${{ inputs.approvers }}
+          MAP_SHA: ${{ job.workflow_sha }}
           REPO: ${{ github.repository }}
           TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
           SHA: ${{ steps.existing.outputs.sha || github.sha }}
@@ -393,12 +395,16 @@ jobs:
             echo "SLACK_APPROVALS_WEBHOOK_URL not set — skipping Slack notification"
             exit 0
           fi
+          # The map is this workflow's own commit (the fetch step above), so a
+          # change on actions main reaches a caller only when its pin moves; any
+          # other checkout means no mentions. Only Slack member IDs become
+          # mentions, so a map value can't add other Slack markup.
           mentions=""
           map=_meridian_actions/slack-ids.json
-          if [ -f "$map" ] && [ -n "$APPROVERS" ]; then
+          if [ -f "$map" ] && [ -n "$APPROVERS" ] && [ "$(git -C _meridian_actions rev-parse HEAD 2>/dev/null)" = "$MAP_SHA" ]; then
             for login in $(echo "$APPROVERS" | tr ',' ' '); do
               id=$(jq -r --arg l "$login" '.[$l] // empty' "$map")
-              if [ -n "$id" ] && [ "$id" != "TODO" ]; then
+              if [[ "$id" =~ ^[UW][[:upper:][:digit:]]+$ ]]; then
                 mentions="$mentions <@$id>"
               fi
             done

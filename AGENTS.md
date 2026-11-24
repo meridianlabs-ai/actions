@@ -24,6 +24,7 @@ where the script calls them (`tests/test_triage_workflow.py`,
 `tests/test_scheduled_workflows.py`, `tests/test_ci_perf_workflow.py`,
 `tests/test_docs_link_check_workflow.py`, `tests/test_publish_docs_workflow.py`;
 `tests/test_slack_release_announce.py` covers the announce converter,
+`tests/test_slack_approval_ping.py` the approval pings' use of `slack-ids.json`,
 `tests/test_release_notes_heading.py` the release workflows' heading rename,
 `tests/test_build_python_dist_workflow.py` the shared build job's permissions and steps, and
 `tests/test_repository.py` checks that no workflow names a retired
@@ -62,7 +63,10 @@ python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflow
 `actionlint` over the whole repo reports pre-existing findings in
 `inspect-ai-ci-perf.yml`, `inspect-ai-scheduled-tests.yml` and
 `inspect-swe-nightly-tests.yml`; a change is held to its own file being
-clean.
+clean. actionlint 1.7.12 also doesn't know the `job.workflow_repository` and
+`job.workflow_sha` contexts (rhysd/actionlint#707), which `pr-title-lint.yml`
+and the two release-please workflows use to read files from their own commit;
+those findings don't count against a change.
 
 ## Rules the tests enforce
 
