@@ -62,9 +62,9 @@ name: Release Please — VS Code extension (reusable)
 # published GitHub release the Release Please App created at the tag's current
 # commit, that the commit is on the run's release branch, which must be
 # protected, and that this run created no other), and the build job checks out
-# the tag's commit instead of the triggering one. Leave it empty for normal
-# runs. A hotfix tag is retried from its hotfix branch, which must be
-# protected for the retry to pass.
+# the tag's commit, as it does for a release this run creates. Leave it empty
+# for normal runs. A hotfix tag is retried from its hotfix branch, which must
+# be protected for the retry to pass.
 #
 # Caller (in a consuming repo, .github/workflows/release.yml):
 #   name: Release
@@ -152,7 +152,7 @@ jobs:
     outputs:
       release_created: ${{ steps.existing.outputs.release_created || steps.release.outputs.release_created }}
       tag_name: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
-      sha: ${{ steps.existing.outputs.sha || github.sha }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app-token
@@ -176,9 +176,10 @@ jobs:
           manifest-file: ${{ inputs.manifest-file }}
           # Default to the branch the run was triggered from (github.ref_name):
           # push to main → main; a workflow_dispatch from a maintenance branch →
-          # that branch. This keeps the Release Please target and the build
-          # checkout on the SAME branch, so a hotfix is driven solely by the
-          # "Use workflow from" branch selector — no separate input to mismatch.
+          # that branch. This keeps the Release Please target on the run's
+          # branch, so a hotfix is driven solely by the "Use workflow from"
+          # branch selector — no separate input to mismatch. The build checks
+          # out the commit Release Please releases (the Release commit step).
           # The target-branch input remains an optional explicit override.
           target-branch: ${{ inputs.target-branch != '' && inputs.target-branch || github.ref_name }}
 
@@ -358,6 +359,52 @@ jobs:
           echo "Publishing existing release $PUBLISH_TAG at $sha"
           echo "Publishing existing release \`$PUBLISH_TAG\` at \`$sha\`, on \`$RELEASE_BRANCH\`." >> "$GITHUB_STEP_SUMMARY"
 
+      # The commit the build checks out and the ping names: the publish-tag's
+      # commit, or the one Release Please released in this run (its `sha`
+      # output, the release's target_commitish). Not github.sha: a push that
+      # carries the release PR's merge and later commits, or a dispatch from a
+      # branch that has moved on, runs at a later commit, and building it would
+      # publish code the tag doesn't contain. GitHub keeps a tag that already
+      # exists when a release is created for it, so the step also requires the
+      # tag to point at that commit. The commit must also be the run's commit
+      # or an ancestor of it: the publish environment's branch rule checks the
+      # run's branch, and a target-branch override could otherwise release
+      # another branch's code. No continue-on-error: an empty `sha` output
+      # would make the build check out the triggering commit.
+      - name: Release commit
+        id: commit
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.existing.outputs.release_created == 'true' }}
+        env:
+          SHA: ${{ steps.existing.outputs.sha || steps.release.outputs.sha }}
+          TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not determine the commit this release tagged"
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*-)?v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::the release tag must be a release tag such as v1.2.3, got '$TAG'"
+            exit 1
+          fi
+          tagged="$(gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha)" || true
+          if ! [[ "$tagged" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve release tag '$TAG' to a commit"
+            exit 1
+          fi
+          if [ "$tagged" != "$SHA" ]; then
+            echo "::error::release tag '$TAG' points at $tagged, not $SHA"
+            exit 1
+          fi
+          status="$(gh api "repos/$GH_REPO/compare/$SHA...$RUN_SHA" --jq .status)" || true
+          if [ "$status" != identical ] && [ "$status" != ahead ]; then
+            echo "::error::release commit $SHA is not in this run's history ($RUN_SHA)"
+            exit 1
+          fi
+          { echo "sha<<EOF"; echo "$SHA"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
       # Fetch the shared GitHub-login -> Slack-ID map so the approval ping can
       # @-mention the right people. Like the ping, it must not block a release.
       - name: Fetch Slack ID map
@@ -385,7 +432,7 @@ jobs:
           APPROVERS: ${{ inputs.approvers }}
           REPO: ${{ github.repository }}
           TAG: ${{ steps.existing.outputs.tag_name || steps.release.outputs.tag_name }}
-          SHA: ${{ steps.existing.outputs.sha || github.sha }}
+          SHA: ${{ steps.commit.outputs.sha }}
           # This run contains the gated publish job, so deep-link straight to it.
           ACTIONS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -427,7 +474,17 @@ jobs:
     outputs:
       vsix: ${{ steps.package.outputs.vsix }}
     steps:
-      # The release commit: the triggering commit, or the publish-tag's commit.
+      # An empty ref would make actions/checkout fetch the triggering commit.
+      - name: Require the release commit
+        env:
+          SHA: ${{ needs.release-please.outputs.sha }}
+        run: |
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::no release commit to build"
+            exit 1
+          fi
+
+      # The release commit: the one Release Please tagged, or the publish-tag's.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
