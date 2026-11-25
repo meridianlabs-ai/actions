@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-docs.yml"
 TESTS_WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
 REPO = "meridianlabs-ai/inspect_swe"
+RUN_SHA = "a" * 40
+TAG_SHA = "b" * 40
 
 
 def workflow() -> dict:
@@ -48,23 +50,43 @@ class CheckResult(NamedTuple):
 
 
 def run_check_ref(
-    tmp_path: Path, ref: str, releases: dict[str, dict], gh_exit: int = 0, tag: str = ""
+    tmp_path: Path,
+    ref: str,
+    releases: dict[str, dict],
+    gh_exit: int = 0,
+    tag: str = "",
+    commits: dict[str, str] | None = None,
+    compare: str | None = "identical",
+    failing: tuple[str, ...] = (),
 ) -> CheckResult:
     """Run the ref check for `ref` with a gh stand-in that serves `releases` (tag -> release JSON) and 404s anything else.
 
-    `tag` is the workflow's `tag` input. With `gh_exit`, gh prints the release
-    and then fails, as a lookup cut off midway does. `output` is what the step
-    wrote to $GITHUB_OUTPUT.
+    `tag` is the workflow's `tag` input. With `gh_exit`, gh prints what it
+    serves and then fails, as a lookup cut off midway does. `commits` maps a
+    URL-encoded tag to the commit it points at (default: every release's tag
+    at TAG_SHA), and `compare` is the status GitHub reports comparing TAG_SHA
+    with the run's commit RUN_SHA (None: the comparison 404s). A release
+    records TAG_SHA as its target_commitish unless its body says otherwise.
+    gh prints what it serves for a path starting with one of `failing` and
+    then fails. `output` is what the step wrote to $GITHUB_OUTPUT.
     """
+    if commits is None:
+        commits = {t: TAG_SHA for t in releases}
+    paths: dict[str, dict] = {f"repos/{REPO}/releases/tags/{t}": {"target_commitish": TAG_SHA, **body} for t, body in releases.items()}
+    paths.update({f"repos/{REPO}/commits/refs/tags/{t}": {"sha": sha} for t, sha in commits.items()})
+    if compare is not None:
+        paths[f"repos/{REPO}/compare/{TAG_SHA}...{RUN_SHA}"] = {"status": compare}
     served = tmp_path / "releases.json"
-    served.write_text(json.dumps({f"repos/{REPO}/releases/tags/{tag}": body for tag, body in releases.items()}))
+    served.write_text(json.dumps(paths))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gh = bin_dir / "gh"
+    fail_cases = "".join(f'  "repos/{REPO}/{prefix}"*) exit 1 ;;\n' for prefix in failing)
     gh.write_text(
         "#!/usr/bin/env bash\n"
         '[ "$1" = api ] || exit 2\n'
         f'jq -e --arg p "$2" \'.[$p]\' "{served}" || {{ echo "gh: Not Found (HTTP 404)" >&2; exit 1; }}\n'
+        f'case "$2" in\n{fail_cases}esac\n'
         f"exit {gh_exit}\n"
     )
     gh.chmod(0o755)
@@ -81,6 +103,7 @@ def run_check_ref(
             "REPO": REPO,
             "REF": ref,
             "TAG": tag,
+            "RUN_SHA": RUN_SHA,
             "GITHUB_OUTPUT": str(output),
         },
         text=True,
@@ -138,12 +161,79 @@ def test_a_failed_lookup_is_refused_even_if_it_printed_a_release(tmp_path):
 # --- A release workflow on main passes the tag it released --------------------------
 
 
-def test_the_tag_input_of_a_published_release_passes_on_a_branch_run(tmp_path):
+@pytest.mark.parametrize("compare", ["identical", "ahead"])
+def test_the_tag_input_of_a_published_release_passes_as_its_commit(tmp_path, compare):
+    # The checkout gets the commit the check resolved, not the tag name, so a
+    # tag moved after the check (or before a re-run) changes nothing.
     result = run_check_ref(
-        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72"
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", compare=compare
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    assert result.output == "ref<<EOF\nrefs/tags/0.2.72\nEOF\n"
+    assert result.output == f"ref<<EOF\n{TAG_SHA}\nEOF\n"
+
+
+@pytest.mark.parametrize("compare", ["behind", "diverged"])
+def test_a_tag_input_whose_commit_is_not_in_the_runs_history_is_refused(tmp_path, compare):
+    # The github-pages environment admits the run's branch, so only commits
+    # that branch already holds may be rendered.
+    result = run_check_ref(
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", compare=compare
+    )
+    assert result.returncode == 1
+    assert f"its commit {TAG_SHA} is not in this run's history ({RUN_SHA})" in result.stdout
+    assert result.output == ""
+
+
+@pytest.mark.parametrize("commits", [{"0.2.72": "c" * 40}, {"0.2.72": "main"}, {"0.2.72": "B" * 40}], ids=["moved", "name", "upper"])
+def test_a_tag_input_that_does_not_point_at_its_releases_commit_is_refused(tmp_path, commits):
+    # The release records the commit it was cut from; a tag moved since, even
+    # to another commit in the run's history, would render different docs from
+    # the package that was published.
+    result = run_check_ref(
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", commits=commits
+    )
+    assert result.returncode == 1
+    assert f"the tag 0.2.72 does not point at its release's commit {TAG_SHA}" in result.stdout
+    assert result.output == ""
+
+
+@pytest.mark.parametrize("target", ["main", "", None, "b" * 39])
+def test_a_tag_input_whose_release_records_no_commit_is_refused(tmp_path, target):
+    result = run_check_ref(
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False, "target_commitish": target}}, tag="0.2.72"
+    )
+    assert result.returncode == 1
+    assert "the release of 0.2.72 records no commit" in result.stdout
+    assert result.output == ""
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "error"),
+    [
+        ("releases/", "no published release has this tag"),
+        ("commits/", "could not look up the commit of the tag 0.2.72"),
+        ("compare/", f"could not compare {TAG_SHA} with the run's commit {RUN_SHA}"),
+    ],
+)
+def test_a_failed_lookup_is_refused_even_if_it_printed_an_answer(tmp_path, endpoint, error):
+    result = run_check_ref(
+        tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", failing=(endpoint,)
+    )
+    assert result.returncode == 1
+    assert error in result.stdout
+    assert result.output == ""
+
+
+def test_a_tag_input_whose_commit_lookup_404s_says_the_lookup_failed(tmp_path):
+    result = run_check_ref(tmp_path, "refs/heads/main", {"0.2.72": {"tag_name": "0.2.72", "draft": False}}, tag="0.2.72", commits={})
+    assert result.returncode == 1
+    assert "could not look up the commit of the tag 0.2.72" in result.stdout
+
+
+def test_a_tag_input_is_url_encoded_in_the_commit_lookup(tmp_path):
+    result = run_check_ref(tmp_path, "refs/heads/main", {"a%2Fb": {"tag_name": "a/b", "draft": False}}, tag="a/b")
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.output == f"ref<<EOF\n{TAG_SHA}\nEOF\n"
 
 
 def test_the_tag_input_wins_over_the_runs_tag(tmp_path):
@@ -170,6 +260,7 @@ def test_the_checkout_renders_the_ref_the_check_passed():
     steps = job("build")["steps"]
     assert ref_check()["id"] == "ref"
     assert ref_check()["env"]["TAG"] == "${{ inputs.tag }}"
+    assert ref_check()["env"]["RUN_SHA"] == "${{ github.sha }}"
     assert steps[1]["with"]["ref"] == "${{ steps.ref.outputs.ref }}"
     assert workflow()["on"]["workflow_call"]["inputs"]["tag"]["default"] == ""
 
@@ -184,6 +275,31 @@ def test_the_ref_check_runs_before_the_checkout_and_deploy_waits_for_the_build()
     assert ref_check()["name"] == "Allow only the tag of a published release"
     assert str(steps[1].get("uses", "")).startswith("actions/checkout@")
     assert job("deploy")["needs"] == "build"
+
+
+def restore_tag() -> dict:
+    return next(s for s in job("build")["steps"] if s.get("name") == "Restore the release tag")
+
+
+def test_the_checked_out_commit_gets_its_release_tag_back():
+    # Checking out a SHA fetches no tags, and a project versioned from git
+    # tags (hatch-vcs) would install as a dev version.
+    steps = job("build")["steps"]
+    assert steps.index(restore_tag()) == 2
+    assert restore_tag()["if"] == "${{ steps.ref.outputs.ref != '' }}"
+    assert restore_tag()["env"] == {"TAG": "${{ inputs.tag }}", "SHA": "${{ steps.ref.outputs.ref }}"}
+
+
+@pytest.mark.parametrize("tag", ["0.2.72", "v1.2.3", "inspect-flow-v0.17.0"])
+def test_restoring_the_tag_makes_git_describe_name_the_release(tmp_path, tag):
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "release"], cwd=tmp_path, check=True, env=env)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, env=env, capture_output=True, text=True).stdout.strip()
+    result = subprocess.run(["bash", "-e", "-c", restore_tag()["run"]], cwd=tmp_path, env={**env, "TAG": tag, "SHA": sha}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    described = subprocess.run(["git", "describe", "--tags", "--exact-match"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert described.stdout.strip() == tag
 
 
 # --- Repo code runs only with the read-only job token --------------------------------
