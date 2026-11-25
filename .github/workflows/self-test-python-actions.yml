@@ -274,28 +274,25 @@ jobs:
           fi
           echo "no Actions cache entry made (cache-mode: read enforced)"
 
-  # The remote-reference jobs below call the actions as
-  # meridianlabs-ai/actions/...@main, not with ./, so the remote $/setup-uv call
-  # is exercised too. uses: cannot take an expression, so they cannot point at
-  # the pull request's own commit. They run on main's push and on a manual run,
-  # where the checkout and @main are the same code; on a pull request they would
-  # run main's actions against the pull request's workflow and fixtures.
-  # tests/test_python_actions.py checks the two wiring rules a remote call
-  # depends on (nested calls use $/, files resolve through $GITHUB_ACTION_PATH)
-  # before merge.
+  # The remote-reference jobs below call the actions with $/, which loads them
+  # from this repository at the running commit (the pull request's own code),
+  # not from the checkout as ./ does. Their checkout holds only the fixtures
+  # (and the root files), so an action that reaches its own files by a
+  # relative or workspace path, or calls a sibling with ./, fails here as it
+  # would for a caller in another repository.
 
-  # Call only install-python-dependencies from the remote reference, so its
-  # nested $/setup-uv runs from the remote reference too (the ./ jobs cannot
-  # prove the remote $/ call). Then check uv and that the project installed.
+  # Call only install-python-dependencies remotely, so its nested $/setup-uv
+  # runs from the remote reference too. Then check uv and that the project
+  # installed.
   remote-reference-install:
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/install-python-dependencies@main
+          sparse-checkout: tests/fixtures/python-actions
+      - uses: $/install-python-dependencies
         with:
           versions: locked
           python-version: "3.11"
@@ -309,14 +306,14 @@ jobs:
 
   # Call setup-uv alone from the remote reference and check the uv version.
   remote-reference-setup:
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: meridianlabs-ai/actions/setup-uv@main
+          sparse-checkout: tests/fixtures/python-actions
+      - uses: $/setup-uv
         with:
           python-version: "3.11"
           actions-cache: none

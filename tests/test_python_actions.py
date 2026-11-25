@@ -5,11 +5,9 @@ build uv commands as bash arrays with no eval. These tests run check_inputs.py
 and install.sh off a runner: check_inputs.py under python3 with the inputs as
 env vars, and install.sh under bash with a stand-in uv on PATH that records its
 argument vector. They also check the static rules the workflows must keep: every
-job with an unlocked step sets a safe cache-mode, setup-uv pins uv 0.13.5 or
-later, and the actions keep working when another repository calls them (nested
-calls use $/, own files resolve through $GITHUB_ACTION_PATH). The self-test
-workflow (self-test-python-actions.yml) proves the Actions cache and Action save
-behavior on a real runner.
+job with an unlocked step sets a safe cache-mode, and setup-uv pins uv 0.13.5 or
+later. The self-test workflow (self-test-python-actions.yml) proves the Actions
+cache and Action save behavior and the remote $/ call on a real runner.
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 .github/workflows/tests.yml does the same in CI).
@@ -19,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -745,6 +742,8 @@ def test_setup_uv_pins_astral_setup_uv_by_sha_with_a_version_comment():
     lines = [l for l in text.splitlines() if "astral-sh/setup-uv@" in l]
     assert len(lines) == 1, lines
     # uses: astral-sh/setup-uv@<40-hex> # vX.Y.Z
+    import re
+
     assert re.search(r"astral-sh/setup-uv@[0-9a-f]{40} # v\d+\.\d+\.\d+", lines[0]), lines[0]
 
 
@@ -922,87 +921,27 @@ def test_cache_mode_check_fails_when_the_key_was_written(tmp_path):
     assert "an Actions cache entry was made despite cache-mode: read" in r.stdout
 
 
-# --- The actions work when called from another repository ----------------------
-#
-# The ./ jobs of the self-test run the actions from this repository's checkout,
-# where ./ and the workspace both point at the action's own files. A caller's
-# workspace is its own repository, so these rules keep a remote call working;
-# the self-test's remote-reference jobs run main's code, not the pull request's.
-
-ACTIONS = [SETUP_UV, INSTALL]
+# --- The remote-reference jobs run the pull request's actions remotely ---------
 
 
-def action_steps(action: Path) -> list[dict]:
-    return yaml.safe_load((action / "action.yml").read_text())["runs"]["steps"]
+REMOTE_JOBS = {"remote-reference-install": "$/install-python-dependencies", "remote-reference-setup": "$/setup-uv"}
 
 
-@pytest.mark.parametrize("action", ACTIONS, ids=lambda a: a.name)
-def test_a_nested_call_to_an_action_of_this_repository_uses_the_dollar_slash_form(action):
-    # ./ resolves against the caller's workspace, and owner/repo/path@ref loads
-    # some other commit; $/ loads this repository at the calling action's commit.
-    folders = {p.name for p in ROOT.iterdir() if (p / "action.yml").is_file()}
-    for s in action_steps(action):
-        uses = str(s.get("uses", ""))
-        if not uses:
-            continue
-        assert not uses.startswith(("./", "../")), uses
-        assert not uses.startswith(f"{REPO}/"), uses
-        if uses.startswith("$/"):
-            assert uses.removeprefix("$/") in folders, uses
-
-
-def test_install_python_dependencies_calls_setup_uv_with_dollar_slash():
-    # Guard the rule above against passing because the nested call is gone.
-    assert [s["uses"] for s in action_steps(INSTALL) if "setup-uv" in str(s.get("uses", ""))] == ["$/setup-uv"]
-
-
-def strings_in(value) -> list[str]:
-    if isinstance(value, dict):
-        return [s for v in value.values() for s in strings_in(v)]
-    if isinstance(value, list):
-        return [s for v in value for s in strings_in(v)]
-    return [value] if isinstance(value, str) else []
-
-
-@pytest.mark.parametrize("action", ACTIONS, ids=lambda a: a.name)
-def test_a_step_reaches_the_action_s_own_files_only_through_github_action_path(action):
-    # $GITHUB_ACTION_PATH is the action's folder wherever it was loaded from; a
-    # relative or workspace path finds the caller's files instead. A run: line
-    # names a file as "$GITHUB_ACTION_PATH/<name>"; no other field names one.
-    own_files = [p.name for p in action.iterdir() if p.is_file() and p.name != "action.yml"]
-    refs = 0
-    for s in action_steps(action):
-        run = s.get("run", "")
-        others = strings_in({k: v for k, v in s.items() if k != "run"})
-        for name in own_files:
-            # Whole names only, so install.sh does not match preinstall.sh.
-            whole = rf"(?<![\w.-]){re.escape(name)}(?![\w.-])"
-            mentions = len(re.findall(whole, run))
-            via_action_path = run.count(f'"$GITHUB_ACTION_PATH/{name}"')
-            assert mentions == via_action_path, f"{action.name}: {run!r} names {name} outside \"$GITHUB_ACTION_PATH/{name}\""
-            assert not [o for o in others if re.search(whole, o)], f"{action.name}: a step names {name} outside run:"
-            refs += mentions
-    assert refs, f"{action.name} runs none of its own files"
-
-
-def test_the_remote_reference_jobs_call_the_actions_at_main_off_pull_requests():
-    # uses: cannot take an expression, so the remote jobs cannot run the pull
-    # request's own commit. Off pull requests the checkout and @main match.
-    wf = yaml.safe_load(SELF_TEST.read_text())
-    remote = {
-        name: job
-        for name, job in wf["jobs"].items()
-        if any(str(s.get("uses", "")).startswith(f"{REPO}/") for s in job.get("steps", []))
-    }
-    uses = [s["uses"] for job in remote.values() for s in job["steps"] if str(s.get("uses", "")).startswith(f"{REPO}/")]
-    assert sorted(uses) == [
-        f"{REPO}/install-python-dependencies@main",
-        f"{REPO}/setup-uv@main",
+def test_the_remote_reference_jobs_load_the_actions_with_dollar_slash_and_no_action_sources():
+    # $/ loads the action at the running commit without the checkout; a checkout
+    # of only the fixtures leaves no action files for a ./ or workspace path to find.
+    jobs = yaml.safe_load(SELF_TEST.read_text())["jobs"]
+    for name, action in REMOTE_JOBS.items():
+        job = jobs[name]
+        assert "if" not in job, name
+        steps = job["steps"]
+        assert steps[0]["uses"].startswith("actions/checkout@"), name
+        assert steps[0]["with"]["sparse-checkout"] == "tests/fixtures/python-actions", name
+        assert [s["uses"] for s in steps[1:] if "uses" in s] == [action], name
+    # No other job loads an action of this repository by owner/repo@ref.
+    assert not [
+        s["uses"] for job in jobs.values() for s in job.get("steps", []) if str(s.get("uses", "")).startswith(f"{REPO}/")
     ]
-    assert {name: job.get("if") for name, job in remote.items()} == {
-        "remote-reference-install": "github.event_name != 'pull_request'",
-        "remote-reference-setup": "github.event_name != 'pull_request'",
-    }
 
 
 # --- The self-test workflow has the per-ref concurrency group ------------------

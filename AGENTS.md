@@ -65,8 +65,10 @@ python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflow
 `inspect-swe-nightly-tests.yml`; a change is held to its own file being
 clean. actionlint 1.7.12 also doesn't know the `job.workflow_repository` and
 `job.workflow_sha` contexts (rhysd/actionlint#707), which `pr-title-lint.yml`
-and the two release-please workflows use to read files from their own commit;
-those findings don't count against a change.
+and the two release-please workflows use to read files from their own commit,
+or the `$/` form of `uses:` (rhysd/actionlint#711), which the remote-reference
+jobs of `self-test-python-actions.yml` use to load this repository's actions at
+the running commit; those findings don't count against a change.
 
 ## Rules the tests enforce
 
