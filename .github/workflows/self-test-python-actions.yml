@@ -277,16 +277,18 @@ jobs:
   # The remote-reference jobs below call the actions as
   # meridianlabs-ai/actions/...@main, not with ./, so the remote $/setup-uv call
   # is exercised too. uses: cannot take an expression, so they cannot point at
-  # the pull request's own commit: on a pull request they run main's actions,
-  # and on the push to main that merges a change they run the merged code.
+  # the pull request's own commit. They run on main's push and on a manual run,
+  # where the checkout and @main are the same code; on a pull request they would
+  # run main's actions against the pull request's workflow and fixtures.
   # tests/test_python_actions.py checks the two wiring rules a remote call
-  # depends on (nested calls use $/, scripts resolve through
-  # $GITHUB_ACTION_PATH) before merge.
+  # depends on (nested calls use $/, files resolve through $GITHUB_ACTION_PATH)
+  # before merge.
 
   # Call only install-python-dependencies from the remote reference, so its
   # nested $/setup-uv runs from the remote reference too (the ./ jobs cannot
   # prove the remote $/ call). Then check uv and that the project installed.
   remote-reference-install:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -299,16 +301,15 @@ jobs:
           python-version: "3.11"
           project-dir: ${{ env.LOCKED_PROJECT }}
           actions-cache: none
-      # main's uv pin, which a pull request may change; the ./ jobs check the
-      # pinned version.
-      - name: uv runs and the project installed
+      - name: uv is the pinned version and the project installed
         shell: bash
         run: |
-          uv --version
+          uv --version | grep -F '0.13.5'
           "$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"
 
-  # Call setup-uv alone from the remote reference and check that uv runs.
+  # Call setup-uv alone from the remote reference and check the uv version.
   remote-reference-setup:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -319,9 +320,9 @@ jobs:
         with:
           python-version: "3.11"
           actions-cache: none
-      - name: uv runs
+      - name: uv is the pinned version
         shell: bash
-        run: uv --version
+        run: uv --version | grep -F '0.13.5'
 
   # A hashed-requirements install, then uv pip check on the Python environment.
   # A second call into the same environment-dir succeeds. The full closure
