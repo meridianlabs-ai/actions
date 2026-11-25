@@ -928,8 +928,8 @@ REMOTE_JOBS = {"remote-reference-install": "$/install-python-dependencies", "rem
 
 
 def test_the_remote_reference_jobs_load_the_actions_with_dollar_slash_and_no_action_sources():
-    # $/ loads the action at the running commit without the checkout; a checkout
-    # of only the fixtures leaves no action files for a ./ or workspace path to find.
+    # $/ loads the action at the running commit without the checkout; a sparse
+    # checkout of the fixtures leaves no action folder for a ./ or workspace path.
     jobs = yaml.safe_load(SELF_TEST.read_text())["jobs"]
     for name, action in REMOTE_JOBS.items():
         job = jobs[name]

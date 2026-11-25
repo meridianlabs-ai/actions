@@ -276,10 +276,10 @@ jobs:
 
   # The remote-reference jobs below call the actions with $/, which loads them
   # from this repository at the running commit (the pull request's own code),
-  # not from the checkout as ./ does. Their checkout holds only the fixtures
-  # (and the root files), so an action that reaches its own files by a
-  # relative or workspace path, or calls a sibling with ./, fails here as it
-  # would for a caller in another repository.
+  # not from the checkout as ./ does. Their sparse checkout holds the fixtures,
+  # the root files and tests/*.py, but no action folder, so an action that
+  # reaches its own files by a relative or workspace path, or calls a sibling
+  # with ./, fails here as it would for a caller in another repository.
 
   # Call only install-python-dependencies remotely, so its nested $/setup-uv
   # runs from the remote reference too. Then check uv and that the project
