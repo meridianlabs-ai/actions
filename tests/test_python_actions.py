@@ -5,8 +5,9 @@ build uv commands as bash arrays with no eval. These tests run check_inputs.py
 and install.sh off a runner: check_inputs.py under python3 with the inputs as
 env vars, and install.sh under bash with a stand-in uv on PATH that records its
 argument vector. They also check the static rules the workflows must keep: every
-job with an unlocked step sets a safe cache-mode, and setup-uv pins uv 0.13.5 or
-later. The self-test workflow (self-test-python-actions.yml) proves the Actions
+job with an unlocked step sets a safe cache-mode, setup-uv pins uv 0.13.5 or
+later, and the actions keep working when another repository calls them (nested
+calls use $/, scripts resolve through $GITHUB_ACTION_PATH). The self-test workflow (self-test-python-actions.yml) proves the Actions
 cache and Action save behavior on a real runner.
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
@@ -921,13 +922,60 @@ def test_cache_mode_check_fails_when_the_key_was_written(tmp_path):
     assert "an Actions cache entry was made despite cache-mode: read" in r.stdout
 
 
-# --- The self-test workflow has the per-ref concurrency group ------------------
+# --- The actions work when called from another repository ----------------------
+#
+# The ./ jobs of the self-test run the actions from this repository's checkout,
+# where ./ and the workspace both point at the action's own files. A caller's
+# workspace is its own repository, so these rules keep a remote call working;
+# the self-test's remote-reference jobs run main's code, not the pull request's.
+
+ACTIONS = [SETUP_UV, INSTALL]
 
 
-def test_the_remote_reference_jobs_use_the_pinned_sha():
-    # The pin guard checks PINNED only. Each remote uses: must carry the same SHA.
+def action_steps(action: Path) -> list[dict]:
+    return yaml.safe_load((action / "action.yml").read_text())["runs"]["steps"]
+
+
+@pytest.mark.parametrize("action", ACTIONS, ids=lambda a: a.name)
+def test_a_nested_call_to_an_action_of_this_repository_uses_the_dollar_slash_form(action):
+    # ./ resolves against the caller's workspace, and owner/repo/path@ref loads
+    # some other commit; $/ loads this repository at the calling action's commit.
+    folders = {p.name for p in ROOT.iterdir() if (p / "action.yml").is_file()}
+    for s in action_steps(action):
+        uses = str(s.get("uses", ""))
+        if not uses:
+            continue
+        assert not uses.startswith(("./", "../")), uses
+        assert not uses.startswith(f"{REPO}/"), uses
+        if uses.startswith("$/"):
+            assert uses.removeprefix("$/") in folders, uses
+
+
+def test_install_python_dependencies_calls_setup_uv_with_dollar_slash():
+    # Guard the rule above against passing because the nested call is gone.
+    assert [s["uses"] for s in action_steps(INSTALL) if "setup-uv" in str(s.get("uses", ""))] == ["$/setup-uv"]
+
+
+@pytest.mark.parametrize("action", ACTIONS, ids=lambda a: a.name)
+def test_a_run_step_reaches_the_action_s_own_files_through_github_action_path(action):
+    # $GITHUB_ACTION_PATH is the action's folder wherever it was loaded from; a
+    # relative or workspace path finds the caller's files instead.
+    own_files = [p.name for p in action.iterdir() if p.is_file() and p.name != "action.yml"]
+    refs = 0
+    for s in action_steps(action):
+        run = s.get("run", "")
+        for name in own_files:
+            mentions = run.count(name)
+            via_action_path = run.count(f'"$GITHUB_ACTION_PATH/{name}"')
+            assert mentions == via_action_path, f"{action.name}: {run!r} names {name} outside \"$GITHUB_ACTION_PATH/{name}\""
+            refs += mentions
+    assert refs, f"{action.name} runs none of its own files"
+
+
+def test_the_remote_reference_jobs_call_the_actions_at_main():
+    # uses: cannot take an expression, so the remote jobs cannot run the pull
+    # request's own commit. @main runs the merged code on main's push.
     wf = yaml.safe_load(SELF_TEST.read_text())
-    pinned = run_step("remote-reference-pin-guard", "The pinned SHA matches")["env"]["PINNED"]
     uses = [
         s["uses"]
         for job in wf["jobs"].values()
@@ -935,48 +983,12 @@ def test_the_remote_reference_jobs_use_the_pinned_sha():
         if str(s.get("uses", "")).startswith(f"{REPO}/")
     ]
     assert sorted(uses) == [
-        f"{REPO}/install-python-dependencies@{pinned}",
-        f"{REPO}/setup-uv@{pinned}",
+        f"{REPO}/install-python-dependencies@main",
+        f"{REPO}/setup-uv@main",
     ]
 
 
-def git(cwd: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True, check=True).stdout.strip()
-
-
-@pytest.mark.parametrize("folders_changed", [False, True])
-def test_the_pin_guard_fetches_a_pinned_commit_that_only_a_pull_request_ref_reaches(tmp_path, folders_changed):
-    # A squash merge leaves the pull request commit off main, and the merged
-    # branch is deleted. Only refs/pull/N/head reaches it, which a clone does not fetch.
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    git(origin, "init", "-q", "-b", "main")
-    git(origin, "config", "user.email", "t@t")
-    git(origin, "config", "user.name", "t")
-    (origin / "setup-uv").mkdir()
-    (origin / "setup-uv" / "a").write_text("1\n")
-    git(origin, "add", "-A")
-    git(origin, "commit", "-qm", "base")
-    git(origin, "checkout", "-qb", "branch")
-    (origin / "setup-uv" / "a").write_text("2\n")
-    git(origin, "commit", "-qam", "pull request commit")
-    pinned = git(origin, "rev-parse", "HEAD")
-    git(origin, "update-ref", "refs/pull/1/head", pinned)
-    git(origin, "checkout", "-q", "main")
-    (origin / "setup-uv" / "a").write_text("3\n" if folders_changed else "2\n")
-    git(origin, "commit", "-qam", "squash merge")
-    git(origin, "branch", "-qD", "branch")
-    clone = tmp_path / "clone"
-    git(tmp_path, "clone", "-q", f"file://{origin}", str(clone))
-    assert subprocess.run(["git", "-C", str(clone), "cat-file", "-e", pinned], capture_output=True).returncode != 0
-
-    step = run_step("remote-reference-pin-guard", "The pinned SHA matches")
-    r = run_bash(step["run"], cwd=clone, env={"PINNED": pinned})
-    if folders_changed:
-        assert r.returncode == 1
-        assert f"::error::Re-pin the remote-reference jobs to HEAD: setup-uv or install-python-dependencies changed since {pinned}." in r.stdout
-    else:
-        assert r.returncode == 0, r.stdout + r.stderr
+# --- The self-test workflow has the per-ref concurrency group ------------------
 
 
 def test_self_test_workflow_has_a_per_ref_concurrency_group():
