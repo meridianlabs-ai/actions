@@ -24,10 +24,6 @@ updates:
       github-actions:
         patterns:
           - "*"
-        # This bump changes `setup-uv/` and needs a hand-made pin commit for
-        # the pin guard. A separate PR keeps the weekly group PR mergeable.
-        exclude-patterns:
-          - "astral-sh/setup-uv"
     # pr-title-lint requires a Conventional Commits title; `ci` keeps these
     # out of the release notes.
     commit-message:

@@ -299,13 +299,15 @@ jobs:
           python-version: "3.11"
           project-dir: ${{ env.LOCKED_PROJECT }}
           actions-cache: none
-      - name: uv is the pinned version and the project installed
+      # main's uv pin, which a pull request may change; the ./ jobs check the
+      # pinned version.
+      - name: uv runs and the project installed
         shell: bash
         run: |
-          uv --version | grep -F '0.13.5'
+          uv --version
           "$LOCKED_PROJECT/.venv/bin/python" -c "import six, ipd_fixture"
 
-  # Call setup-uv alone from the remote reference and check the uv version.
+  # Call setup-uv alone from the remote reference and check that uv runs.
   remote-reference-setup:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -317,9 +319,9 @@ jobs:
         with:
           python-version: "3.11"
           actions-cache: none
-      - name: uv is the pinned version
+      - name: uv runs
         shell: bash
-        run: uv --version | grep -F '0.13.5'
+        run: uv --version
 
   # A hashed-requirements install, then uv pip check on the Python environment.
   # A second call into the same environment-dir succeeds. The full closure

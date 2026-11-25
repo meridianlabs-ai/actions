@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -965,7 +966,8 @@ def test_a_run_step_reaches_the_action_s_own_files_through_github_action_path(ac
     for s in action_steps(action):
         run = s.get("run", "")
         for name in own_files:
-            mentions = run.count(name)
+            # Whole names only, so install.sh does not match preinstall.sh.
+            mentions = len(re.findall(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", run))
             via_action_path = run.count(f'"$GITHUB_ACTION_PATH/{name}"')
             assert mentions == via_action_path, f"{action.name}: {run!r} names {name} outside \"$GITHUB_ACTION_PATH/{name}\""
             refs += mentions
