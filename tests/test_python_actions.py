@@ -7,7 +7,7 @@ env vars, and install.sh under bash with a stand-in uv on PATH that records its
 argument vector. They also check the static rules the workflows must keep: every
 job with an unlocked step sets a safe cache-mode, and setup-uv pins uv 0.13.5 or
 later. The self-test workflow (self-test-python-actions.yml) proves the Actions
-cache and Action save behavior on a real runner.
+cache and Action save behavior and the remote $/ call on a real runner.
 
 Run with `python3 -m pytest` from the repo root (needs pytest and PyYAML;
 .github/workflows/tests.yml does the same in CI).
@@ -921,62 +921,30 @@ def test_cache_mode_check_fails_when_the_key_was_written(tmp_path):
     assert "an Actions cache entry was made despite cache-mode: read" in r.stdout
 
 
+# --- The remote-reference jobs run the pull request's actions remotely ---------
+
+
+REMOTE_JOBS = {"remote-reference-install": "$/install-python-dependencies", "remote-reference-setup": "$/setup-uv"}
+
+
+def test_the_remote_reference_jobs_load_the_actions_with_dollar_slash_and_no_action_sources():
+    # $/ loads the action at the running commit without the checkout; a sparse
+    # checkout of the fixtures leaves no action folder for a ./ or workspace path.
+    jobs = yaml.safe_load(SELF_TEST.read_text())["jobs"]
+    for name, action in REMOTE_JOBS.items():
+        job = jobs[name]
+        assert "if" not in job, name
+        steps = job["steps"]
+        assert steps[0]["uses"].startswith("actions/checkout@"), name
+        assert steps[0]["with"]["sparse-checkout"] == "tests/fixtures/python-actions", name
+        assert [s["uses"] for s in steps[1:] if "uses" in s] == [action], name
+    # No other job loads an action of this repository by owner/repo@ref.
+    assert not [
+        s["uses"] for job in jobs.values() for s in job.get("steps", []) if str(s.get("uses", "")).startswith(f"{REPO}/")
+    ]
+
+
 # --- The self-test workflow has the per-ref concurrency group ------------------
-
-
-def test_the_remote_reference_jobs_use_the_pinned_sha():
-    # The pin guard checks PINNED only. Each remote uses: must carry the same SHA.
-    wf = yaml.safe_load(SELF_TEST.read_text())
-    pinned = run_step("remote-reference-pin-guard", "The pinned SHA matches")["env"]["PINNED"]
-    uses = [
-        s["uses"]
-        for job in wf["jobs"].values()
-        for s in job.get("steps", [])
-        if str(s.get("uses", "")).startswith(f"{REPO}/")
-    ]
-    assert sorted(uses) == [
-        f"{REPO}/install-python-dependencies@{pinned}",
-        f"{REPO}/setup-uv@{pinned}",
-    ]
-
-
-def git(cwd: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True, check=True).stdout.strip()
-
-
-@pytest.mark.parametrize("folders_changed", [False, True])
-def test_the_pin_guard_fetches_a_pinned_commit_that_only_a_pull_request_ref_reaches(tmp_path, folders_changed):
-    # A squash merge leaves the pull request commit off main, and the merged
-    # branch is deleted. Only refs/pull/N/head reaches it, which a clone does not fetch.
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    git(origin, "init", "-q", "-b", "main")
-    git(origin, "config", "user.email", "t@t")
-    git(origin, "config", "user.name", "t")
-    (origin / "setup-uv").mkdir()
-    (origin / "setup-uv" / "a").write_text("1\n")
-    git(origin, "add", "-A")
-    git(origin, "commit", "-qm", "base")
-    git(origin, "checkout", "-qb", "branch")
-    (origin / "setup-uv" / "a").write_text("2\n")
-    git(origin, "commit", "-qam", "pull request commit")
-    pinned = git(origin, "rev-parse", "HEAD")
-    git(origin, "update-ref", "refs/pull/1/head", pinned)
-    git(origin, "checkout", "-q", "main")
-    (origin / "setup-uv" / "a").write_text("3\n" if folders_changed else "2\n")
-    git(origin, "commit", "-qam", "squash merge")
-    git(origin, "branch", "-qD", "branch")
-    clone = tmp_path / "clone"
-    git(tmp_path, "clone", "-q", f"file://{origin}", str(clone))
-    assert subprocess.run(["git", "-C", str(clone), "cat-file", "-e", pinned], capture_output=True).returncode != 0
-
-    step = run_step("remote-reference-pin-guard", "The pinned SHA matches")
-    r = run_bash(step["run"], cwd=clone, env={"PINNED": pinned})
-    if folders_changed:
-        assert r.returncode == 1
-        assert f"::error::Re-pin the remote-reference jobs to HEAD: setup-uv or install-python-dependencies changed since {pinned}." in r.stdout
-    else:
-        assert r.returncode == 0, r.stdout + r.stderr
 
 
 def test_self_test_workflow_has_a_per_ref_concurrency_group():
