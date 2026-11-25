@@ -218,7 +218,7 @@ jobs:
       # as root; the launcher's isolation check fails the job before the
       # agent if that boundary does not hold.
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c  # v2.23.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -322,7 +322,7 @@ jobs:
       # checkout and its namespace do.
       - name: Analyze CI performance
         id: analysis
-        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
+        uses: anthropics/claude-code-action@e5812cd75691ca7bbfc57c0ecf4441db3a1ab7dd # v1.0.281
         with:
           anthropic_federation_rule_id: fdrl_011HrZrxamS56HuRWRMbqYBH
           anthropic_organization_id: be5d0086-bc43-45d2-9184-20ecdd647aa7
